@@ -69,8 +69,8 @@
 // The name ReShade shows in its Add-ons list. The log lines keep their "[Uplift]" prefix (addon/log_bridge.cpp).
 extern "C" __declspec(dllexport) const char* NAME = "GITC Uplift";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Runs NVIDIA DLSS Neural Rendering (DLSS-NR) inside the game's frame after DLSS, or on the presented image, and "
-    "returns all of its VRAM when switched off.";
+    "A virtual photography focused version of the DLSS 5 mod: NVIDIA DLSS Neural Rendering (DLSS-NR) with greater "
+    "flexibility, ease of use, stability and hassle-free compatibility across APIs.";
 
 namespace {
 

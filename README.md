@@ -1,7 +1,8 @@
 # GITC Uplift
 
-GITC Uplift brings NVIDIA's DLSS Neural Rendering (DLSS-NR) to your games through ReShade: DirectX 9, 10, 11 and 12, Vulkan and
-OpenGL, 64-bit and 32-bit. Drop it in, switch it on, and it works out the rest. Switch it off and it gives its video memory back.
+GITC Uplift is a virtual photography focused version of the DLSS 5 mod: NVIDIA's DLSS Neural Rendering (DLSS-NR) through ReShade,
+with greater flexibility, ease of use, stability and hassle-free compatibility across APIs (DirectX 9, 10, 11 and 12, Vulkan and
+OpenGL, 64-bit and 32-bit). Drop it in, switch it on, and it works out the rest. Switch it off and it gives its video memory back.
 
 GITC Uplift is not affiliated with NVIDIA or with ReShade.
 
