@@ -1,0 +1,14 @@
+# Build output and fetched dependencies (tools\fetch_deps.cmd)
+/build/
+/third_party/_deps/
+
+# Visual Studio
+.vs/
+*.user
+
+# Binaries: never commit NVIDIA's runtime or built add-ons
+/nvngx_dlssnr.dll
+/*.addon64
+/*.addon32
+/*.exe
+/*.zip

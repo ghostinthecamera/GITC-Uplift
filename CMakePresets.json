@@ -1,0 +1,22 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "cl", "CMAKE_C_COMPILER": "cl" }
+    },
+    { "name": "debug", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "UPLIFT_ARCH": "x64" } },
+    { "name": "release", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "UPLIFT_ARCH": "x64" } },
+    { "name": "debug-x86", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "UPLIFT_ARCH": "x86" } },
+    { "name": "release-x86", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "UPLIFT_ARCH": "x86" } }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "debug-x86", "configurePreset": "debug-x86" },
+    { "name": "release-x86", "configurePreset": "release-x86" }
+  ]
+}
