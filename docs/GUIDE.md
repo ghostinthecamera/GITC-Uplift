@@ -1,4 +1,4 @@
-# GITC Uplift: a picture guide
+# GITC Uplift: a guide
 
 Every part of the GITC Uplift tab, top to bottom, and what it does.
 
