@@ -14,11 +14,12 @@ GITC Uplift is not affiliated with NVIDIA or with ReShade.
   - 6.0 or newer runs NR on the presented image;
   - 6.1 or newer for NR after DLSS;
   - 6.8 for Vulkan and OpenGL games.
-- NVIDIA's DLSS-NR runtime, `nvngx_dlssnr.dll` version 310.8, which **you supply**. Uplift never includes NVIDIA files.
-- NVIDIA's DLSS-NR runtime only enables itself on GeForce RTX 50-series GPUs. On other GPUs it refuses to start, and Uplift's status card
-  shows NVIDIA's error.
+- NVIDIA's DLSS-NR runtime, `nvngx_dlssnr.dll` version 310.8, which **you supply**. Uplift never includes NVIDIA files. You need a version appropriate for your video card as the default runtime only works on 50 series cards.
+
+
+## Other DLSS5 Addons
 - **Use GITC Uplift instead of other DLSS-NR add-ons**, for example RenoDX's DLSS and DLSS5 add-ons (`renodx-dlss*.addon64`): remove them
-  from ReShade's add-on folder. If one is still loaded, Uplift stands down and its card says so.
+  from ReShade's add-on folder. If one is still loaded, Uplift will not work
 
 ## Before you start
 
@@ -29,9 +30,24 @@ GITC Uplift is not affiliated with NVIDIA or with ReShade.
 
 ## Install
 
-Download the latest release from [GitHub Releases](https://github.com/ghostinthecamera/GITC-Uplift/releases). A release contains
-`gitc-uplift.addon64`, `gitc-uplift.addon32`, `gitc-uplift-helper64.exe`, `Uplift.fx` and `UpliftMask.fx`. Which files a game needs
-depends on its API and bitness:
+Installation is really simple:
+1) Download the latest release from [GitHub Releases](https://github.com/ghostinthecamera/GITC-Uplift/releases)
+2) Copy all the files in the 'addons' folder to where your reshade addons are.
+3) Copy the nvngx_dlssnr.dll file to the same place as step 2! The dll and the addons must be in the same folder.
+4) Copy the FX shader files to your reshade Shaders folder.
+
+Done! 
+
+- If you used an earlier Uplift build, delete its `uplift.addon64`, `uplift.addon32` and `uplift-helper64.exe` first, so that two copies
+  do not load.
+- ReShade's add-on folder is the game's executable folder unless `AddonPath` in the game's `ReShade.ini` names another one.
+- `nvngx_dlssnr.dll` can also sit next to the game's executable, or anywhere you point **Runtime path** (Advanced) at.
+- The add-on and `gitc-uplift-helper64.exe` must come from the same release.
+
+## If you know what you are doing 
+
+A release contains `gitc-uplift.addon64`, `gitc-uplift.addon32`, `gitc-uplift-helper64.exe`, `Uplift.fx` and `UpliftMask.fx`. Which files a game needs
+depends on its API and bitness so you do not need all files all the time, should you want to be precise for whatever reason.
 
 | Game | Files in ReShade's add-on folder |
 |---|---|
@@ -39,11 +55,6 @@ depends on its API and bitness:
 | 64-bit Direct3D 9 | `gitc-uplift.addon64`, `gitc-uplift-helper64.exe` and `nvngx_dlssnr.dll` |
 | Any 32-bit game | `gitc-uplift.addon32`, `gitc-uplift-helper64.exe` and the (64-bit) `nvngx_dlssnr.dll` |
 
-- If you used an earlier Uplift build, delete its `uplift.addon64`, `uplift.addon32` and `uplift-helper64.exe` first, so that two copies
-  do not load.
-- ReShade's add-on folder is the game's executable folder unless `AddonPath` in the game's `ReShade.ini` names another one.
-- `nvngx_dlssnr.dll` can also sit next to the game's executable, or anywhere you point **Runtime path** (Advanced) at.
-- The add-on and `gitc-uplift-helper64.exe` must come from the same release.
 
 ### 64-bit Direct3D 10, 11 and 12 games
 
