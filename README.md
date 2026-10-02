@@ -46,7 +46,7 @@ Done!
 That's it. The card at the top always tells you what NR is doing right now. It's green when NR is working; when it isn't, the card
 says why and what to do.
 
-A picture guide to every setting: [docs/GUIDE.md](docs/GUIDE.md)
+A picture guide to every setting: [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide)
 
 **Setup** has three choices:
 
