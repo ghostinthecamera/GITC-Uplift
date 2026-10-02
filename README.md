@@ -46,6 +46,8 @@ Done!
 That's it. The card at the top always tells you what NR is doing right now. It's green when NR is working; when it isn't, the card
 says why and what to do.
 
+A picture guide to every setting: [docs/GUIDE.md](docs/GUIDE.md)
+
 **Setup** has three choices:
 
 - **NR stage:** **Present** works in every game and processes the finished image. **After DLSS** (in games that use DLSS) runs inside
