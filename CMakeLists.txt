@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(uplift VERSION 1.0.0 LANGUAGES C CXX)
+project(uplift VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -139,12 +139,14 @@ add_library(uplift_testing STATIC
   src/testing/d3d9_util.cpp
   src/testing/d3d10_util.cpp
   src/testing/d3d11_util.cpp
+  src/testing/d3d11_bindings.cpp
   src/testing/png.cpp
   src/testing/scenario_rig.cpp
   src/testing/color_images.cpp
   src/testing/identity_host.cpp
   src/testing/vk_identity_host.cpp
-  src/testing/dlss_host.cpp)
+  src/testing/dlss_host.cpp
+  src/testing/dlss_host11.cpp)  # Plan 18: the Direct3D 11 DLSS backends' keys and the fake core's (NVIDIA's is ngx_real_backend11.cpp, test executables only)
 target_link_libraries(uplift_testing PUBLIC uplift_nr uplift_color windowscodecs ole32 d3dcompiler advapi32 d3d9 d3d10_1 d3d11 dxgi)
 target_compile_definitions(uplift_testing PUBLIC UPLIFT_SOURCE_DIR=L"${CMAKE_SOURCE_DIR}")
 endif()
@@ -236,7 +238,8 @@ add_library(uplift_sources STATIC
   src/sources/after_dlss_source.cpp
   src/sources/pre_sr_source.cpp
   src/sources/vk_nr_pipeline.cpp
-  src/sources/look_plan.cpp)
+  src/sources/look_plan.cpp
+  src/sources/auto_exposure.cpp)
 target_link_libraries(uplift_sources PUBLIC uplift_color uplift_ngx_hooks uplift_state)
 
 add_library(uplift_state STATIC
@@ -261,8 +264,12 @@ add_library(uplift_addon_core STATIC
   src/addon/dlss_settings.cpp
   src/addon/reshade_version.cpp
   src/addon/ngx_bridge.cpp
+  src/addon/d3d11_identity.cpp
+  src/addon/dlss_summary.cpp
   src/addon/removal_latch.cpp
-  src/addon/launchpad_link.cpp)
+  src/addon/launchpad_link.cpp
+  src/addon/nr_heartbeat.cpp
+  src/addon/dred.cpp)
 target_link_libraries(uplift_addon_core PUBLIC uplift_sources uplift_ui uplift_ngx_hooks uplift_state bcrypt)
 # Plan 11: the Vulkan side's log and pending marker (nr::Log, addon::WriteLatchMarker) come from here in the 64-bit half.
 target_link_libraries(uplift_vk PUBLIC uplift_addon_core)
@@ -277,12 +284,14 @@ target_sources(uplift_vk PRIVATE src/vk/nr_functions.cpp src/vk/nr_timeline.cpp 
 # Plan 10: KeyedRelay (the D3D10 bridge's relay and keyed-mutex hand-offs, which the 32-bit D3D10 client shares).
 # Plan 11: VkBridge (a Vulkan game device's NR, in-process), on src/vk/.
 # Plan 12: GlBridge (an OpenGL context's NR, in-process), on src/gl/.
+# Plan 18: the Direct3D 11 bridge's mid-frame DLSS hand-off and the Present ring (d3d11_dlss.cpp).
 add_library(uplift_bridge STATIC
   src/bridge/bridge_sequence.cpp
   src/bridge/d3d12_side.cpp
   src/bridge/record_nr.cpp
   src/bridge/keyed_relay.cpp
   src/bridge/d3d11_bridge.cpp
+  src/bridge/d3d11_dlss.cpp
   src/bridge/d3d10_bridge.cpp
   src/bridge/vk_bridge.cpp
   src/bridge/gl_bridge.cpp)

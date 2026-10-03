@@ -64,6 +64,11 @@ class D3D10Client {
   [[nodiscard]] uint64_t SharedBytes() const { return color_.bytes + mask_.bytes + motion_.bytes + d3d11_->SharedBytes(); }
   [[nodiscard]] std::string Line() const;
   [[nodiscard]] std::string_view Latch() const { return d3d11_->Latch(); }  // non-empty once the transport stopped for the session
+  // Plan 17: as D3D11Client::ClearLatch, the relay's latch too.
+  void ClearLatch() {
+    d3d11_->ClearLatch();
+    relay_->ClearLatch();
+  }
 
  private:
   D3D10Client() = default;

@@ -79,7 +79,7 @@ KeyedRelay::~KeyedRelay() {
 }
 
 std::string KeyedRelay::Sentence(std::string_view what) {
-  return std::format("The Direct3D 10 bridge stopped: {}. Restart the game to use NR again", what);
+  return std::format("The Direct3D 10 bridge stopped: {}", what);
 }
 
 void KeyedRelay::Fail(std::string_view what) {

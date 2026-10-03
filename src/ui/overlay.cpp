@@ -95,10 +95,11 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                             && descriptor.key != "ShapeResult" && !settings->look.enabled);
   const bool stabilize_off = ((descriptor.key == "StabilizeMs" || descriptor.key == "StabilizeDetail")
                               && settings->look.stabilize == look::StabilizeMode::OFF);
+  // Plan 17: the Adaptation rows matter wherever the meter can be used: Metered, and Auto (the default), which meters when the game's exposure is missing or off.
   const bool not_metered = ((descriptor.key == "ExposureAdapt" || descriptor.key == "AdaptBrighterStops"
                              || descriptor.key == "AdaptDarkerStops")
-                            && (settings->input_exposure == color::InputExposure::GAME
-                                || settings->input_exposure == color::InputExposure::MANUAL));
+                            && settings->input_exposure != color::InputExposure::AUTO
+                            && settings->input_exposure != color::InputExposure::METERED);
   const bool resolution_scale_hidden =
       (descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM);
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && settings->resolution_mode == ResolutionMode::FULL);
@@ -639,7 +640,8 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     return section_changed;
   };
   // A section title's Reset button (L1, P1, F1), shown only once the section has changed. All its
-  // call sites are here in DrawOverlay too, so it is also a local lambda.
+  // call sites are here in DrawOverlay too, so it is also a local lambda. Plan 17: on a CollapsingHeader's
+  // line the header must carry HEADER_FLAGS, or it keeps the hover and the click (Reset opened or closed the section).
   const auto section_reset = [state](const char* id, bool section_has_changed) {
     // Plan 6 (D6): with Compare = Built-in, every row already reads read-only at its built-in value; a hidden
     // section reset must not rewrite Mine's own settings while they are not even shown.
@@ -703,9 +705,11 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
 
   // ui-review.md §2 finding 4: Result and Limits merge under one header, opened at start only for a
   // user who already shapes (SetNextItemOpen(look.enabled, ImGuiCond_Once) keeps the "stay usable" intent).
+  // Plan 17: the headers below let their title's Reset button (drawn on the same line) take the hover and the click.
+  constexpr ImGuiTreeNodeFlags HEADER_FLAGS = ImGuiTreeNodeFlags_AllowOverlap;
   const bool shaping_changed = SectionChanged(*settings, SettingSection::RESULT) || SectionChanged(*settings, SettingSection::LIMITS);
   ImGui::SetNextItemOpen(settings->look.enabled, ImGuiCond_Once);
-  if (ImGui::CollapsingHeader(shaping_changed ? "Result shaping (changed)###shaping" : "Result shaping###shaping")) {
+  if (ImGui::CollapsingHeader(shaping_changed ? "Result shaping (changed)###shaping" : "Result shaping###shaping", HEADER_FLAGS)) {
     if (section_reset("shaping", shaping_changed)) {
       ResetSection(settings, SettingSection::RESULT);
       ResetSection(settings, SettingSection::LIMITS);
@@ -720,7 +724,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
 
   // ui-review.md §2 finding 5: Mask and UI correction, which handle the HUD, get their own section.
   const bool mask_changed = SectionChanged(*settings, SettingSection::MASK);
-  if (ImGui::CollapsingHeader(mask_changed ? "Mask and HUD (changed)###mask" : "Mask and HUD###mask")) {
+  if (ImGui::CollapsingHeader(mask_changed ? "Mask and HUD (changed)###mask" : "Mask and HUD###mask", HEADER_FLAGS)) {
     if (section_reset("mask", mask_changed)) {
       ResetSection(settings, SettingSection::MASK);
       changed = true;
@@ -730,13 +734,13 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
 
   const bool fixes_changed = SectionChanged(*settings, SettingSection::FIXES_COLOR)
                              || SectionChanged(*settings, SettingSection::FIXES_GUIDES);
-  if (ImGui::CollapsingHeader(fixes_changed ? "Fixes (changed)###fixes" : "Fixes###fixes")) {
-    ImGui::TextDisabled("Only change these if you know what you are doing.");
-    if (section_reset("fixes", fixes_changed)) {
+  if (ImGui::CollapsingHeader(fixes_changed ? "Fixes (changed)###fixes" : "Fixes###fixes", HEADER_FLAGS)) {
+    if (section_reset("fixes", fixes_changed)) {  // Plan 17: on the title's line, as Result shaping's and Mask and HUD's
       ResetSection(settings, SettingSection::FIXES_COLOR);
       ResetSection(settings, SettingSection::FIXES_GUIDES);
       changed = true;
     }
+    ImGui::TextDisabled("Only change these if you know what you are doing.");
     ImGui::SeparatorText("Colour");
     changed |= draw_rows(SettingSection::FIXES_COLOR);
     ImGui::SeparatorText("Motion and game state");
@@ -752,7 +756,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   if (ImGui::CollapsingHeader("Details")) {
     ImGui::TextUnformatted(view.status_line.c_str());
     // Plan 14: the engine's own lines, which the rows no longer show under themselves.
-    for (const std::string* line : {&view.placement_line, &view.motion_line, &view.work_line}) {
+    for (const std::string* line : {&view.placement_line, &view.motion_line, &view.work_line, &view.exposure_line}) {
       if (!line->empty()) {
         ImGui::TextUnformatted(line->c_str());
       }

@@ -111,7 +111,7 @@ void GlBridge::Retire(gl::GameHost& host, Shared* shared) {
 
 void GlBridge::LatchGl(std::string_view failure) {
   if (!latch_.empty()) return;
-  std::string reason = std::format("The OpenGL bridge stopped: {}. Restart the game to use NR again", failure);
+  std::string reason = std::format("The OpenGL bridge stopped: {}", failure);
   nr::Log(nr::LogLevel::ERR, reason);
   // After a failed wait the private queue would otherwise wait on `to12` until destroy_device.
   Stop(std::move(reason));
@@ -131,7 +131,7 @@ BridgeFrame GlBridge::BeginFrame(gl::GameHost& host, const gl::ImageInfo& back_b
     // Both directions count as progress, so a frame shows two steps: the game's work up to the copy-in, then NR's.
     const uint64_t completed = to11_->GetCompletedValue();
     if (const std::optional<std::string_view> stopped = watchdog_.Check(completed, completed + to12_->GetCompletedValue(), now)) {
-      std::string reason = std::format("The OpenGL bridge stopped: {}. Restart the game to use NR again", *stopped);
+      std::string reason = std::format("The OpenGL bridge stopped: {}", *stopped);
       nr::Log(nr::LogLevel::ERR, reason);
       Stop(std::move(reason));
     }
@@ -452,6 +452,15 @@ void GlBridge::Stop(std::string reason) {
   if (to12_ && to12_->GetCompletedValue() < waited12_) {
     to12_->Signal(waited12_);
   }
+}
+
+void GlBridge::ReleaseGl(gl::GameHost& host) {
+  Retire(host, &color_);
+  Retire(host, &mask_);
+  Retire(host, &motion_);
+  mask_fresh_ = false;
+  interop_.FlushPending(host);
+  ReleaseSemaphores();
 }
 
 void GlBridge::ForgetGl() {

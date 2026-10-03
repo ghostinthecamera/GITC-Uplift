@@ -651,13 +651,16 @@ bool VkColorPipeline::RecordMeter(VkCommandBuffer buffer, uint32_t slot, const V
       Bits(pass.brighter_rate),
       Bits(pass.darker_rate),
       Bits(pass.frame_seconds),
-      0u,
-      0u,
-      0u,
+      (pass.probe ? 1u : 0u),
+      (pass.probe && pass.game_exposure.view != VK_NULL_HANDLE ? 1u : 0u),
+      Bits(pass.game_exposure_factor),
       0u,
   };
   Bindings bindings;
   bindings.sampled[0] = (in_place ? VkSampledView{} : VkSampledView{.view = pass.source, .layout = pass.source_layout});
+  if (pass.probe) {
+    bindings.sampled[2] = pass.game_exposure;  // Plan 17: t2, as the encode binds it; a null view takes the placeholder, which the shader never reads
+  }
   bindings.storage = {pass.state, VK_NULL_HANDLE, (in_place ? pass.source : VK_NULL_HANDLE)};
   Dispatch(buffer, pipeline, slot, METER_PASS, constants, bindings, 1u, 1u);  // one group of 256 threads
   return true;

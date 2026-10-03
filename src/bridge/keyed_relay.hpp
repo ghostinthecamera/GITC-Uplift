@@ -86,7 +86,8 @@ class KeyedRelay {
   void Stop(std::string reason);
   [[nodiscard]] bool Stopped() const { return !latch_.empty(); }
   [[nodiscard]] std::string_view Reason() const { return latch_; }  // `what` of the Fail, or the owner's reason
-  // "The Direct3D 10 bridge stopped: {what}. Restart the game to use NR again": the owners' latch text and log line.
+  void ClearLatch() { latch_.clear(); }  // Plan 17: the 32-bit D3D10 client's Retry now after the helper stopped
+  // "The Direct3D 10 bridge stopped: {what}": the owners' latch text and log line (Plan 17: the card offers Retry now, so no "restart the game").
   [[nodiscard]] static std::string Sentence(std::string_view what);
 
  private:

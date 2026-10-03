@@ -72,6 +72,7 @@ class D3D12QueueFences final : public QueueFences {
 std::unique_ptr<Timeline> Timeline::CreateD3D12(ID3D12Device* device) {
   Microsoft::WRL::ComPtr<ID3D12Fence> fence;
   if (device == nullptr || FAILED(device->CreateFence(0u, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return nullptr;
+  fence->SetName(L"Uplift frame fence");  // Plan 17: DRED names
   HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (event == nullptr) return nullptr;
   ID3D12Fence* raw = fence.Get();

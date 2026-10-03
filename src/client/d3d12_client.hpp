@@ -90,6 +90,8 @@ class D3D12Client {
   void DestroyDevice(bool wait = true);
   [[nodiscard]] std::string Line() const;
   [[nodiscard]] std::string_view Latch() const { return latch_; }  // non-empty once the transport stopped for the session
+  // Plan 17: Retry now after the helper stopped (the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
+  void ClearLatch() { latch_.clear(); }
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
   // What this side still keeps alive of the helper's textures: the opened colour, mask and motion, and the ones on the retire lists that no fence has released.
   // Zero once NR is off and the retire fence has passed (the smoke checks it).

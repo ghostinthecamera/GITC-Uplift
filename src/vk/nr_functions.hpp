@@ -35,6 +35,7 @@ namespace uplift::vk {
   X(vkCmdBindPipeline)             \
   X(vkCmdDispatch)                 \
   X(vkCmdPipelineBarrier)          \
+  X(vkCmdCopyImageToBuffer)        \
   X(vkCreateEvent)                 \
   X(vkDestroyEvent)                \
   X(vkCmdSetEvent)                 \

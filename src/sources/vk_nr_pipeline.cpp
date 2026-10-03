@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstring>
 #include <string_view>
 #include <utility>
 
@@ -16,7 +18,10 @@ static_assert(color::VkColorPipeline::RESOLVE_PASSES == LATER_PASSES, "the colou
 
 constexpr uint64_t MODEL_BYTES_PER_PIXEL = 8u;   // RGBA16F
 constexpr uint64_t MOTION_BYTES_PER_PIXEL = 4u;  // RG16F
-constexpr uint64_t STATE_BYTES = 16u;            // a 1x1 RGBA32F state image
+constexpr uint64_t STATE_BYTES = 16u;            // a 1x1 RGBA32F state image (the stabiliser's scene cut)
+// Plan 17: the meter's state is 2x1 (the second texel is Auto's check), one 256 B slot of the readback ring each.
+constexpr uint32_t EXPOSURE_STATE_WIDTH = 2u;
+constexpr VkDeviceSize CHECK_STRIDE = 256u;
 // A and B are NR's ping-pong images (colour in, output out) and the identity smokes' copies read and write them: storage, sampled, transfer. Before upscaling's
 // private colour is the same (its smoke reads it back), and so is the change field (the look smoke reads it).
 constexpr VkImageUsageFlags MODEL_USAGE =
@@ -24,8 +29,8 @@ constexpr VkImageUsageFlags MODEL_USAGE =
 constexpr VkImageUsageFlags MOTION_USAGE = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 // Plan 14: the look's images are written as storage images and read as sampled ones; the scene-cut state only as a storage image.
 constexpr VkImageUsageFlags LOOK_USAGE = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-// Plan 14: the meter's state is written as a storage image and read by the encode and the decode as a sampled one.
-constexpr VkImageUsageFlags EXPOSURE_USAGE = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+// Plan 14: the meter's state is written as a storage image and read by the encode and the decode as a sampled one. Plan 17: and copied out for Auto's check.
+constexpr VkImageUsageFlags EXPOSURE_USAGE = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 // Plan 14: the mask copy is a copy's destination (ReShade's command list) and the decode samples it.
 constexpr VkImageUsageFlags MASK_USAGE = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 // A global dependency: whatever was written is visible to whatever reads or writes next.
@@ -64,6 +69,16 @@ WorkLayout Resolve(const WorkLayout& layout, nr::Size output) {
   return {.image = image, .canvas = (layout.canvas.Empty() ? image : layout.canvas), .upsampling = layout.upsampling};
 }
 
+// Plan 17: the readback ring's buffer and memory (either may be null). Device idle for them, or the GPU past their last copy.
+void DestroyCheckBuffer(const vk::NrFunctions& functions, VkDevice device, VkBuffer buffer, VkDeviceMemory memory) {
+  if (buffer != VK_NULL_HANDLE) {
+    functions.vkDestroyBuffer(device, buffer, nullptr);
+  }
+  if (memory != VK_NULL_HANDLE) {
+    functions.vkFreeMemory(device, memory, nullptr);  // unmaps it
+  }
+}
+
 // Session::Evaluate wrote a fresh message for exactly these reasons; "resizing" and the rest leave it stale, so ContextMessage must not trust it there.
 bool SessionWroteMessage(std::string_view reason) {
   return reason == "frame too small" || reason == "budget" || reason == "create failed" || reason == "evaluate failed";
@@ -87,6 +102,7 @@ VkNrPipeline::~VkNrPipeline() {
   for (RetiredImage& retired : reshade_retired_) {
     vk::DestroyNrImage(functions_, device_, &retired.image);
   }
+  DestroyCheckBuffer(functions_, device_, check_.buffer, check_.memory);
 }
 
 bool VkNrPipeline::Initialize(std::string* error) {
@@ -184,6 +200,76 @@ void VkNrPipeline::RetireExposure() {
     }
   }
   exposure_ = {};
+  RetireExposureCheck();
+}
+
+void VkNrPipeline::RetireExposureCheck() {
+  if (check_.buffer != VK_NULL_HANDLE) {
+    // The samples still in flight are dropped; the ring goes once the GPU has passed the newest copy it has not finished.
+    std::optional<nr::Mark> in_flight;
+    for (uint32_t step = 1u; step <= CHECK_SLOTS && !in_flight; ++step) {
+      const uint32_t index = (check_.next + CHECK_SLOTS - step) % CHECK_SLOTS;  // the newest first
+      if (check_.pending[index] && !timeline_.IsComplete(check_.marks[index])) {
+        in_flight = check_.marks[index];
+      }
+    }
+    auto destroy = [functions = functions_, device = device_, buffer = check_.buffer, memory = check_.memory] { DestroyCheckBuffer(functions, device, buffer, memory); };
+    if (in_flight) {
+      timeline_.ReleaseAfter(*in_flight, std::move(destroy));
+    } else {
+      destroy();
+    }
+  }
+  check_ = {};
+}
+
+bool VkNrPipeline::EnsureExposureCheck() {
+  if (check_.buffer != VK_NULL_HANDLE) return true;
+  const VkBufferCreateInfo create = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = CHECK_SLOTS * CHECK_STRIDE,
+      .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  ExposureCheck made;
+  bool worked = (functions_.vkCreateBuffer(device_, &create, nullptr, &made.buffer) == VK_SUCCESS);
+  if (worked) {
+    VkMemoryRequirements requirements = {};
+    functions_.vkGetBufferMemoryRequirements(device_, made.buffer, &requirements);
+    uint32_t type = vk::FindMemoryType(memory_, requirements.memoryTypeBits,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (type == UINT32_MAX) {
+      type = vk::FindMemoryType(memory_, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    }
+    const VkMemoryAllocateInfo allocate = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = requirements.size, .memoryTypeIndex = type};
+    void* mapped = nullptr;
+    worked = (type != UINT32_MAX && functions_.vkAllocateMemory(device_, &allocate, nullptr, &made.memory) == VK_SUCCESS
+              && functions_.vkBindBufferMemory(device_, made.buffer, made.memory, 0u) == VK_SUCCESS
+              && functions_.vkMapMemory(device_, made.memory, 0u, VK_WHOLE_SIZE, 0u, &mapped) == VK_SUCCESS);
+    made.mapped = static_cast<const std::byte*>(mapped);
+  }
+  if (!worked) {
+    DestroyCheckBuffer(functions_, device_, made.buffer, made.memory);  // never used by the GPU
+    return false;
+  }
+  check_ = made;
+  return true;
+}
+
+void VkNrPipeline::PollExposureChecks() {
+  if (check_.buffer == VK_NULL_HANDLE) return;
+  const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  for (uint32_t step = 0u; step < CHECK_SLOTS; ++step) {
+    const uint32_t index = (check_.next + step) % CHECK_SLOTS;  // the oldest first
+    if (!check_.pending[index] || !timeline_.IsComplete(check_.marks[index])) continue;
+    check_.pending[index] = false;
+    std::array<float, 8> texels = {};  // (2^E, E, the anchor, set), (the game's texel, its factor, the game's exposure, the meter's target)
+    std::memcpy(texels.data(), check_.mapped + index * CHECK_STRIDE, sizeof(texels));
+    const ExposureSample sample = {.texture_value = texels[4], .factor = texels[5], .game = texels[6], .metered_stops = texels[1], .target_stops = texels[7]};
+    if (auto_exposure_.Observe(sample, seconds)) {
+      nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, auto_exposure_.StopsOff()));
+    }
+  }
 }
 
 void VkNrPipeline::ReleaseIntermediates() {
@@ -347,48 +433,89 @@ color::VkSampledView VkNrPipeline::GameExposureView(const NVSDK_NGX_Resource_VK*
 }
 
 VkNrPipeline::ExposureChoice VkNrPipeline::ChooseExposure(color::Encoding encoding, const NVSDK_NGX_Resource_VK* game_texture, float game_factor) {
+  PollExposureChecks();
   const bool game_exposure = (game_texture != nullptr || game_factor != 1.f);
+  // v2 design §3.14: only relative scene-linear images are metered, and the meter needs the look's storage formats (its state is RGBA32F).
+  const bool can_meter = (color::Meterable(encoding) && look_storage_);
+  const bool automatic = (config_.fixes.input_exposure == color::InputExposure::AUTO);
   bool use_game = false;
   bool metered = false;
+  bool probe = false;
   switch (config_.fixes.input_exposure) {
     case color::InputExposure::AUTO:
-      use_game = game_exposure;
-      metered = !game_exposure;
+      // Plan 17: Direct3D 12's rule. The game's exposure while it agrees with the meter (which runs beside it), the meter once it has not for a sustained
+      // second, the meter without one, and the game's where the meter cannot run.
+      if (!game_exposure) {
+        metered = true;
+      } else if (can_meter && auto_exposure_.Latched()) {
+        metered = true;
+      } else {
+        use_game = true;
+        probe = can_meter;
+      }
       break;
     case color::InputExposure::GAME:    use_game = true; break;
     case color::InputExposure::METERED: metered = true; break;
     case color::InputExposure::MANUAL:  break;
   }
-  // v2 design §3.14: only relative scene-linear images are metered, and the meter needs the look's storage formats (its state is RGBA32F).
-  metered = (metered && color::Meterable(encoding) && look_storage_);
-  if (!metered && exposure_.state.image != VK_NULL_HANDLE) {
+  metered = (metered && can_meter);
+  if (!metered && !probe && exposure_.state.image != VK_NULL_HANDLE) {
     RetireExposure();  // InputExposure left Metered or auto-metered: the state is no longer read
   }
-  if (metered && exposure_.state.image == VK_NULL_HANDLE) {
-    if (vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R32G32B32A32_SFLOAT, 1u, 1u, EXPOSURE_USAGE, false, &exposure_.state)) {
+  if ((metered || probe) && exposure_.state.image == VK_NULL_HANDLE) {
+    if (vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R32G32B32A32_SFLOAT, EXPOSURE_STATE_WIDTH, 1u, EXPOSURE_USAGE, false, &exposure_.state)) {
       exposure_.snap = true;  // undefined until the meter's first snap
     } else {
-      LogAllocationFailure({1u, 1u});
+      LogAllocationFailure({EXPOSURE_STATE_WIDTH, 1u});
     }
   }
-  if (metered && exposure_.state.image != VK_NULL_HANDLE) {
+  const bool have_state = (exposure_.state.image != VK_NULL_HANDLE);
+  if (metered && have_state) {
+    exposure_report_ = {.use = ExposureUse::METERED,
+                        .stops_off = ((automatic && game_exposure && auto_exposure_.Latched()) ? std::optional<float>(auto_exposure_.StopsOff()) : std::nullopt)};
     return {.view = {.view = exposure_.state.view, .layout = VK_IMAGE_LAYOUT_GENERAL}, .factor = 1.f, .metered = true};
   }
-  if (use_game) return {.view = GameExposureView(game_texture), .factor = game_factor};
+  if (use_game) {
+    exposure_report_ = {.use = (game_exposure ? ExposureUse::GAME : ExposureUse::NONE)};
+    return {.view = GameExposureView(game_texture), .factor = game_factor, .probe = (probe && have_state)};
+  }
+  exposure_report_ = {};
   return {};
 }
 
-bool VkNrPipeline::RecordMeter(VkCommandBuffer buffer, uint32_t slot, color::VkMeterPass pass) {
+bool VkNrPipeline::RecordMeter(VkCommandBuffer buffer, uint32_t slot, color::VkMeterPass pass, const ExposureChoice& exposure) {
   pass.state = exposure_.state.view;
   pass.snap = (exposure_.snap || intermediates_.reset_pending);  // the first frame, a settings change, a rebuild
   pass.smooth = config_.fixes.smooth_adapt;
   pass.brighter_rate = config_.fixes.adapt_brighter;
   pass.darker_rate = config_.fixes.adapt_darker;
   pass.frame_seconds = config_.frame_seconds;
+  pass.probe = exposure.probe;
+  pass.game_exposure = (exposure.probe ? exposure.view : color::VkSampledView{});
+  pass.game_exposure_factor = (exposure.probe ? exposure.factor : 1.f);
   exposure_.last_use = slot_marks_[slot];
   if (!color_.RecordMeter(buffer, slot, pass)) return false;
-  Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);  // the encode reads the state
+  Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);  // the encode reads the state (and Auto's check copies it)
   exposure_.snap = false;
+  if (!exposure.probe) return true;
+  // Plan 17: Auto's check. The state's two texels into the next readback slot (GENERAL is a legal copy source), unless the GPU has not passed that slot's
+  // last copy yet (skipped); then the host may read it once the recording completes.
+  const uint32_t index = check_.next;
+  if (check_.pending[index] || !EnsureExposureCheck()) return true;
+  const VkBufferImageCopy copy = {
+      .bufferOffset = index * CHECK_STRIDE,
+      .bufferRowLength = 0u,
+      .bufferImageHeight = 0u,
+      .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u},
+      .imageOffset = {0, 0, 0},
+      .imageExtent = {EXPOSURE_STATE_WIDTH, 1u, 1u},
+  };
+  functions_.vkCmdCopyImageToBuffer(buffer, exposure_.state.image, VK_IMAGE_LAYOUT_GENERAL, check_.buffer, 1u, &copy);
+  const VkMemoryBarrier to_host = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0u, 1u, &to_host, 0u, nullptr, 0u, nullptr);
+  check_.marks[index] = slot_marks_[slot];
+  check_.pending[index] = true;
+  check_.next = (index + 1u) % CHECK_SLOTS;
   return true;
 }
 
@@ -603,16 +730,18 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
       .canvas = work.canvas,
       .options = options,
   };
-  // InputExposure = Metered: the meter reads the region the encode reads, in place, and the encode and the decode read its state as their exposure.
-  if (exposure.metered
-      && !RecordMeter(buffer, slot,
-                      {.source = output.ImageView,
-                       .source_format = output.Format,
-                       .region = region,
-                       .encoding = target.encoding,
-                       .primaries = (options & color::shader_options::PRIMARIES_MASK),
-                       .input_scale = input_scale})) {
-    return {.recorded = true, .reason = "encode failed", .motion_source = motion_source};
+  // InputExposure = Metered: the meter reads the region the encode reads, in place, and the encode and the decode read its state as their exposure. Plan 17:
+  // it also runs for Auto's check, where a failed dispatch only skips that sample.
+  if (exposure.metered || exposure.probe) {
+    const bool recorded = RecordMeter(buffer, slot,
+                                      {.source = output.ImageView,
+                                       .source_format = output.Format,
+                                       .region = region,
+                                       .encoding = target.encoding,
+                                       .primaries = (options & color::shader_options::PRIMARIES_MASK),
+                                       .input_scale = input_scale},
+                                      exposure);
+    if (!recorded && exposure.metered) return {.recorded = true, .reason = "encode failed", .motion_source = motion_source};
   }
   if (!color_.RecordEncode(buffer, slot, encode)) {
     return {.recorded = true, .reason = "encode failed", .motion_source = motion_source};
@@ -806,15 +935,16 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
       .canvas = canvas,
       .options = options,
   };
-  if (exposure.metered
-      && !RecordMeter(buffer, slot,
-                      {.source = game.ImageView,
-                       .source_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                       .region = region,
-                       .encoding = color.encoding,
-                       .primaries = (options & color::shader_options::PRIMARIES_MASK),
-                       .input_scale = input_scale})) {
-    return {.recorded = true, .reason = "encode failed"};
+  if (exposure.metered || exposure.probe) {
+    const bool recorded = RecordMeter(buffer, slot,
+                                      {.source = game.ImageView,
+                                       .source_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                       .region = region,
+                                       .encoding = color.encoding,
+                                       .primaries = (options & color::shader_options::PRIMARIES_MASK),
+                                       .input_scale = input_scale},
+                                      exposure);
+    if (!recorded && exposure.metered) return {.recorded = true, .reason = "encode failed"};  // Plan 17: a failed check only skips its sample
   }
   if (!color_.RecordEncode(buffer, slot, encode)) {
     return {.recorded = true, .reason = "encode failed"};

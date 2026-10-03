@@ -38,6 +38,11 @@ struct DlssFrame {
 [[nodiscard]] DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle,
                                          const FeatureRecord& record);
 
+// Plan 18 (design §2): CaptureDlssFrame for a Direct3D 11 block, whose resources NGX_D3D11_EVALUATE_DLSS_EXT sets as ID3D11Resource*: each is read as one
+// (else as a void*) and carried punned (nr/d3d11_handles.hpp), never dereferenced. Regions the block leaves unset stay at the create-time sizes; the
+// Direct3D 11 bridge resolves an empty one from the texture (bridge::ResolveRegion11).
+[[nodiscard]] DlssFrame CaptureD3D11DlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record);
+
 // Plan 13 (design §5, key decision b): a Vulkan evaluate's five resources, copied by value during the hooked call (the game's
 // NVSDK_NGX_Resource_VK pointers are valid for that call alone). A DlssFrame captured with CaptureVkDlssFrame points at these copies.
 struct VkDlssResources {

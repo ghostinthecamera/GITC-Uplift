@@ -3,11 +3,15 @@
 #include <cmath>
 
 #include "ngx_hooks/ngx_parameters.hpp"
+#include "nr/d3d11_handles.hpp"
 
 namespace uplift::ngx_hooks {
 
-DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle,
-                           const FeatureRecord& record) {
+namespace {
+
+// The capture of every API: the scalars and regions are read the same; `read` fetches the five resources, as the API's block holds them (Plan 18).
+DlssFrame CaptureWith(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record,
+                      ID3D12Resource* (*read)(const NVSDK_NGX_Parameter&, const char*)) {
   const auto one_when_unset = [&parameters](const char* key) {
     const std::optional<float> value = ReadFloat(parameters, key);
     return ((value.has_value() && *value != 0.f && std::isfinite(*value)) ? *value : 1.f);
@@ -23,11 +27,11 @@ DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NG
       .feature = record.feature,
       .snapshot = record.snapshot,
       .serial = record.serial,
-      .color = ReadResource(parameters, NVSDK_NGX_Parameter_Color),
-      .output = ReadResource(parameters, NVSDK_NGX_Parameter_Output),
-      .motion_vectors = ReadResource(parameters, NVSDK_NGX_Parameter_MotionVectors),
-      .depth = ReadResource(parameters, NVSDK_NGX_Parameter_Depth),
-      .exposure_texture = ReadResource(parameters, NVSDK_NGX_Parameter_ExposureTexture),
+      .color = read(parameters, NVSDK_NGX_Parameter_Color),
+      .output = read(parameters, NVSDK_NGX_Parameter_Output),
+      .motion_vectors = read(parameters, NVSDK_NGX_Parameter_MotionVectors),
+      .depth = read(parameters, NVSDK_NGX_Parameter_Depth),
+      .exposure_texture = read(parameters, NVSDK_NGX_Parameter_ExposureTexture),
       .jitter_x = ReadFloat(parameters, NVSDK_NGX_Parameter_Jitter_Offset_X).value_or(0.f),
       .jitter_y = ReadFloat(parameters, NVSDK_NGX_Parameter_Jitter_Offset_Y).value_or(0.f),
       .mv_scale_x = one_when_unset(NVSDK_NGX_Parameter_MV_Scale_X),
@@ -43,6 +47,18 @@ DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NG
       .output_region = {base(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X),
                         base(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y), output.width, output.height},
   };
+}
+
+}  // namespace
+
+DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record) {
+  return CaptureWith(parameters, handle, record, &ReadResource);
+}
+
+DlssFrame CaptureD3D11DlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record) {
+  // Plan 18: the ID3D11Resource type first, so a block that also answers a Direct3D 12 read never hands a wrong pointer type back.
+  return CaptureWith(parameters, handle, record,
+                     [](const NVSDK_NGX_Parameter& block, const char* key) { return nr::AsResource(ReadD3D11Resource(block, key)); });
 }
 
 DlssFrame CaptureVkDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record,

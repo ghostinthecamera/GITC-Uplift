@@ -117,12 +117,16 @@ struct MeterPass {
   Encoding encoding = Encoding::LINEAR_BT709;
   uint32_t primaries = 0u;           // the SourcePrimaries index (Primaries; 0 = automatic)
   float input_scale = 1.f;
-  ID3D12Resource* state = nullptr;   // 1x1 RGBA32F, UNORDERED_ACCESS: (2^E, E, the last anchor, set)
+  ID3D12Resource* state = nullptr;   // 2x1 RGBA32F, UNORDERED_ACCESS: (2^E, E, the last anchor, set) at (0, 0)
   bool snap = false;
   bool smooth = true;
   float brighter_rate = 2.f;
   float darker_rate = 0.7f;
   float frame_seconds = 1.f / 60.f;
+  // Plan 17: Input exposure = Auto's check. The meter also writes the game's exposure (as the encode would read it) and its target to texel (1, 0).
+  bool probe = false;
+  ID3D12Resource* game_exposure = nullptr;  // DLSS's ExposureTexture, NON_PIXEL_SHADER_RESOURCE, or null
+  float game_exposure_factor = 1.f;
 };
 
 // Plan 5 (v2 design §3.12): the Gaussian pyramid of C and the max pyramid of ℓ_M, levels 1..K, in two atlases.

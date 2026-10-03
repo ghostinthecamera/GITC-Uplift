@@ -67,7 +67,14 @@ Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnin
       descriptor.set(settings, *value);
     }
   }
+  MigrateSettings(&settings);
   return settings;
+}
+
+void MigrateSettings(Settings* settings) {
+  if (settings->config_version < 3u && settings->input_exposure == color::InputExposure::GAME) {
+    settings->input_exposure = color::InputExposure::AUTO;
+  }
 }
 
 void SaveSettings(const Settings& settings, ConfigStore* store) {

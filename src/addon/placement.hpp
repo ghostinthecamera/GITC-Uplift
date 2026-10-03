@@ -1,9 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "addon/placement_kind.hpp"
 #include "ngx_hooks/feature_registry.hpp"
@@ -17,13 +19,72 @@ struct PlacementChoice {
   std::string reason;  // why NONE
 };
 
+// Plan 18 (design §3): a DLSS stage that cannot run on this device although DLSS runs (the Direct3D 11 bridge cannot share its image); empty: it can.
+struct StageProblems {
+  std::string_view after_dlss;
+  std::string_view before_upscaling;
+};
+
 // v2 design §3.4. `dlss_unavailable_reason` is empty when a DLSS placement can run this session.
 // `dlss_seen`: an evaluate of a main handle reached this device. Auto stays with DLSS once seen (an
 // idle game drains instead of flipping back), and DLSS forced never falls back to Present.
 // `before_upscaling`: PreUpscale is on and the main handle is DLSS-SR (v2 design §3.9); every AFTER_DLSS
 // choice below becomes BEFORE_UPSCALING instead (Ray Reconstruction keeps NR after DLSS).
-[[nodiscard]] PlacementChoice ChoosePlacement(ui::PlacementSource source, std::string_view dlss_unavailable_reason,
-                                              bool dlss_seen, bool before_upscaling = false);
+// Plan 18: `problems`: a stage with a problem is never chosen; Before upscaling falls to After DLSS, Auto to Present, and DLSS forced says the problem.
+// Plan 18 Task 12: `dlss_off`: the game switched its DLSS off on this device after DLSS ran there (DlssOffLatch: it released its last DLSS feature, or on
+// Direct3D 11 shut NGX down): Auto and DLSS forced both run at Present (a pause keeps a live feature, so it still waits). A reason that makes the DLSS
+// placements unavailable says itself first.
+[[nodiscard]] PlacementChoice ChoosePlacement(ui::PlacementSource source, std::string_view dlss_unavailable_reason, bool dlss_seen,
+                                              bool before_upscaling = false, const StageProblems& problems = {}, bool dlss_off = false);
+// Plan 18 Task 12: the DLSS-off fallback's INFO lines, one per fallback per device (fix round 1, M-6: only when a DLSS stage really fell back, never with
+// Source = Present): the off line, and the "on again" line with what `resumed` (the placement the preference returns to) runs: "DLSS is on again on this
+// device: After DLSS resumes" ("Before upscaling resumes", "NR stays at Present", or "NR stays off (why)").
+inline constexpr std::string_view DLSS_OFF_LINE = "DLSS is off on this device (the game released its DLSS): NR runs at Present";
+[[nodiscard]] std::string DlssOnAgainLine(const PlacementChoice& resumed);
+// v2 design §3.1 (plan amendment 11): DLSS counts as idle only after this long without a main evaluate, however short GraceSeconds is. With GraceSeconds = 0
+// every present would find DLSS idle, because the frame's evaluate always precedes it, and the After-DLSS placement would never run. Plan 18 Task 12 (fix
+// round 1, I-2): also how long the game's release must hold before DLSS counts as switched off. Was DeviceContext's and VkDlssContext's own constant.
+inline constexpr std::chrono::milliseconds DLSS_IDLE_MINIMUM{250};
+// Plan 18 Task 12 (fix round 1, M-2, M-5): the add-on's FrameConfig::dlss_released and SetupFacts::dlss_off: DLSS was seen on `device` and no DLSS feature of
+// `api` is live there now (FeatureRegistry::UpscalerLive): the game released it, or on Direct3D 11 shut NGX down (Uplift's NR there is on its private device,
+// so nothing waits on the game's NGX). Direct3D 12's and Vulkan's shutdowns never reach the registry: Plan 15's hold and the native Vulkan context's stopped
+// rule gate them first. The registry is not asked before DLSS was seen.
+[[nodiscard]] bool DlssReleased(const ngx_hooks::FeatureRegistry& registry, const void* device, ngx_hooks::NgxApi api, bool dlss_seen);
+// Plan 18 Task 12 (fix round 1, I-2): whether the game switched its DLSS off on a device, with hysteresis. Off once the release (`released`: DlssReleased, and
+// the context's own conditions) has held for DLSS_IDLE_MINIMUM and at least two presents in a row, so a settings change that re-creates DLSS across a
+// present, or a game that creates, evaluates and releases DLSS within each frame, is no switch-off (no flip, no log, no shares dropped). Off until the next
+// main evaluate. Pure; the add-on's lock.
+class DlssOffLatch {
+ public:
+  void OnPresent(bool released, std::chrono::steady_clock::time_point now) {
+    if (!released) {
+      released_since_.reset();
+      released_presents_ = 0u;
+      return;
+    }
+    if (!released_since_) {
+      released_since_ = now;
+    }
+    ++released_presents_;
+    if (released_presents_ >= MIN_PRESENTS && now - *released_since_ >= DLSS_IDLE_MINIMUM) {
+      off_ = true;
+    }
+  }
+  // A main evaluate: DLSS runs, so the release window starts over. True when it ended a switch-off, which only happens with `may_end` (not while Plan 15
+  // holds the device).
+  bool OnEvaluate(bool may_end) {
+    released_since_.reset();
+    released_presents_ = 0u;
+    return (may_end && std::exchange(off_, false));
+  }
+  [[nodiscard]] bool Off() const { return off_; }
+
+ private:
+  static constexpr uint32_t MIN_PRESENTS = 2u;
+  std::optional<std::chrono::steady_clock::time_point> released_since_;
+  uint32_t released_presents_ = 0u;
+  bool off_ = false;
+};
 // Plan 14 (design §1.2, batch 1 review I-1): whether Setup counts the game's DLSS as seen on this device. Only an evaluate says DLSS runs (`context_evaluated`: a
 // native Vulkan context's flag; a Direct3D 12 context's own flag reaches the host through its status). A create (`upscaler_created`) counts on Vulkan alone,
 // where the passthrough context sees no evaluate until a DLSS pick makes it watch, and the NGX create hook is the only signal.

@@ -73,6 +73,8 @@ class D3D11Client {
   [[nodiscard]] uint64_t SharedBytes() const { return kmt_bytes_; }
   [[nodiscard]] std::string Line() const;
   [[nodiscard]] std::string_view Latch() const { return latch_; }  // non-empty once the transport stopped for the session
+  // Plan 17: Retry now after the helper stopped (the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
+  void ClearLatch() { latch_.clear(); }
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
 
  private:

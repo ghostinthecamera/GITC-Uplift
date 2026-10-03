@@ -15,6 +15,8 @@ SetupView ResolveSetup(const SetupFacts& facts) {
       *option = {.why = facts.dlss_unavailable};
     } else if (!facts.dlss_seen) {
       *option = {.why = DLSS_NOT_SEEN_REASON, .temporary = true};
+    } else if (facts.dlss_off) {
+      *option = {.why = DLSS_OFF_REASON, .temporary = true};  // Plan 18 Task 12
     }
   };
 
@@ -25,6 +27,14 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   if (selectable(before) && facts.ray_reconstruction) {
     before = {.why = "The game's DLSS is Ray Reconstruction, which keeps NR after DLSS", .temporary = true};
   }
+  // Plan 18: a stage whose image the Direct3D 11 bridge cannot share is a fixed cause for that stage alone; it beats the temporary ones.
+  const auto grey_fixed = [](OptionState* option, std::string_view fixed) {
+    if (!fixed.empty() && (option->why.empty() || option->temporary)) {
+      *option = {.why = fixed};
+    }
+  };
+  grey_fixed(&at(view.stage_options, SourcePick::AFTER_DLSS), facts.after_dlss_fixed);
+  grey_fixed(&before, facts.before_upscaling_fixed);
   if (!facts.present_fixed.empty()) {
     at(view.stage_options, SourcePick::PRESENT) = {.why = facts.present_fixed};  // a fixed cause beats the temporary one: it would not clear
   } else if (facts.frame_generation_blocks_present) {
@@ -93,6 +103,8 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     match_game = {.why = "Match game needs the game's DLSS render size, which Uplift cannot read here"};
   } else if (!facts.dlss_seen) {
     match_game = {.why = DLSS_NOT_SEEN_REASON, .temporary = true};
+  } else if (facts.dlss_off) {
+    match_game = {.why = DLSS_OFF_REASON, .temporary = true};  // Plan 18 Task 12 (fix round 1, M-1): it reads DLSS's render size, which is off too
   }
   if (!facts.below_full_fixed.empty()) {
     for (size_t index = 1u; index < view.resolution_options.size(); ++index) {
@@ -140,13 +152,23 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   const bool motion_waits = (motion_falls_back
                              && (motion_wish.why == DLSS_NOT_SEEN_REASON || (selectable(motion_wish) && facts.dlss_motion_gap == MotionGap::NONE)));
   const std::string_view stage_name = (facts.preferred_stage == SourcePick::BEFORE_UPSCALING ? "Before upscaling" : "After DLSS");
-  if (stage_waits) {
+  // Plan 18 Task 12: the game switched its DLSS off: what fell back returns when it is on again.
+  const bool stage_off = (view.stage != facts.preferred_stage && facts.preferred_stage != SourcePick::PRESENT && stage_wish.why == DLSS_OFF_REASON);
+  const bool motion_off = (motion_falls_back && motion_wish.why == DLSS_OFF_REASON);
+  if (stage_off) {
+    add(motion_off ? std::format("{} and DLSS's motion vectors return when the game's DLSS is on again.", stage_name)
+                   : std::format("{} returns when the game's DLSS is on again.", stage_name));
+  } else if (stage_waits) {
     add(motion_waits ? std::format("{} and DLSS's motion vectors start when the game renders with DLSS.", stage_name)
                      : std::format("{} starts when the game renders with DLSS.", stage_name));
   } else if (view.stage != facts.preferred_stage && stage_wish.temporary && facts.preferred_stage == SourcePick::BEFORE_UPSCALING) {
     add("Before upscaling returns when the game's DLSS is not Ray Reconstruction.");
   }
-  if (motion_waits && !stage_waits) {
+  if (motion_off) {
+    if (!stage_off) {
+      add("DLSS's motion vectors return when the game's DLSS is on again.");  // else said with the stage above
+    }
+  } else if (motion_waits && !stage_waits) {
     add("DLSS's motion vectors start when the game renders with DLSS.");
   } else if (motion_falls_back && (facts.dlss_motion_gap == MotionGap::GAME_PASSED_NONE || (motion_wish.temporary && !motion_waits))) {
     add("the game passes DLSS no motion vectors.");
@@ -170,6 +192,9 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   } else if (view.resolution != facts.preferred_resolution && facts.preferred_resolution == ResolutionMode::MATCH_GAME
              && resolution_wish.why == VULKAN_MATCH_GAME_REASON) {
     add("Match game applies when NR runs at After DLSS or Before upscaling.");
+  } else if (view.resolution != facts.preferred_resolution && facts.preferred_resolution == ResolutionMode::MATCH_GAME
+             && resolution_wish.why == DLSS_OFF_REASON) {
+    add("Match game applies when the game's DLSS is on again.");  // Plan 18 Task 12 (fix round 1, M-1)
   }
   return view;
 }
@@ -352,9 +377,23 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
   }
   // Only while NR is on: a user who turned it off sees the normal off state, and the failure (remembered by the add-on) comes
   // back with Retry now when they turn it on again.
+  // Plan 17: the 2-strike rule's second stop, for a bridge's private device and the helper alike.
+  if (facts.private_stops_final) {
+    return card(CardStage::DEVICE, "NR stopped twice", PRIVATE_DEVICE_STOPPED_TWICE_REASON, {"Restart the game to use NR again."}, CardButton::NONE);
+  }
+  // Test phase (review M-3): a stop on the adapter's shared device is final at once (no new device can be made while the game runs).
+  if (facts.private_stop_unretryable && !facts.private_stopped.empty()) {
+    return card(CardStage::DEVICE, (facts.device_lost ? "The GPU device was removed" : "NR stopped"), facts.private_stopped,
+                {"Restart the game to use NR again."}, CardButton::NONE);
+  }
   if (!facts.helper_problem.empty() && facts.enabled) {
     return card(CardStage::DEVICE, "Uplift's 64-bit helper stopped", facts.helper_problem, {"Retry now starts it again."},
                 CardButton::RETRY_NOW);
+  }
+  // Plan 17: a bridge's private device stopped (the first time this session): Retry now builds a new one, as the helper's card restarts the helper.
+  if (!facts.private_stopped.empty() && facts.enabled) {
+    return card(CardStage::DEVICE, (facts.device_lost ? "The GPU device was removed" : "NR stopped"), facts.private_stopped,
+                {"Retry now starts NR again on a new device."}, CardButton::RETRY_NOW);
   }
   if (facts.device_lost) {
     return card(CardStage::DEVICE, "The GPU device was removed", facts.output_problem, {"Restart the game to use NR again."},

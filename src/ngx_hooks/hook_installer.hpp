@@ -13,17 +13,10 @@
 #include <string_view>
 #include <vector>
 
+#include "ngx_hooks/ngx_api.hpp"
 #include "nr/ngx.hpp"
 
 namespace uplift::ngx_hooks {
-
-// Plan 13 (design §5): which of the core's APIs a hooked call came through. On Vulkan the command list is a VkCommandBuffer and every
-// resource pointer an NVSDK_NGX_Resource_VK*, carried as the D3D12-typed pointers below (nr/vk_handles.hpp's pun); never dereference one
-// as a D3D12 object.
-enum class NgxApi : uint8_t {
-  D3D12,
-  VULKAN,
-};
 
 // One value the create hook changed on the game's parameter block, with the game's own value to
 // put back (0 when the game never set it: NGX's default for every key Uplift overrides).
@@ -43,7 +36,7 @@ void RestoreParameters(NVSDK_NGX_Parameter* parameters, std::span<const SavedPar
 // One hooked CreateFeature call as the observer sees it.
 struct CreateCall {
   NgxApi api = NgxApi::D3D12;
-  ID3D12GraphicsCommandList* list = nullptr;  // on Vulkan, the VkCommandBuffer
+  ID3D12GraphicsCommandList* list = nullptr;  // on Vulkan, the VkCommandBuffer; Plan 18: on Direct3D 11, the ID3D11DeviceContext
   VkDevice vk_device = VK_NULL_HANDLE;        // NVSDK_NGX_VULKAN_CreateFeature1's device; null otherwise
   NVSDK_NGX_Feature feature = NVSDK_NGX_Feature_Reserved_Unknown;
   NVSDK_NGX_Parameter* parameters = nullptr;
@@ -57,11 +50,12 @@ struct CreateCall {
 // One hooked EvaluateFeature call before the original runs (v2 design §3.9).
 struct EvaluateCall {
   NgxApi api = NgxApi::D3D12;
-  ID3D12GraphicsCommandList* list = nullptr;  // on Vulkan, the VkCommandBuffer
+  ID3D12GraphicsCommandList* list = nullptr;  // on Vulkan, the VkCommandBuffer; Plan 18: on Direct3D 11, the ID3D11DeviceContext
   const NVSDK_NGX_Handle* handle = nullptr;
   const NVSDK_NGX_Parameter* parameters = nullptr;
   // Set by BeforeEvaluate: what DLSS reads as Color for this call only. On Vulkan an NVSDK_NGX_Resource_VK* (nr::AsResource), which the
-  // detour writes into the block as a void*, as the game sets its own.
+  // detour writes into the block as a void*, as the game sets its own. Plan 18: on Direct3D 11 an ID3D11Resource* (nr::AsResource), which the
+  // detour writes into the block with the ID3D11Resource* overload, as NGX_D3D11_EVALUATE_DLSS_EXT does, and puts back after the original.
   ID3D12Resource* color = nullptr;
 };
 
@@ -93,6 +87,8 @@ class NgxObserver {
   // `device`, a VkDevice), with no lock held by the detour. `caller` is the call's return address (the game, an interposer, or a runtime Uplift
   // loaded itself). Every NGX call Uplift still has to make for `device` must happen here: after the original the core no longer serves it.
   // Plan 15: NVSDK_NGX_D3D12_Shutdown1 too (`api` D3D12, `device` the ID3D12Device the caller passed: ReShade's proxy, or the device itself).
+  // Plan 18: NVSDK_NGX_D3D11_Shutdown1 (`api` D3D11, `device` the ID3D11Device the caller passed), and the core's device-less NVSDK_NGX_D3D11_Shutdown
+  // (`device` null: every Direct3D 11 device).
   virtual void BeforeCoreShutdown(NgxApi /*api*/, void* /*device*/, const void* /*caller*/) {}
 };
 
@@ -107,7 +103,13 @@ struct HookedModule {
   bool vulkan = false;      // Plan 13: the Vulkan entry points are hooked
   bool vulkan_shutdown = false;  // batch 3 review I-1: NVSDK_NGX_VULKAN_Shutdown1 is hooked (Uplift releases NR on a device before it)
   bool d3d12_shutdown = false;   // Plan 15: NVSDK_NGX_D3D12_Shutdown1 is hooked (the same, on the game's Direct3D 12 device)
+  bool d3d11 = false;               // Plan 18: the Direct3D 11 entry points are hooked
+  bool d3d11_shutdown = false;      // Plan 18: NVSDK_NGX_D3D11_Shutdown1 is hooked
+  bool d3d11_shutdown_all = false;  // Plan 18: the device-less NVSDK_NGX_D3D11_Shutdown is hooked (Final Fantasy XV's DLSS 1 SDK has no Shutdown1)
 };
+
+// Plan 18: the hooked APIs of `module` for the log: "Direct3D 12, Direct3D 11 and Vulkan", "Direct3D 12 and Vulkan", "Direct3D 11", ...
+[[nodiscard]] std::string HookedApis(const HookedModule& module);
 
 // Plan 13 (design R80, the "violator" observation): true on a thread inside the original NVSDK_NGX_VULKAN_EvaluateFeature(_C) of an
 // outermost hooked call, so a ReShade event raised by NGX's own commands (a pipeline bind) can tell it came from DLSS. One TLS read.
@@ -117,8 +119,9 @@ struct HookedModule {
 // ReleaseFeature of every loaded NGX core copy (spec §10 as amended by the v2 design §3.1), and, Plan 13,
 // on the same copy's NVSDK_NGX_VULKAN_ CreateFeature, CreateFeature1, EvaluateFeature, EvaluateFeature_C,
 // ReleaseFeature (design §5) and Shutdown1 (batch 3 review I-1, where exported); Plan 15: NVSDK_NGX_D3D12_Shutdown1
-// too, where exported (optional, as EvaluateFeature_C). A copy is hooked when it
-// exports either API's create, evaluate and release. The detours are process-wide, so one installer runs
+// too, where exported (optional, as EvaluateFeature_C). Plan 18: and NVSDK_NGX_D3D11_ CreateFeature, EvaluateFeature, ReleaseFeature (required for that
+// API), EvaluateFeature_C, Shutdown1 and Shutdown (optional, where exported); a Direct3D 11 entry point that cannot be hooked costs the Direct3D 11
+// placements only. A copy is hooked when it exports any API's create, evaluate and release. The detours are process-wide, so one installer runs
 // at a time. Uplift's module and every hooked module are pinned, so no detour, trampoline or notification
 // ever dangles.
 class HookInstaller {

@@ -3,6 +3,8 @@
 
 // v2 design §3.14 (amendment 2): the exposure meter and governor, one thread group before the encode. The state
 // texture's x is the encode's and decode's exposure multiplier.
+// Plan 17: the state is 2x1. With `probe` (Input exposure = Auto while the game passes an exposure) the second texel holds
+// the game's exposure as the encode reads it, beside the meter's target, for the add-on's readback.
 cbuffer MeterConstants : register(b0) {
   uint encoding;
   uint primaries;
@@ -16,9 +18,9 @@ cbuffer MeterConstants : register(b0) {
   float brighter_rate;   // stops per second toward a darker exposure
   float darker_rate;     // stops per second toward a brighter exposure
   float frame_seconds;   // Δt
-  uint reserved0;
-  uint reserved1;
-  uint reserved2;
+  uint probe;            // Plan 17: write texel (1, 0)
+  uint has_game_texture;  // the game's ExposureTexture is bound at t2
+  float game_factor;     // DLSS.Exposure.Scale ÷ DLSS.Pre.Exposure
   uint reserved3;
 };
 
@@ -31,6 +33,7 @@ Texture2D<float4> source_texture : register(t0);
 #define UPLIFT_LOAD_SOURCE(pixel) source_texture.Load(int3((pixel), 0))
 #endif
 UPLIFT_IMAGE_FORMAT("rgba32f") RWTexture2D<float4> state_texture : register(u0);  // (2^E, E, the last anchor, set)
+Texture2D<float> exposure_texture : register(t2);  // Plan 17: the game's exposure, as the encode binds it
 
 static const uint BINS = 96u;
 static const float LOW_STOPS = -16.f;
@@ -87,4 +90,9 @@ void main(uint3 group_thread : SV_GroupThreadID) {
     exposure += clamp(target - exposure, -brighter_rate * seconds, darker_rate * seconds);
   }
   state_texture[uint2(0, 0)] = float4(exp2(exposure), exposure, anchor, 1.f);
+  if (probe != 0u) {
+    // Plan 17: (the game's texel, its factor, what the encode would multiply by, the meter's target in stops).
+    const float texel = (has_game_texture != 0u ? exposure_texture.Load(int3(0, 0, 0)) : 1.f);
+    state_texture[uint2(1, 0)] = float4(texel, game_factor, GameExposure(has_game_texture, texel, game_factor), target);
+  }
 }

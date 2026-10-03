@@ -20,7 +20,8 @@ inline constexpr char CONFIG_SECTION[] = "Uplift";
 inline constexpr char ENABLED_KEY[] = "Enabled";  // the one key the add-on polls every present
 inline constexpr float SKIN_SAME_AS_STRUCTURE = -1.f;
 
-inline constexpr uint32_t CONFIG_VERSION = 2u;  // v2 design §5: written from Plan 3; Plan 6 migrates older files
+// v2 design §5: written from Plan 3. Plan 17 (1.0.1): 3, where InputExposure's default became Auto; LoadSettings migrates older files.
+inline constexpr uint32_t CONFIG_VERSION = 3u;
 
 // v2 design §5. Every combo is stored as its index, in the order below.
 enum class PlacementSource : uint32_t {
@@ -210,7 +211,7 @@ struct Settings {
   look::LookSettings look;                                // Shape result and its rows
   MaskMode mask = MaskMode::AUTO;
   UiCorrection ui_correction = UiCorrection::AUTO;
-  color::InputExposure input_exposure = color::InputExposure::GAME;  // key decision 1: Plan 4's exposure
+  color::InputExposure input_exposure = color::InputExposure::AUTO;  // Plan 17: Auto (the game's when it agrees with the meter); was Game, Plan 4's exposure
   ExposureAdapt exposure_adapt = ExposureAdapt::SMOOTH;
   float adapt_brighter_stops = 2.f;
   float adapt_darker_stops = 0.7f;
@@ -225,6 +226,7 @@ struct Settings {
   bool auto_retry = true;                    // Plan 6 (D11): retry a failed session on the backoff
   bool use_d3d9ex = false;                   // Plan 9 (design §2.9): ask ReShade for a Direct3D 9Ex device (Direct3D 9 games, 32- and 64-bit)
   bool adjust_vulkan_devices = true;         // Plan 11 (Vulkan design §2.3): hidden; 0 keeps the vkCreateDevice hook recording devices but adding nothing
+  uint32_t diagnostic_remove_device = 0u;    // Plan 17: hidden, diagnostic only (DiagnosticRemoveDevice); 0 = off
 
   friend bool operator==(const Settings&, const Settings&) = default;
 };
@@ -270,9 +272,12 @@ class ConfigStore {
 [[nodiscard]] std::optional<bool> ParseBoolSetting(std::string_view text);
 
 // Missing keys keep their defaults. An unreadable, non-finite or out-of-range value keeps its default
-// and adds one line to `warnings` (v2 design §3.16, Plan 2 final review M3).
+// and adds one line to `warnings` (v2 design §3.16, Plan 2 final review M3). An older ConfigVersion is migrated (MigrateSettings).
 [[nodiscard]] Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnings);
 void SaveSettings(const Settings& settings, ConfigStore* store);
+// Plan 17: a file written before CONFIG_VERSION 3 (1.0.0 stored every key, its default InputExposure Game included) reads InputExposure Game as Auto, the
+// new default; Metered and Manual stay. The next save writes the current version, so an explicit Game chosen after that stays Game.
+void MigrateSettings(Settings* settings);
 // After an overlay edit: a non-finite value returns to its default, a number is clamped into its
 // range (a documented special value such as 0 = automatic is kept), an unknown combo index or key
 // code returns to its default.

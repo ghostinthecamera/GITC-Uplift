@@ -193,6 +193,7 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
     nr::Logf(nr::LogLevel::ERR, "CreateDescriptorHeap (shader) failed: {:#010x}", static_cast<uint32_t>(result));
     return false;
   }
+  shader_heap_->SetName(L"Uplift colour descriptors");  // Plan 17: DRED names
   if (const HRESULT result = device->CreateDescriptorHeap(&target_heap, IID_PPV_ARGS(&target_heap_)); FAILED(result)) {
     *error = "could not create the colour target descriptor heap";
     nr::Logf(nr::LogLevel::ERR, "CreateDescriptorHeap (target) failed: {:#010x}", static_cast<uint32_t>(result));
@@ -374,11 +375,14 @@ bool ColorPipeline::RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_
 bool ColorPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, const MeterPass& pass) {
   if (!SlotInRange(slot, "RecordMeter")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + METER_TABLE;
-  WriteTable(base, {{pass.source, pass.source_view_format}}, {{pass.state, DXGI_FORMAT_R32G32B32A32_FLOAT}});
+  // Plan 17: t2 is the game's exposure, as the encode binds it (a null view reads 0, which GameExposure replaces with 1).
+  WriteTable(base, {{pass.source, pass.source_view_format}, {}, ExposureView(pass.probe ? pass.game_exposure : nullptr)},
+             {{pass.state, DXGI_FORMAT_R32G32B32A32_FLOAT}});
   const std::array<uint32_t, PASS_CONSTANTS> constants = {
       static_cast<uint32_t>(pass.encoding), pass.primaries, Bits(pass.input_scale), pass.region.x, pass.region.y,
       pass.region.width, pass.region.height, (pass.snap ? 1u : 0u), (pass.smooth ? 1u : 0u), Bits(pass.brighter_rate),
-      Bits(pass.darker_rate), Bits(pass.frame_seconds), 0u, 0u, 0u, 0u,
+      Bits(pass.darker_rate), Bits(pass.frame_seconds), (pass.probe ? 1u : 0u), (pass.probe && pass.game_exposure != nullptr ? 1u : 0u),
+      Bits(pass.game_exposure_factor), 0u,
   };
   DispatchCompute(list, meter_pipeline_.Get(), constants, base, 1u, 1u);  // one group of 256 threads
   return true;

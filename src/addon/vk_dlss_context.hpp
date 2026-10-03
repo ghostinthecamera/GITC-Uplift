@@ -222,6 +222,11 @@ class VkDlssContext {
   bool last_motion_vectors_missing_ = false;
   bool reset_owed_ = false;  // a frame that did not apply NR: the next one that does starts NR's history afresh (Plan 3, Minor 4)
   bool dlss_seen_ = false;
+  // Plan 18 Task 12: the game switched its DLSS off here (FrameConfig::dlss_released held long enough, DLSS seen, the DLSS placements available): Source =
+  // DLSS runs at Present from that present until the next main evaluate shows DLSS on again. Frozen once the context stops (the game's NGX shutdown, a loss,
+  // a teardown). `dlss_off_logged_`: the placement really fell back, so the off line was logged and the on line is owed (fix round 1, M-6).
+  DlssOffLatch dlss_off_;
+  bool dlss_off_logged_ = false;
   bool dlss_idle_ = false;
   bool dlss_paused_ = false;  // final review, minor 1: no evaluate for 250 ms, at any placement (PresentMotionGap's DLSS_PAUSED)
   bool dlss_latch_tripped_ = false;

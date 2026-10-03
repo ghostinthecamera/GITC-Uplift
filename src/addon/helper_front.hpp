@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 
+#include "addon/bridge_strikes.hpp"
 #include "addon/frame_trigger.hpp"
 #include "addon/reshade_api.hpp"
 #include "client/d3d10_client.hpp"
@@ -78,6 +79,8 @@ struct HelperDevice {
   bool frame_ready = false;                            // this present's FRAME reply said the helper is ready for a RUN
   bool running = false;                                // the last FRAME reply said NR's state is not OFF
   bool retry_now = false;                              // Retry now, for the next FRAME
+  // Plan 17: the 2-strike rule for the helper's stops (its own device removed, a hang, an exit), as for a bridge's private device: Retry now restarts it once.
+  BridgeStrikes strikes;
   bool claimed_elsewhere = false;
   bool nr_returned_logged = false;  // "NR ran on the game's frame" was logged since the client last attached (Reset, helper exit)
   bool ex_checked = false;
@@ -129,6 +132,20 @@ struct HelperDevice {
       d3d12->ReleaseMask(*hosts.d3d12);
     } else if (d3d11) {
       d3d11->ReleaseMask();
+    }
+  }
+  // Plan 17: Retry now restarts the helper after it stopped: the client's latch from that stop goes too.
+  void ClearClientLatch() {
+    if (d3d10) {
+      d3d10->ClearLatch();
+    } else if (vulkan) {
+      vulkan->ClearLatch();
+    } else if (gl) {
+      gl->ClearLatch();
+    } else if (d3d12) {
+      d3d12->ClearLatch();
+    } else if (d3d11) {
+      d3d11->ClearLatch();
     }
   }
   // The helper is gone (or the client's transport is): everything shared with it goes.

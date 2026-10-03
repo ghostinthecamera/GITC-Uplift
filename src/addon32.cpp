@@ -322,9 +322,13 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
           entry.runtime->get_technique_effect_name(technique, effect_name);
           link_ready = (std::string_view(effect_name) == UPLIFT_FX_EFFECT_NAME);
         }
-        char link_value[8] = {};
-        if (!link_ready
-            && entry.runtime->get_preprocessor_definition_for_effect(UPLIFT_FX_EFFECT_NAME, UPLIFT_USE_LAUNCHPAD_DEFINE, link_value)) {
+        char link_value[32] = {};
+        const bool link_defined =
+            entry.runtime->get_preprocessor_definition_for_effect(UPLIFT_FX_EFFECT_NAME, UPLIFT_USE_LAUNCHPAD_DEFINE, link_value);
+        // 1.0.1 (review I-4): without one at the effect scope Uplift.fx compiles with the preset's or the global definition (a null effect name reads those).
+        char outer_value[32] = {};
+        const bool outer_defined = (!link_defined && entry.runtime->get_preprocessor_definition(UPLIFT_USE_LAUNCHPAD_DEFINE, outer_value));
+        if (!link_ready && link_defined) {
           entry.runtime->enumerate_techniques(nullptr, [&link_ready](api::effect_runtime*, api::effect_technique) {
             link_ready = true;  // not loading
           });
@@ -339,9 +343,12 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
             .wanted = (launchpad_technique.handle != 0u && entry.runtime->get_technique_state(launchpad_technique)
                        && (settings.motion_vectors == ui::MotionVectorSource::AUTO
                            || settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD)),
+            // 1.0.1: a set that changes nothing is skipped.
+            .current = addon::LaunchPadDefinition((link_defined ? std::optional<std::string_view>(link_value) : std::nullopt),
+                                                  (outer_defined ? std::optional<std::string_view>(outer_value) : std::nullopt)),
         });
         if (link) {
-          nr::Logf(nr::LogLevel::INFO, "LaunchPad link: UPLIFT_USE_LAUNCHPAD = {} (ReShade reloads Uplift.fx)", (*link ? 1 : 0));
+          nr::Log(nr::LogLevel::INFO, addon::LaunchPadLinkLine(*link));
           entry.runtime->set_preprocessor_definition_for_effect(UPLIFT_FX_EFFECT_NAME, UPLIFT_USE_LAUNCHPAD_DEFINE,
                                                                 (*link ? "1" : "0"));
         }

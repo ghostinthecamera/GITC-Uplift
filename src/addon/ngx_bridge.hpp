@@ -1,5 +1,6 @@
 #pragma once
 
+#include <d3d11.h>
 #include <d3d12.h>
 
 #include <atomic>
@@ -67,6 +68,23 @@ class NgxRouting {
   // Plan 15: the Direct3D 12 twin (NVSDK_NGX_D3D12_Shutdown1, not Uplift's own call): `device` is the pointer the game passed, ReShade's proxy or the
   // device itself. NR on the game's device makes its last NGX calls here, and is held off until the game's DLSS is created there again.
   virtual void BeforeCoreShutdownD3D12(ID3D12Device* /*device*/) {}
+
+  // Plan 18 (design §2): the Direct3D 11 twins. `list` is an ID3D11DeviceContext (nr/d3d11_handles.hpp) and never reaches a Direct3D 12 call.
+  // The ReShade device Uplift marked on the device of the evaluate's context, or null: unmarked, or a deferred context (logged once). Lock-free.
+  [[nodiscard]] virtual const void* DeviceOfD3D11(ID3D12GraphicsCommandList* /*list*/) { return nullptr; }
+  // The ReShade device marked on `device` (Shutdown1's), or null. Lock-free.
+  [[nodiscard]] virtual const void* DeviceOfD3D11Device(ID3D11Device* /*device*/) { return nullptr; }
+  // After the original evaluate of `device`'s main handle on Direct3D 11: NR after DLSS through the bridge's mid-frame hand-off, or DLSS's vectors into the
+  // Present ring. The add-on's lock is released before it returns.
+  virtual void OnMainEvaluateD3D11(const void* /*device*/, ID3D12GraphicsCommandList* /*list*/, const ngx_hooks::DlssFrame& /*frame*/) {}
+  // Before the original evaluate of `device`'s SuperSampling main handle on Direct3D 11: NR before upscaling through the hand-off; what DLSS must read as
+  // Color (the bridge's shared ID3D11Resource, punned as nr::AsResource), or null.
+  virtual ID3D12Resource* BeforeMainEvaluateD3D11(const void* /*device*/, ID3D12GraphicsCommandList* /*list*/, const ngx_hooks::DlssFrame& /*frame*/) {
+    return nullptr;
+  }
+  virtual void ColorSwapRejectedD3D11(const void* /*device*/, ID3D12GraphicsCommandList* /*list*/) {}
+  // Plan 18 (design §5): the process's first game DLSS evaluate, for the one-time INFO summary. Never takes the add-on's lock.
+  virtual void LogFirstEvaluate(ngx_hooks::NgxApi /*api*/, ID3D12GraphicsCommandList* /*list*/, const ngx_hooks::DlssFrame& /*frame*/) {}
 };
 
 // The add-on's NgxObserver (v2 design §3.1, §3.5, §3.6, §3.19): the DLSS-SR overrides, the feature
@@ -103,16 +121,42 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
     counted = watching;
     vk_nr_contexts_.fetch_add((watching ? 1 : -1), std::memory_order_relaxed);
   }
+  // Plan 18 (Plan 13 I-2's rule on Direct3D 11): the add-on's Direct3D 11 bridge contexts that watch the game's DLSS evaluates (the context exists and NR is
+  // on or not yet released). While none does, a Direct3D 11 evaluate is a pure passthrough: one relaxed load, no lookup, no lock. `counted` is the context's
+  // own flag; the count moves with its changes.
+  void NoteD3D11Watch(bool& counted, bool watching) {
+    if (counted == watching) return;
+    counted = watching;
+    d3d11_watching_.fetch_add((watching ? 1 : -1), std::memory_order_relaxed);
+  }
+  // Plan 18 (design §5): a game DLSS evaluate came on a Direct3D 12 device Uplift does not run (a list ReShade does not track, or a device without a
+  // context): in a Direct3D 11 game, a mod's own device. Sticky.
+  void NoteForeignD3D12Dlss() { foreign_d3d12_.store(true, std::memory_order_relaxed); }
+  [[nodiscard]] bool ForeignD3D12Dlss() const { return foreign_d3d12_.load(std::memory_order_relaxed); }
 
  private:
-  // The device of a hooked call's list, through the API's own routing (a VkCommandBuffer never reaches a Direct3D 12 lookup).
+  // The device of a hooked call's list, through the API's own routing (a VkCommandBuffer never reaches a Direct3D 12 lookup, nor a Direct3D 11 context a
+  // Direct3D 12 or Vulkan one).
   [[nodiscard]] const void* DeviceOf(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list) const;
+  // Plan 18 (design §5): summarises the process's first game DLSS evaluate through the routing, once.
+  void NoteFirstEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter& parameters);
+  // Plan 18 fix round 1 (I-1, design §2): a Direct3D 11 DLSS-SR feature the hooks did not see created (the game loaded NGX and created DLSS before the next
+  // present, the only Direct3D 11 entry point where a newly loaded core is hooked; or it kept the feature across an NGX shutdown), registered at its first
+  // hooked evaluate from that evaluate's block, on the device its context names (null: the unknown device). Adopted only with an upscaler's key set: Color,
+  // Output, and the motion vectors or the depth (DeepDVC and DLISP have neither), and no albedo (Ray Reconstruction is not on Direct3D 11); the create
+  // keys when the block still has them, else the render subrect's and the textures' sizes, low-res vectors, and (final review) IsHDR when the Output is a
+  // float format. The record, or nullopt (refused, and not probed again until the handle is created, released or shut down).
+  std::optional<ngx_hooks::FeatureRecord> AdoptD3D11Upscaler(const NVSDK_NGX_Handle* handle, ID3D12GraphicsCommandList* list,
+                                                             const NVSDK_NGX_Parameter& parameters);
 
   NgxRouting& routing_;
   ngx_hooks::FeatureRegistry registry_;
   std::atomic<bool> pre_sr_{false};
   std::atomic<int> vk_contexts_{0};
   std::atomic<int> vk_nr_contexts_{0};
+  std::atomic<int> d3d11_watching_{0};
+  std::atomic<bool> foreign_d3d12_{false};
+  std::atomic<bool> summary_logged_{false};
 };
 
 // Fix round 1, Important 2: the message DlssUnavailableReason returns for a latch read from the

@@ -15,6 +15,7 @@
 #include "nr/session.hpp"
 #include "nr/timeline.hpp"
 #include "nr/types.hpp"
+#include "sources/auto_exposure.hpp"
 #include "sources/look_plan.hpp"
 #include "sources/motion_source.hpp"
 
@@ -28,7 +29,13 @@ struct PresentTarget {
   float transfer_strength = 1.f;
   float color_strength = 1.f;
   nr::BoundResource dlss_motion;       // Plan 14: DLSS's vectors copied in the game's frame (Vulkan's bridge): the region's own pixels, bound whole at a scale of (1, 1); or none
-  nr::BoundResource launchpad_motion;  // Plan 6: this frame's UPLIFT_MV (back-buffer pixels), or none
+  float dlss_motion_scale_x = 1.f;     // Plan 18: Direct3D 11's ring keeps DLSS's raw vectors: their MV.Scale x MotionScale; 1 for Vulkan's scaled copies
+  float dlss_motion_scale_y = 1.f;
+  // Plan 18 (fix round 1, M-1): `dlss_motion` holds DLSS's raw vectors (Direct3D 11's ring), so the recording runs them through the motion copy
+  // (motion_cs.hlsl: non-finite vectors dropped, the rest clamped, the scale applied) at the region's size and binds the result at (1, 1), as
+  // RecordMotionCopy's copies; false for Vulkan's copies, which their own copy filtered.
+  bool dlss_motion_raw = false;
+  nr::BoundResource launchpad_motion;  // Plan 6: this frame's UPLIFT_MV (back-buffer pixels), or none; converted before NR (F1)
   float motion_scale_x = 1.f;          // MotionScaleX/Y for it
   float motion_scale_y = 1.f;
 };
@@ -114,7 +121,15 @@ class NrPipeline final : private nr::PassResolver {
   // Minor 4 (Plan 4 fix round 4): the Present motion copies alone, the same way -- for a caller that
   // drops them as soon as Source leaves Present or MotionVectors becomes None, without waiting for a
   // drain to OFF. A no-op when there is nothing to release.
-  void ReleaseMotionCopies() { RetireMotionCopies(); }
+  // Plan 18 (fix round 1, M-1): Direct3D 11's converted ring vectors too, which the same conditions stop.
+  void ReleaseMotionCopies() {
+    RetireMotionCopies();
+    RetireDlssPresentMotion();
+  }
+  // 1.0.1 (fix round 1, minor 2): Launchpad's converted motion alone, the same way, once the placement leaves Present or MotionVectors stops wanting
+  // Launchpad. Separate from ReleaseMotionCopies, which also runs every frame of Source = Present with MotionVectors = Launchpad (no DLSS copies
+  // wanted), where the converted motion is in use.
+  void ReleaseLaunchpadMotion() { RetireLaunchpadMotion(); }
   [[nodiscard]] uint64_t HeldBytes() const;
   // A DLSS Output format RecordUav can write: DescribeUavFormat knows it and the device stores to it.
   [[nodiscard]] bool SupportsUavTarget(DXGI_FORMAT format) const;
@@ -125,6 +140,8 @@ class NrPipeline final : private nr::PassResolver {
   // from NoteMaskCopied on. `mask` null, or a format Uplift cannot read, releases the copy and returns null.
   ID3D12Resource* PrepareMaskCopy(const D3D12_RESOURCE_DESC* mask);
   void NoteMaskCopied() { mask_.copied = (mask_.texture != nullptr); }
+  // Plan 17: the exposure the latest recording's encode read (the Details line).
+  [[nodiscard]] ExposureReport LastExposure() const { return exposure_report_; }
 
  private:
   using Texture = Microsoft::WRL::ComPtr<ID3D12Resource>;
@@ -155,7 +172,8 @@ class NrPipeline final : private nr::PassResolver {
     bool copied = false;  // the add-on has copied into it: recordings may bind it
     nr::Mark last_use;
   };
-  // v2 design §3.14: the governor's 1x1 RGBA32F state, (2^E, E, the last anchor, set), in both shader-read states.
+  // v2 design §3.14: the governor's RGBA32F state, (2^E, E, the last anchor, set), in both shader-read states. Plan 17: 2x1, the second texel Auto's check
+  // (the game's exposure beside the meter's target).
   struct MeterState {
     Texture state;
     bool snap = true;  // the next meter snaps: a new texture, or a settings change
@@ -166,6 +184,16 @@ class NrPipeline final : private nr::PassResolver {
     ID3D12Resource* texture = nullptr;
     float factor = 1.f;
     bool metered = false;
+    bool probe = false;  // Plan 17: the game's exposure is used, and the meter runs beside it for Auto's check
+  };
+  // Plan 17: Auto's check. The meter state's two texels are copied into a readback ring after the meter and read once the GPU has passed them: a few frames
+  // late, never a wait. A busy ring skips the sample.
+  static constexpr uint32_t CHECK_SLOTS = 4u;
+  struct ExposureCheck {
+    Texture readback;  // CHECK_SLOTS placed footprints of 2x1 RGBA32F, READBACK heap, COPY_DEST
+    std::array<nr::Mark, CHECK_SLOTS> marks = {};
+    std::array<bool, CHECK_SLOTS> pending = {};
+    uint32_t next = 0u;  // the oldest slot, written next
   };
   // After NR: what the decode reads as t1.
   struct AfterNr {
@@ -182,7 +210,10 @@ class NrPipeline final : private nr::PassResolver {
   void RetireExposure();
   [[nodiscard]] uint32_t ShaderOptions() const;  // the encode's and the decodes' shader_options
   ExposureChoice ChooseExposure(color::Encoding encoding, ID3D12Resource* game_texture, float game_factor);
-  void RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, color::MeterPass pass);
+  // The meter (and, for Auto's check, the copy of its state into the readback ring) before the encode.
+  void RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, color::MeterPass pass, const ExposureChoice& exposure);
+  void PollExposureChecks();  // reads the samples the GPU has passed into auto_exposure_
+  void RetireExposureCheck();
   ID3D12Resource* BoundMask(uint32_t slot);  // the mask copy for this recording, or null
   AfterNr RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
                         ID3D12Resource* nr_output, bool reduced, bool look_ready, color::Upsampling upsampling,
@@ -192,6 +223,9 @@ class NrPipeline final : private nr::PassResolver {
   LookSurfaces look_;
   MaskCopy mask_;
   MeterState exposure_;
+  ExposureCheck check_;
+  AutoExposure auto_exposure_;  // Plan 17: kept for the pipeline's life (a latch never flips back), across disables and setting changes
+  ExposureReport exposure_report_;
   uint32_t resolve_slot_ = 0u;  // the recording's descriptor slot, for ResolvePass
 
   // What one recording needs allocated (v2 design §3.21's surfaces). A different plan reallocates the set.
@@ -233,11 +267,39 @@ class NrPipeline final : private nr::PassResolver {
     nr::Size size;
   };
 
+  // 1.0.1 (the Launchpad investigation, F1): Launchpad's UPLIFT_MV as NR gets it on the Present path, made by the motion copy (motion_cs.hlsl) in the
+  // recording that binds it: resampled to the work image in its pixels, non-finite vectors dropped and the rest clamped. One texture, rewritten every
+  // recording on the same queue, as the canvas motion is.
+  struct LaunchpadMotion {
+    Texture texture;  // RG16F at the canvas size
+    nr::Size size;
+    nr::Mark last_use;  // the newest recording that wrote and read it
+  };
+  // Plan 18 (fix round 1, M-1): Direct3D 11's ring slot as the Present path binds it, made by the motion copy in the recording that binds it: the region's
+  // own pixels with the scale applied, non-finite vectors dropped and the rest clamped (RecordMotionCopy's copy). One texture, rewritten every recording on
+  // the same queue, as Launchpad's.
+  struct DlssPresentMotion {
+    Texture texture;  // RG16F at the region's size
+    nr::Size size;
+    nr::Mark last_use;  // the newest recording that wrote and read it
+  };
+
   Texture CreateTexture(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
                         const wchar_t* name);
   std::string_view EnsureIntermediates(const SetPlan& plan);  // empty on success, else "out of memory"
   void RetireSet();            // the intermediates only: freed now if the GPU is done with them, else at their mark
   void RetireMotionCopies();   // likewise for the motion copies
+  void RetireLaunchpadMotion();  // likewise for Launchpad's converted motion
+  void RetireDlssPresentMotion();  // Plan 18 (fix round 1, M-1): likewise for Direct3D 11's converted ring vectors
+  // Plan 18 (fix round 1, M-1): records the motion copy of `motion` (DLSS's raw vectors in the ring slot, the region its rect) into dlss_present_motion_ at
+  // the region's size with `scale_x/y` applied, on the committed `slot`. The texture to bind whole at a scale of (1, 1), or none (an unreadable format, a
+  // region outside the texture, or no memory): NR then runs with the zero motion, never with the raw vectors.
+  nr::BoundResource ConvertDlssMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::BoundResource& motion, float scale_x, float scale_y);
+  // F1: records the conversion of `motion` (UPLIFT_MV, back-buffer pixels times MotionScale) into launchpad_motion_ at `work`'s canvas, on the committed
+  // `slot`. The texture to bind whole at a scale of (1, 1), or none (an unreadable format, a region outside the texture, or no memory): NR then runs with
+  // the zero motion, never with the raw vectors.
+  nr::BoundResource ConvertLaunchpadMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::BoundResource& motion, float scale_x, float scale_y,
+                                           const WorkLayout& work);
   void NoteEncoding(color::Encoding encoding, float input_scale);
   void CommitSlot(uint32_t slot);
   bool Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::EncodePass pass);
@@ -253,6 +315,8 @@ class NrPipeline final : private nr::PassResolver {
   uint64_t last_present_frame_ = 0u;
   bool allocation_failure_logged_ = false;
   MotionCopies motion_copies_;
+  LaunchpadMotion launchpad_motion_;
+  DlssPresentMotion dlss_present_motion_;  // Plan 18 (fix round 1, M-1)
   MotionSource present_motion_ = MotionSource::NONE;  // the last present's provider
 };
 

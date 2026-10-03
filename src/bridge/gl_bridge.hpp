@@ -35,8 +35,8 @@ class GlBridge {
  public:
   // nullptr, with `error` set, when the adapter is not NVIDIA's or the D3D12 side cannot be made. `functions` are Functions::Load's (the context current now:
   // the fences are imported here); a driver without semaphores, or one that refuses the fence import, still gets a bridge that builds CPU-ordered and
-  // StatusLine says why. `created` receives the device as D3D12CreateDevice returned it, whether or not this succeeds (ReShade's proxy under HookDirectX):
-  // release it only outside the add-on's lock.
+  // StatusLine says why. `created` receives the private device as D3D12Side made it, whether or not this succeeds (on the fallback D3D12CreateDevice's,
+  // ReShade's proxy under HookDirectX): release it only outside the add-on's lock.
   static std::unique_ptr<GlBridge> Create(gl::Functions functions, LUID luid, Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
   // Waits up to 2 s for the private queue, then releases the D3D12 side. It makes no GL call: ForgetGl first (destroy_device).
   ~GlBridge();
@@ -46,6 +46,7 @@ class GlBridge {
   [[nodiscard]] const gl::Functions& Gl() const { return interop_.Gl(); }
   [[nodiscard]] ID3D12Device* Device() const { return side_->Device(); }
   [[nodiscard]] ID3D12CommandQueue* Queue() const { return side_->Queue(); }
+  [[nodiscard]] bool Independent() const { return side_->Independent(); }  // D3D12Side::Independent: whether Retry now can replace it
   // First thing at every present, as VkBridge::BeginFrame: the watchdog (GPU-ordered), the frees of what the queues have passed (both sides, and the GL names
   // that waited for a valid host), and the description of `back_buffer` (FB0); while `running` also the shared copy sized like it. Otherwise, and after a
   // latch, the shared surfaces are retired (Plan 7 C-1). `at_present`: NR would run at PRESENT (no marker), which is where MSAA is refused. `enabled` false
@@ -67,6 +68,9 @@ class GlBridge {
   // As D3D11Bridge::Stop: no new wait is ever queued again, and both fences are signalled from the CPU up to the highest value a wait was queued for (which also
   // releases a GL wait on the imported semaphore, the same kernel object). Before DeviceContext::Teardown. Every latch ends here too.
   void Stop(std::string reason);
+  // Plan 17: Retry now, after Stop, at a present on the runtime's own context (`host.Valid()`): every GL name goes now (the shared textures, their memory
+  // objects and the two imported semaphores), with GL calls on the present thread. The D3D12 resources stay for the destructor.
+  void ReleaseGl(gl::GameHost& host);
   // destroy_device, after Stop: every GL name is forgotten WITHOUT a GL call (they die with the share group, which ReShade has just made current for its own
   // teardown). The D3D12 resources stay for the destructor.
   void ForgetGl();
@@ -74,6 +78,7 @@ class GlBridge {
   [[nodiscard]] uint64_t SharedBytes() const;
   [[nodiscard]] std::string StatusLine() const;
   [[nodiscard]] bool Stopped() const { return !latch_.empty(); }
+  [[nodiscard]] std::string_view Latch() const { return latch_; }  // Plan 17: the card's reason; empty while it runs
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
 
  private:
@@ -102,7 +107,7 @@ class GlBridge {
   // current (the callers checked host.Valid()).
   bool CreateShared(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, uint32_t bytes_per_pixel, const wchar_t* name, Shared* shared,
                     std::string* failure);
-  // Latches the bridge for the session: "The OpenGL bridge stopped: <failure>. Restart the game to use NR again", and Stops it.
+  // Latches the bridge: "The OpenGL bridge stopped: <failure>", and Stops it. Plan 17: the card offers Retry now, which builds a new bridge.
   void LatchGl(std::string_view failure);
   // A capped wait ran its full 2 s: counted in `consecutive` (reset by the caller when that kind of wait finishes). At the third in a row the bridge latches,
   // with `what` in its Details text, so a game whose queue work cannot finish does not pay 2 s for every frame.
@@ -118,7 +123,7 @@ class GlBridge {
   // Stamps every surface this recording used with its progress value.
   void StampUsed(uint64_t value, bool used_mask, bool used_motion);
 
-  // Declared first, so released last: its created device is the one D3D12CreateDevice returned (ReShade's proxy under HookDirectX).
+  // Declared first, so released last: its created device is the one D3D12Side made (on the fallback, ReShade's proxy under HookDirectX).
   std::unique_ptr<D3D12Side> side_;
   gl::Interop interop_;
   bool gpu_ordered_ = false;

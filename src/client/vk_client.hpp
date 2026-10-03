@@ -75,6 +75,8 @@ class VkClient {
   [[nodiscard]] uint64_t ImportedBytes() const { return color_.bytes + mask_.bytes + motion_.bytes; }
   [[nodiscard]] std::string Line() const;
   [[nodiscard]] std::string_view Latch() const { return latch_; }  // non-empty once the client stopped for the session
+  // Plan 17: Retry now after the helper stopped (the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
+  void ClearLatch() { latch_.clear(); }
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
 
  private:

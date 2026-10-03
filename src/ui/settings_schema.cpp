@@ -615,10 +615,10 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::FIXES_COLOR,
         .label = "Input exposure",
-        .tooltip = "Where NR's input brightness comes from on scene-linear images. Game: DLSS's exposure (none on the "
-                   "presented image). Metered: Uplift's own meter, for games that pass none. Auto: Game when DLSS "
-                   "passes an exposure, else Metered. Manual: Diffuse white alone. sRGB, scRGB and HDR10 images are "
-                   "never metered.",
+        .tooltip = "Where NR's input brightness comes from on scene-linear images. Auto: the game's DLSS exposure while it "
+                   "agrees with Uplift's meter, else the meter (Details says which). Game: DLSS's exposure (none on the "
+                   "presented image). Metered: Uplift's own meter. Manual: Diffuse white alone. sRGB, scRGB and HDR10 "
+                   "images are never metered.",
         .choices = INPUT_EXPOSURES,
         .get = [](const Settings& s) { return Index(s.input_exposure); },
         .set = [](Settings& s, double v) { s.input_exposure = FromIndex<color::InputExposure>(v); },
@@ -628,7 +628,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::FIXES_COLOR,
         .label = "Adaptation",
-        .tooltip = "Metered only. Smooth adapts at the rates below, with a small dead band; Off follows every frame.",
+        .tooltip = "When the meter is used (Metered, or Auto). Smooth adapts at the rates below, with a small dead band; Off follows every frame.",
         .choices = ADAPT_MODES,
         .get = [](const Settings& s) { return Index(s.exposure_adapt); },
         .set = [](Settings& s, double v) { s.exposure_adapt = FromIndex<ExposureAdapt>(v); },
@@ -638,7 +638,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::FLOAT,
         .section = SettingSection::FIXES_COLOR,
         .label = "Adapt to brighter scenes (stops/s)",
-        .tooltip = "Metered only.",
+        .tooltip = "When the meter is used (Metered, or Auto).",
         .min = 0.1,
         .max = 20.0,
         .get = [](const Settings& s) { return static_cast<double>(s.adapt_brighter_stops); },
@@ -649,7 +649,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::FLOAT,
         .section = SettingSection::FIXES_COLOR,
         .label = "Adapt to darker scenes (stops/s)",
-        .tooltip = "Metered only.",
+        .tooltip = "When the meter is used (Metered, or Auto).",
         .min = 0.1,
         .max = 20.0,
         .get = [](const Settings& s) { return static_cast<double>(s.adapt_darker_stops); },
@@ -923,6 +923,20 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .flags = NEXT_START,
         .get = [](const Settings& s) { return Flag(s.adjust_vulkan_devices); },
         .set = [](Settings& s, double v) { s.adjust_vulkan_devices = (v != 0.0); },
+    },
+    {
+        // Plan 17: diagnostic only, never in the panel. It exercises Retry now and the 2-strike rule without a real hang.
+        .key = "DiagnosticRemoveDevice",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::HIDDEN,
+        .label = "Diagnostic: remove Uplift's private device after this many frames",
+        .tooltip = "Diagnostic only. N > 0 removes Uplift's own private Direct3D 12 device (ID3D12Device5::RemoveDevice; never the game's device, so "
+                   "Direct3D 12 games are untouched) once NR has run N frames on it, and presses Retry now itself about a second after each stop "
+                   "that may still be retried. 0 (the default) is off.",
+        .min = 0.0,
+        .max = 1000000.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.diagnostic_remove_device); },
+        .set = [](Settings& s, double v) { s.diagnostic_remove_device = static_cast<uint32_t>(v); },
     },
     {
         .key = "DlssPlacementBlocked",

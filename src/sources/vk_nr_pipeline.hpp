@@ -15,6 +15,7 @@
 #include "nr/session.hpp"
 #include "nr/timeline.hpp"
 #include "nr/types.hpp"
+#include "sources/auto_exposure.hpp"
 #include "sources/look_plan.hpp"
 #include "sources/nr_pipeline.hpp"
 #include "vk/nr_functions.hpp"
@@ -103,6 +104,8 @@ class VkNrPipeline final : private nr::PassResolver {
   // into it yet, so its layout is UNDEFINED (between copies it rests in SHADER_READ_ONLY_OPTIMAL).
   VkImage PrepareMaskCopy(VkFormat format, nr::Size size, bool* first);
   void NoteMaskCopied() { mask_.copied = (mask_.image.image != VK_NULL_HANDLE); }
+  // Plan 17: the exposure the latest recording's encode read (the Details line), as Direct3D 12's NrPipeline.
+  [[nodiscard]] ExposureReport LastExposure() const { return exposure_report_; }
   // The mask copy, now when the GPU has passed its last use, else at its mark (Mask off, the effect off, NR off).
   void ReleaseMaskCopy() { RetireMask(); }
   // Plan 14 (design §2.3): at the hooked evaluate, with NR on the Present path, DLSS's motion vectors (`motion`, a sampled view in
@@ -193,8 +196,8 @@ class VkNrPipeline final : private nr::PassResolver {
     bool ok = true;                               // false: the change pass could not be recorded
   };
 
-  // v2 design §3.14: the governor's 1x1 RGBA32F state, (2^E, E, the last anchor, set), which the encode and the decode read as their exposure. It carries across
-  // frames in GENERAL, as the stabiliser's histories do.
+  // v2 design §3.14: the governor's RGBA32F state, (2^E, E, the last anchor, set), which the encode and the decode read as their exposure. It carries across
+  // frames in GENERAL, as the stabiliser's histories do. Plan 17: 2x1, the second texel Auto's check (the game's exposure beside the meter's target).
   struct MeterState {
     vk::NrImage state;
     bool snap = true;      // the next meter snaps: a new image, or a changed colour fix
@@ -206,6 +209,17 @@ class VkNrPipeline final : private nr::PassResolver {
     color::VkSampledView view;
     float factor = 1.f;
     bool metered = false;
+    bool probe = false;  // Plan 17: the game's exposure is used, and the meter runs beside it for Auto's check
+  };
+  // Plan 17: Auto's check, as Direct3D 12's: the state's two texels copied into a host-visible ring after the meter, read once the GPU has passed them.
+  static constexpr uint32_t CHECK_SLOTS = 4u;
+  struct ExposureCheck {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    const std::byte* mapped = nullptr;  // host-coherent, mapped for the buffer's life
+    std::array<nr::Mark, CHECK_SLOTS> marks = {};
+    std::array<bool, CHECK_SLOTS> pending = {};
+    uint32_t next = 0u;  // the oldest slot, written next
   };
 
   // One of the four Present motion copies: the frame it was made for (0 = none) and the newest recording that wrote or read it.
@@ -216,7 +230,7 @@ class VkNrPipeline final : private nr::PassResolver {
   };
   static constexpr size_t PRESENT_MOTION_SLOTS = 4u;
   static constexpr size_t MAX_OPENED = 20u;              // the images one recording moves UNDEFINED -> GENERAL at its start
-  static constexpr uint64_t EXPOSURE_STATE_BYTES = 16u;  // the meter's 1x1 RGBA32F state
+  static constexpr uint64_t EXPOSURE_STATE_BYTES = 32u;  // the meter's 2x1 RGBA32F state
 
   // An image ReShade's queue also uses, retired at `mark` (FreeFinished).
   struct RetiredImage {
@@ -228,6 +242,9 @@ class VkNrPipeline final : private nr::PassResolver {
   void RetireLook();
   void RetireMask();
   void RetireExposure();
+  void RetireExposureCheck();
+  bool EnsureExposureCheck();  // the readback ring, made on first use
+  void PollExposureChecks();   // reads the samples the GPU has passed into auto_exposure_
   // Final review C-1: frees `image` now when `mark` is complete, else keeps it in `reshade_retired_` (never in the timeline's pending releases).
   void RetireReshadeImage(const vk::NrImage& image, const nr::Mark& mark);
   // The Session's nr::PassResolver: pass `index`'s own Transfer and Colour strength applied to its raw output in place (Direct3D 12's ResolvePass).
@@ -252,7 +269,8 @@ class VkNrPipeline final : private nr::PassResolver {
   ExposureChoice ChooseExposure(color::Encoding encoding, const NVSDK_NGX_Resource_VK* game_texture, float game_factor);
   // The meter before the encode (`pass`'s state, snap, smoothing, rates and Δt are filled here), then a barrier so the encode reads what it wrote. False: no
   // dispatch could be recorded.
-  bool RecordMeter(VkCommandBuffer buffer, uint32_t slot, color::VkMeterPass pass);
+  // Plan 17: with `exposure.probe`, the meter also writes Auto's check, and its state is copied into the readback ring.
+  bool RecordMeter(VkCommandBuffer buffer, uint32_t slot, color::VkMeterPass pass, const ExposureChoice& exposure);
   // The stabiliser's motion vectors (the game's own, current -> previous) with a resolved rect and their scale, or none: absent or unreadable vectors make
   // Motion change-gated static (decision D4), as Direct3D 12's StabilizeMotionOf.
   [[nodiscard]] static color::VkStabilizeMotion StabilizeMotionOf(const nr::FrameInputs& inputs);
@@ -276,6 +294,9 @@ class VkNrPipeline final : private nr::PassResolver {
   LookSurfaces look_;
   MaskCopy mask_;
   MeterState exposure_;
+  ExposureCheck check_;
+  AutoExposure auto_exposure_;  // Plan 17: kept for the pipeline's life (a latch never flips back)
+  ExposureReport exposure_report_;
   uint32_t resolve_slot_ = 0u;  // the recording's ring slot, for ResolvePass
   std::array<PresentMotionSlot, PRESENT_MOTION_SLOTS> present_motion_;
   nr::Size present_motion_size_;        // the slots' size: the motion region

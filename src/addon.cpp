@@ -22,9 +22,12 @@
 #include <utility>
 #include <vector>
 
+#include "addon/bridge_strikes.hpp"
 #include "addon/command_list_tracker.hpp"
+#include "addon/d3d11_identity.hpp"
 #include "addon/device_context.hpp"
 #include "addon/dlss_settings.hpp"
+#include "addon/dlss_summary.hpp"
 #include "addon/environment.hpp"
 #include "addon/frame_config.hpp"
 #include "addon/frame_trigger.hpp"
@@ -34,6 +37,7 @@
 #include "addon/log_bridge.hpp"
 #include "addon/ngx_bridge.hpp"
 #include "addon/nr_claim.hpp"
+#include "addon/nr_heartbeat.hpp"
 #include "addon/placement.hpp"
 #include "addon/removal_latch.hpp"
 #include "addon/reshade_api.hpp"
@@ -53,6 +57,7 @@
 #include "color/encoding.hpp"
 #include "gl/functions.hpp"
 #include "ngx_hooks/hook_installer.hpp"
+#include "nr/d3d11_handles.hpp"
 #include "nr/log.hpp"
 #include "nr/snippet.hpp"
 #include "nr/vk_handles.hpp"
@@ -104,6 +109,9 @@ static_assert(static_cast<uint32_t>(api::shader_stage::compute) == state::SHADER
 static_assert(static_cast<uint32_t>(api::pipeline_stage::compute_shader) == state::PIPELINE_STAGE_COMPUTE);
 static_assert(static_cast<uint32_t>(api::descriptor_type::constant_buffer) == state::DESCRIPTOR_CONSTANT_BUFFER);
 static_assert(static_cast<uint32_t>(api::descriptor_type::acceleration_structure) == state::DESCRIPTOR_ACCELERATION_STRUCTURE_6_1);
+
+// Plan 17: DiagnosticRemoveDevice presses Retry now itself about a second (at 60 Hz) after a stop that may still be retried.
+constexpr uint32_t DIAGNOSTIC_RETRY_PRESENTS = 60u;
 
 struct DeviceEntry {
   addon::SwapchainSelector selector;
@@ -162,11 +170,88 @@ struct DeviceEntry {
   // the one that moves; destroy_command_queue keeps it here when it ends the context, a shutdown with no context records it here, and the next context
   // starts from it, so a new one never loads NR into a core the game shut down (or into an abandoned runtime).
   addon::CoreShutdownHold core_hold;
+  // Plan 17 (1.0.1 design §3): Retry now after this device's private-device NR stopped (its bridge's device removed or hung, or the CPU-ordered timeouts),
+  // with the 2-strike rule. `retry_pending`: the overlay asked; the next present tears the stopped bridge and its context down, and the one after builds
+  // new ones. `retiring_vk`: Vulkan bridges a retry tore down, kept until the game's queue has passed the fences behind their imports (Plan 14's rule).
+  addon::BridgeStrikes strikes;
+  bool retry_pending = false;
+  uint32_t diagnostic_retry_in = 0u;  // DiagnosticRemoveDevice: presents until it presses Retry now itself (0: not counting)
+  uint32_t diagnostic_frames = 0u;    // DiagnosticRemoveDevice: presents with NR applied on the current private device
+  std::vector<std::unique_ptr<bridge::VkBridge>> retiring_vk;
+  // Plan 18 (design §2-§5): a Direct3D 11 device's DLSS stages. `d3d11_watch_counted`: NgxBridge::NoteD3D11Watch's flag (the hooks watch its evaluates while
+  // its bridge's context exists and NR is on or not yet released). `foreign_dlss`: its game's DLSS ran on a Direct3D 12 device Uplift cannot reach (logged
+  // once). `present_motion_logged`: "copied for Present" was logged since the ring was last released.
+  bool d3d11_watch_counted = false;
+  bool foreign_dlss = false;
+  bool present_motion_logged = false;
+  // 1.0.1 (F2): the once-a-minute "NR running" line and the "NR stopped after" one, with this process's private bytes and VRAM on `vram`'s adapter.
+  addon::NrHeartbeat heartbeat;
+  addon::ProcessVram vram;
 };
 
 // Plan 8: NR on this device runs on a private D3D12 device through a bridge (D3D11, or D3D10 through its relay; Plan 11: Vulkan; Plan 12: OpenGL).
 bool Bridged(const DeviceEntry& entry) {
   return entry.d3d11 || entry.d3d10 || entry.vulkan || entry.opengl;
+}
+
+// Plan 17: the bridged device's private Direct3D 12 device (native), or null before its bridge exists.
+ID3D12Device* PrivateDevice(const DeviceEntry& entry) {
+  if (entry.d3d11_bridge) return entry.d3d11_bridge->Device();
+  if (entry.d3d10_bridge) return entry.d3d10_bridge->Device();
+  if (entry.vk_bridge) return entry.vk_bridge->Device();
+  if (entry.gl_bridge) return entry.gl_bridge->Device();
+  return nullptr;
+}
+
+// Test phase (review M-3): whether the bridge's private device can be replaced by Retry now (D3D12Side::Independent); true before a bridge exists.
+bool PrivateDeviceIndependent(const DeviceEntry& entry) {
+  if (entry.d3d11_bridge) return entry.d3d11_bridge->Independent();
+  if (entry.d3d10_bridge) return entry.d3d10_bridge->Independent();
+  if (entry.vk_bridge) return entry.vk_bridge->Independent();
+  if (entry.gl_bridge) return entry.gl_bridge->Independent();
+  return true;
+}
+
+// Plan 17: the bridge's latch text ("The OpenGL bridge stopped: ..."); empty while it runs.
+std::string_view BridgeLatch(const DeviceEntry& entry) {
+  if (entry.d3d11_bridge) return entry.d3d11_bridge->Latch();
+  if (entry.d3d10_bridge) return entry.d3d10_bridge->Latch();
+  if (entry.vk_bridge) return entry.vk_bridge->Latch();
+  if (entry.gl_bridge) return entry.gl_bridge->Latch();
+  return {};
+}
+
+// Plan 17: stops whichever bridge the device has (a no-op past the first reason).
+void StopBridge(DeviceEntry& entry, std::string reason) {
+  if (entry.d3d11_bridge) {
+    entry.d3d11_bridge->Stop(std::move(reason));
+  } else if (entry.d3d10_bridge) {
+    entry.d3d10_bridge->Stop(std::move(reason));
+  } else if (entry.vk_bridge) {
+    entry.vk_bridge->Stop(std::move(reason));
+  } else if (entry.gl_bridge) {
+    entry.gl_bridge->Stop(std::move(reason));
+  }
+}
+
+// Plan 17: the device's private-device NR has stopped: its bridge latched (a removed or hung private device, the CPU-ordered timeouts, a failed cross-API
+// step), or its context found the private device removed.
+bool PrivateDeviceStopped(const DeviceEntry& entry) {
+  const bool latched = ((entry.d3d11_bridge && entry.d3d11_bridge->Stopped()) || (entry.d3d10_bridge && entry.d3d10_bridge->Stopped())
+                        || (entry.vk_bridge && entry.vk_bridge->Stopped()) || (entry.gl_bridge && entry.gl_bridge->Stopped()));
+  return latched || (entry.context && entry.context->DeviceLost());
+}
+
+// 1.0.1 (F2): one heartbeat line ("NR running: ..." or "NR stopped after ..."), with this process's private bytes and its VRAM on the adapter NR runs on:
+// the private device's on a bridged device, the game's own on Direct3D 12.
+void LogHeartbeat(DeviceEntry& entry, api::device* device, std::string_view lead, const addon::NrHeartbeat::Figures& figures) {
+  std::optional<LUID> luid;
+  if (ID3D12Device* const private_device = PrivateDevice(entry)) {
+    luid = private_device->GetAdapterLuid();
+  } else if (device->get_api() == api::device_api::d3d12) {
+    luid = reinterpret_cast<ID3D12Device*>(device->get_native())->GetAdapterLuid();
+  }
+  nr::Log(nr::LogLevel::INFO, addon::HeartbeatLine(lead, figures, addon::ProcessPrivateMiB(), (luid ? entry.vram.MiB(*luid) : std::nullopt)));
 }
 
 // The bridge's view of the add-on (v2 design §3.1). Defined after AddonState.
@@ -190,6 +275,13 @@ class AddonRouting final : public addon::NgxRouting {
   void ColorSwapRejectedVk(const void* device, ID3D12GraphicsCommandList* list) override;
   void BeforeCoreShutdownVk(VkDevice vk_device) override;
   void BeforeCoreShutdownD3D12(ID3D12Device* device) override;  // Plan 15
+  // Plan 18 (design §2-§5): the Direct3D 11 routing. `list` is an ID3D11DeviceContext (nr/d3d11_handles.hpp) and never reaches a Direct3D 12 call.
+  const void* DeviceOfD3D11(ID3D12GraphicsCommandList* list) override;
+  const void* DeviceOfD3D11Device(ID3D11Device* device) override;
+  void OnMainEvaluateD3D11(const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) override;
+  ID3D12Resource* BeforeMainEvaluateD3D11(const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) override;
+  void ColorSwapRejectedD3D11(const void* device, ID3D12GraphicsCommandList* list) override;
+  void LogFirstEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) override;
 };
 
 struct AddonState {
@@ -256,10 +348,6 @@ thread_local bool t_holds_lock_for_nr = false;
 // The process is ending (DllMain's DLL_PROCESS_DETACH with a non-null reserved): ExitProcess may have ended a thread that held the lock, so a core
 // Shutdown1 reached from a module's process detach never waits for it.
 std::atomic<bool> g_process_exiting{false};
-// Plan 15: private data on a Direct3D 12 device native NR runs on, holding its ReShade device (api::device*). ReShade's proxy forwards Get/SetPrivateData to
-// the device itself, so the pointer the game hands NGX (the proxy) and the native one read the same mark. A bridge's private device never carries one.
-constexpr GUID UPLIFT_RESHADE_DEVICE_GUID = {0x6b1d4c2e, 0x8f3a, 0x4e57, {0xa1, 0x9c, 0x5d, 0x02, 0x7e, 0x3b, 0x94, 0xf1}};
-
 class HoldsLockForNr {
  public:
   HoldsLockForNr() : previous_(std::exchange(t_holds_lock_for_nr, true)) {}
@@ -410,7 +498,10 @@ void AddonRouting::OnMainEvaluate(const void* device, ID3D12GraphicsCommandList*
   const std::unique_lock lock(g_state->mutex);
   const HoldsLockForNr holds;  // Plan 15: a starving present's catch-up may unload NR here, and the snippet's Shutdown1 may reach the core's
   addon::DeviceContext* const context = ContextOf(static_cast<api::device*>(const_cast<void*>(device)));
-  if (context == nullptr) return;
+  if (context == nullptr) {
+    g_state->bridge.NoteForeignD3D12Dlss();  // Plan 18: a device without a context (a mod's own, in a Direct3D 11 game)
+    return;
+  }
   addon::ReshadeDlssFrameHost host(list_state);
   context->OnDlssEvaluate(frame, host, std::chrono::steady_clock::now());
   // Important 1 (fix round 1): a removal first seen by an evaluate (presents may be starving) still
@@ -544,7 +635,7 @@ void AddonRouting::BeforeCoreShutdownD3D12(ID3D12Device* device) {
   if (t_holds_lock_for_nr || g_process_exiting.load(std::memory_order_acquire)) return;
   api::device* owner = nullptr;
   UINT size = sizeof(owner);
-  if (FAILED(device->GetPrivateData(UPLIFT_RESHADE_DEVICE_GUID, &size, &owner)) || size != sizeof(owner) || owner == nullptr) return;
+  if (FAILED(device->GetPrivateData(addon::UPLIFT_RESHADE_DEVICE_GUID, &size, &owner)) || size != sizeof(owner) || owner == nullptr) return;
   const std::unique_lock lock(g_state->mutex);
   const HoldsLockForNr holds;  // the Session's unload reaches the snippet's Shutdown1 on this thread
   const auto found = g_state->devices.find(owner);
@@ -564,6 +655,166 @@ void AddonRouting::BeforeCoreShutdownD3D12(ID3D12Device* device) {
   addon::DeviceContext* const context = entry.context.get();
   context->OnCoreShutdown(addon::D3D12_CORE_SHUTDOWN_WAIT, creates, serial);
   NoteLatchIfTripped(g_state, context);  // a removal first seen here still decides the latch
+}
+
+// Plan 18: the NGX API the game's DLSS on this device goes through, for the registry's per-API questions.
+ngx_hooks::NgxApi DlssApiOf(const DeviceEntry& entry) {
+  return (entry.vulkan ? ngx_hooks::NgxApi::VULKAN : entry.d3d11 ? ngx_hooks::NgxApi::D3D11 : ngx_hooks::NgxApi::D3D12);
+}
+
+// Plan 18 (design §5): why the DLSS stages cannot run on this Direct3D 11 device, or empty. With the add-on's lock held.
+std::string_view D3D11DlssReason(const AddonState& state, const DeviceEntry& entry) {
+  if (!state.dlss_unavailable_reason.empty()) return state.dlss_unavailable_reason;  // hooks off or failed, ReShade, the latch
+  if (entry.foreign_dlss && !(entry.context && entry.context->DlssSeen())) return ui::FOREIGN_D3D12_DLSS_REASON;
+  return {};
+}
+
+// Plan 18 (design §7): DiagnosticRemoveDevice at a Direct3D 11 DLSS stage removes Uplift's private device inside the game's frame, right after a hand-off
+// queued the game's wait on it, so the e2e case proves the game's queue is released. The present-time removal skips such a device.
+// Test phase (design §6, the owner's criterion correction): the removal happens with both queues at rest, only waiting, as the never-hang proof means it. On
+// the removal frame the private queue is first held by a gate fence nobody signals, queued ahead of the hand-off's own work, so NR's kernels do not run, and
+// the removal waits (DiagnosticWaitForGameSignal, up to 500 ms) until the game's queue passed its copies into the shares and sits at its wait. Removing the
+// device while GPU work touching its allocations runs (NR's kernels, or the game's copies in) faults every SM (MMU fault) and the GPU's recovery hangs the
+// game's device too, whatever the fences do: measured DEVICE_HUNG and 384 nvlddmkm events with no gate, and the same with the gate alone; with both queues
+// waiting the removal releases the game's wait at once (probes P1-P4, and this case: 0 events). The gate exists only on that one frame of the hidden key.
+Microsoft::WRL::ComPtr<ID3D12Fence> DiagnosticGateMidFrame(const AddonState& state, const DeviceEntry& entry) {
+  if (state.settings.diagnostic_remove_device == 0u || entry.strikes.Stopped() || !entry.d3d11_bridge
+      || entry.diagnostic_frames + 1u != state.settings.diagnostic_remove_device) {
+    return nullptr;
+  }
+  Microsoft::WRL::ComPtr<ID3D12Fence> gate;
+  if (FAILED(entry.d3d11_bridge->Device()->CreateFence(0u, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)))
+      || FAILED(entry.d3d11_bridge->Queue()->Wait(gate.Get(), 1u))) {
+    nr::Log(nr::LogLevel::WARN, "Diagnostic (DiagnosticRemoveDevice): the private queue could not be held before NR's work; no removal on this frame");
+    return nullptr;
+  }
+  return gate;
+}
+
+// After the hand-off of a frame DiagnosticGateMidFrame held (`gate`): the removal, from the CPU, while the private queue waits on the gate. A held frame is
+// always removed, even when its hand-off skipped, so the queue never stays held; a held frame that cannot be removed releases its gate instead.
+void DiagnosticRemoveMidFrame(const AddonState& state, DeviceEntry& entry, const bridge::DlssHandoff& handoff, ID3D12Fence* gate) {
+  if (state.settings.diagnostic_remove_device == 0u) return;
+  if (handoff.wrote && !entry.strikes.Stopped()) {
+    ++entry.diagnostic_frames;
+  }
+  if (gate == nullptr) return;
+  Microsoft::WRL::ComPtr<ID3D12Device5> removable;
+  if (ID3D12Device* const private_device = PrivateDevice(entry);
+      !entry.strikes.Stopped() && private_device != nullptr && SUCCEEDED(private_device->QueryInterface(IID_PPV_ARGS(&removable)))) {
+    const bool game_waiting = entry.d3d11_bridge->DiagnosticWaitForGameSignal(500u);
+    nr::Logf(nr::LogLevel::WARN,
+             "Diagnostic (DiagnosticRemoveDevice = {}): removing Uplift's own private Direct3D 12 device inside the game's frame (its queue held ahead of "
+             "NR's work; the game's queue {})",
+             state.settings.diagnostic_remove_device, (game_waiting ? "at its wait" : "not yet at its wait after 500 ms"));
+    removable->RemoveDevice();
+    return;
+  }
+  gate->Signal(1u);
+  nr::Log(nr::LogLevel::WARN, "Diagnostic (DiagnosticRemoveDevice): Uplift's private device could not be removed on this frame; its queue is released");
+}
+
+const void* AddonRouting::DeviceOfD3D11(ID3D12GraphicsCommandList* list) {
+  bool deferred = false;
+  const void* const owner = addon::D3D11ContextOwner(nr::D3D11ContextOf(list), &deferred);
+  if (deferred) {
+    static std::atomic<bool> logged = false;
+    if (!logged.exchange(true)) {
+      nr::Log(nr::LogLevel::INFO, "Direct3D 11: a DLSS call on a deferred context is passed through untouched (NGX's Direct3D 11 backend refuses them)");
+    }
+  }
+  return owner;
+}
+
+const void* AddonRouting::DeviceOfD3D11Device(ID3D11Device* device) {
+  return addon::D3D11DeviceMark(device);
+}
+
+// Plan 18 (design §3, §4): after the original evaluate of a Direct3D 11 main handle, on the game's thread and immediate context: the context decides first
+// (nothing crosses unless NR runs), then the bridge's hand-off (After DLSS) or the ring copy (Source = Present). The lock is held for the decision, the copies
+// and the submit only; nothing waits on the CPU.
+void AddonRouting::OnMainEvaluateD3D11(const void* device, ID3D12GraphicsCommandList* /*list*/, const ngx_hooks::DlssFrame& frame) {
+  const std::unique_lock lock(g_state->mutex);
+  const HoldsLockForNr holds;  // as OnMainEvaluate's: a starving present's catch-up may unload NR here
+  AddonState& state = *g_state;
+  auto* const owner = static_cast<api::device*>(const_cast<void*>(device));
+  const auto found = state.devices.find(owner);
+  if (found == state.devices.end() || !found->second.d3d11_bridge || !found->second.context) return;
+  DeviceEntry& entry = found->second;
+  const auto now = std::chrono::steady_clock::now();
+  if (const HRESULT removed = reinterpret_cast<ID3D11Device*>(owner->get_native())->GetDeviceRemovedReason(); FAILED(removed)) {
+    entry.context->NoteGameDeviceRemoved(removed, now);  // design §6: the latch window decides; nothing crosses again
+    NoteLatchIfTripped(&state, entry.context.get());
+    return;
+  }
+  const nr::Rect output = bridge::ResolveRegion11(nr::D3D11ResourceOf(frame.output), frame.output_region);
+  const addon::BridgedDlssDecision decision = entry.context->DecideAfterEvaluate(frame, {output.width, output.height}, now);
+  if (decision.work == addon::BridgedDlssWork::PRESENT_MOTION) {
+    ID3D11Resource* const motion = nr::D3D11ResourceOf(frame.motion_vectors);
+    if (entry.d3d11_bridge->CopyPresentMotion(motion, frame.motion_region, decision.motion_scale_x, decision.motion_scale_y) && !entry.present_motion_logged) {
+      entry.present_motion_logged = true;
+      const nr::Rect region = bridge::ResolveRegion11(motion, frame.motion_region);
+      nr::Logf(nr::LogLevel::INFO, "Direct3D 11: DLSS's motion vectors copied for Present ({}x{})", region.width, region.height);
+    }
+  } else if (decision.work == addon::BridgedDlssWork::AFTER_DLSS) {
+    const Microsoft::WRL::ComPtr<ID3D12Fence> gate = DiagnosticGateMidFrame(state, entry);  // null but on the hidden key's removal frame
+    DiagnosticRemoveMidFrame(state, entry, bridge::RunDlssStage(*entry.d3d11_bridge, *entry.context, decision.work, frame, now), gate.Get());
+  }
+  NoteLatchIfTripped(&state, entry.context.get());
+}
+
+// Plan 18 (design §3): before the original evaluate: NR before upscaling through the hand-off; DLSS reads the bridge's shared RGBA16F texture as Color for this
+// one evaluate (the detour swaps it in and puts the game's own back).
+ID3D12Resource* AddonRouting::BeforeMainEvaluateD3D11(const void* device, ID3D12GraphicsCommandList* /*list*/, const ngx_hooks::DlssFrame& frame) {
+  const std::unique_lock lock(g_state->mutex);
+  const HoldsLockForNr holds;  // as OnMainEvaluate's: a starving present's catch-up may unload NR here
+  AddonState& state = *g_state;
+  auto* const owner = static_cast<api::device*>(const_cast<void*>(device));
+  const auto found = state.devices.find(owner);
+  if (found == state.devices.end() || !found->second.d3d11_bridge || !found->second.context) return nullptr;
+  DeviceEntry& entry = found->second;
+  const auto now = std::chrono::steady_clock::now();
+  if (const HRESULT removed = reinterpret_cast<ID3D11Device*>(owner->get_native())->GetDeviceRemovedReason(); FAILED(removed)) {
+    entry.context->NoteGameDeviceRemoved(removed, now);  // design §6: the latch window decides; nothing crosses again
+    NoteLatchIfTripped(&state, entry.context.get());
+    return nullptr;
+  }
+  const nr::Rect color = bridge::ResolveRegion11(nr::D3D11ResourceOf(frame.color), frame.color_region);
+  const addon::BridgedDlssDecision decision = entry.context->DecideBeforeEvaluate(frame, {color.width, color.height}, now);
+  if (decision.work != addon::BridgedDlssWork::BEFORE_UPSCALING) return nullptr;
+  const Microsoft::WRL::ComPtr<ID3D12Fence> gate = DiagnosticGateMidFrame(state, entry);  // null but on the hidden key's removal frame
+  const bridge::DlssHandoff handoff = bridge::RunDlssStage(*entry.d3d11_bridge, *entry.context, decision.work, frame, now);
+  DiagnosticRemoveMidFrame(state, entry, handoff, gate.Get());
+  NoteLatchIfTripped(&state, entry.context.get());
+  return (handoff.color != nullptr ? nr::AsResource(handoff.color) : nullptr);
+}
+
+void AddonRouting::ColorSwapRejectedD3D11(const void* device, ID3D12GraphicsCommandList* /*list*/) {
+  const std::unique_lock lock(g_state->mutex);
+  const auto found = g_state->devices.find(static_cast<api::device*>(const_cast<void*>(device)));
+  if (found != g_state->devices.end() && found->second.context) {
+    found->second.context->OnColorSwapRejected();
+  }
+}
+
+// Plan 18 (design §5): the process's first game DLSS evaluate, once, at INFO, for remote testers. Lock-free: the device by its mark or its list's state.
+// Batch 1 review M3: NgxBridge calls this ahead of Vulkan's close guard, so it never throws; a failure logs nothing.
+void AddonRouting::LogFirstEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) {
+  try {
+    std::string_view device = "a Vulkan device";
+    if (api == ngx_hooks::NgxApi::D3D11) {
+      bool deferred = false;
+      const void* const owner = addon::D3D11ContextOwner(nr::D3D11ContextOf(list), &deferred);
+      device = (deferred ? "a deferred context (passed through)"
+                : owner != nullptr ? "the game's device"
+                                   : "an immediate context (Uplift has not marked its device yet: NR has not been on)");
+    } else if (api == ngx_hooks::NgxApi::D3D12) {
+      device = (addon::FindListState(list) != nullptr ? "a device ReShade tracks" : "a device ReShade does not track (a mod's own?)");
+    }
+    nr::Log(nr::LogLevel::INFO, addon::FormatDlssSummary(addon::SummarizeEvaluate(api, frame, device)));
+  } catch (...) {
+    // No-op: the summary is for the log alone, and the evaluate's own path must go on.
+  }
 }
 
 // NR's view of ReShade's immediate command list on the presenting queue. ReShade drops a queue's
@@ -698,8 +949,10 @@ void RunBridged(DeviceEntry& entry, api::device* device, addon::TriggerPoint poi
     entry.d3d10_bridge->Run(reinterpret_cast<ID3D10Resource*>(entry.back_buffer.handle),
                             reinterpret_cast<ID3D10Resource*>(launchpad_motion), record);
   } else {
+    // Plan 18 (design §4): at Present, this frame's ring slot of DLSS's vectors (copied in the game's evaluate) comes before Launchpad's.
     entry.d3d11_bridge->Run(reinterpret_cast<ID3D11Resource*>(entry.back_buffer.handle),
-                            reinterpret_cast<ID3D11Resource*>(launchpad_motion), record);
+                            reinterpret_cast<ID3D11Resource*>(launchpad_motion), record,
+                            /*dlss_motion=*/entry.context->CurrentPlacement() == addon::Placement::PRESENT);
   }
 }
 
@@ -795,6 +1048,7 @@ void OnDestroyDevice(api::device* device) {
     std::unique_ptr<bridge::D3D10Bridge> d3d10_bridge;  // Plan 8: goes after the lock too (its relay's proxy)
     std::unique_ptr<bridge::VkBridge> vk_bridge;        // Plan 11: the same, for a Vulkan device's private D3D12 device
     std::unique_ptr<bridge::GlBridge> gl_bridge;        // Plan 12: and for an OpenGL context's
+    std::vector<std::unique_ptr<bridge::VkBridge>> retiring_vk;  // Plan 17: Vulkan bridges a retry tore down, still behind their fences
     std::unique_ptr<addon::VkDlssContext> vk_dlss;      // Plan 13: abandoned under the lock, destroyed after it (no Vulkan or NGX call)
     {
       const std::unique_lock lock(g_state->mutex);
@@ -845,7 +1099,13 @@ void OnDestroyDevice(api::device* device) {
       }
       if (device->get_api() == api::device_api::d3d12) {
         // Plan 15: Uplift's mark goes with the ReShade device (ReShade removes its own the same way, after this event); a no-op on a device never marked.
-        reinterpret_cast<ID3D12Device*>(device->get_native())->SetPrivateData(UPLIFT_RESHADE_DEVICE_GUID, 0u, nullptr);
+        reinterpret_cast<ID3D12Device*>(device->get_native())->SetPrivateData(addon::UPLIFT_RESHADE_DEVICE_GUID, 0u, nullptr);
+      }
+      if (device->get_api() == api::device_api::d3d11) {
+        addon::MarkD3D11Device(reinterpret_cast<ID3D11Device*>(device->get_native()), nullptr);  // Plan 18: the mark goes with the ReShade device
+      }
+      if (found != g_state->devices.end()) {
+        g_state->bridge.NoteD3D11Watch(found->second.d3d11_watch_counted, false);
       }
       if (found != g_state->devices.end() && found->second.vk_bridge) {
         // Vulkan design §6, R62: ReShade has already deleted its queues and dropped this device from its dispatch map, so no Vulkan call through
@@ -858,6 +1118,14 @@ void OnDestroyDevice(api::device* device) {
         // OpenGL design §3.6: ReShade makes the share group's last context current only for its own teardown, so Uplift makes no GL call here at all: its
         // names die with the share group. After Stop and Teardown, as the D3D bridges.
         found->second.gl_bridge->ForgetGl();
+      }
+      if (found != g_state->devices.end()) {
+        // Plan 17: a retry's torn-down Vulkan bridges free what is left of their imports as the live one does (R62: no queue, the device is idle).
+        for (std::unique_ptr<bridge::VkBridge>& retiring : found->second.retiring_vk) {
+          addon::ReshadeVkHost host(device, nullptr, retiring->VulkanDevice().vkQueueSubmit);
+          retiring->FreeVulkan(host);
+        }
+        retiring_vk = std::move(found->second.retiring_vk);
       }
       if (device->get_api() == api::device_api::vulkan) {
         // The pending marker's other end (design §2.3): every Vulkan device, also one that never presented. The hook's own lock, never this one's.
@@ -1036,13 +1304,18 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     PollHooks();
     StampThisThread();
     const auto now = std::chrono::steady_clock::now();
-    // Plan 7 (key decision a): what D3D12CreateDevice returned for a new D3D11 bridge (ReShade's proxy in a game).
-    // Its last release raises destroy_device, whose handler takes the add-on's lock. Declared before the lock, it is
-    // released after it.
+    // Plan 7 (key decision a): the private device D3D12Side made for a new bridge. On the fallback it is D3D12CreateDevice's (ReShade's proxy in a game),
+    // whose last release raises destroy_device, whose handler takes the add-on's lock; the device factory's raises nothing, and goes the same way.
+    // Declared before the lock, it is released after it.
     Microsoft::WRL::ComPtr<ID3D12Device> release_after_unlock;
     // Plan 8: what D3D11CreateDevice returned for a new D3D10 bridge's relay (ReShade's proxy in a game); released after
     // the lock, like release_after_unlock.
     Microsoft::WRL::ComPtr<ID3D11Device> relay_after_unlock;
+    // Plan 17: what Retry now tears down, destroyed after the lock as destroy_device does (a private device's last release raises destroy_device).
+    std::unique_ptr<bridge::D3D11Bridge> d3d11_after_unlock;
+    std::unique_ptr<bridge::D3D10Bridge> d3d10_after_unlock;
+    std::unique_ptr<bridge::GlBridge> gl_after_unlock;
+    std::vector<std::unique_ptr<bridge::VkBridge>> vk_after_unlock;
     const std::unique_lock lock(g_state->mutex);
     // A Session may unload NR here (BeginFrame: the native Vulkan context's, Plan 13, and the Direct3D 12 context's, Plan 15), and its snippet may reach the
     // core's Shutdown1 on this thread, under the lock.
@@ -1127,12 +1400,15 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
           entry.runtime->get_technique_effect_name(technique, effect_name);
           link_ready = (std::string_view(effect_name) == UPLIFT_FX_EFFECT_NAME);
         }
-        char link_value[8] = {};
+        char link_value[32] = {};
+        const bool link_defined =
+            entry.runtime->get_preprocessor_definition_for_effect(UPLIFT_FX_EFFECT_NAME, UPLIFT_USE_LAUNCHPAD_DEFINE, link_value);
+        // 1.0.1 (review I-4): without one at the effect scope Uplift.fx compiles with the preset's or the global definition (a null effect name reads those).
+        char outer_value[32] = {};
+        const bool outer_defined = (!link_defined && entry.runtime->get_preprocessor_definition(UPLIFT_USE_LAUNCHPAD_DEFINE, outer_value));
         // An Uplift.fx that failed to compile with "1" lists no technique. Its own UPLIFT_USE_LAUNCHPAD entry still
-        // means ReShade knows it (only an effect it found gets one), so "0" can go back; the value itself is not read.
-        if (!link_ready
-            && entry.runtime->get_preprocessor_definition_for_effect(UPLIFT_FX_EFFECT_NAME, UPLIFT_USE_LAUNCHPAD_DEFINE,
-                                                                     link_value)) {
+        // means ReShade knows it (only an effect it found gets one), so "0" can go back.
+        if (!link_ready && link_defined) {
           entry.runtime->enumerate_techniques(nullptr, [&link_ready](api::effect_runtime*, api::effect_technique) {
             link_ready = true;  // not loading
           });
@@ -1149,9 +1425,12 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
             .wanted = (launchpad_technique.handle != 0u && entry.runtime->get_technique_state(launchpad_technique)
                        && (state.settings.motion_vectors == ui::MotionVectorSource::AUTO
                            || state.settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD)),
+            // 1.0.1: a set that changes nothing is skipped.
+            .current = addon::LaunchPadDefinition((link_defined ? std::optional<std::string_view>(link_value) : std::nullopt),
+                                                  (outer_defined ? std::optional<std::string_view>(outer_value) : std::nullopt)),
         });
         if (link) {
-          nr::Logf(nr::LogLevel::INFO, "LaunchPad link: UPLIFT_USE_LAUNCHPAD = {} (ReShade reloads Uplift.fx)", (*link ? 1 : 0));
+          nr::Log(nr::LogLevel::INFO, addon::LaunchPadLinkLine(*link));
           entry.runtime->set_preprocessor_definition_for_effect(UPLIFT_FX_EFFECT_NAME, UPLIFT_USE_LAUNCHPAD_DEFINE,
                                                                 (*link ? "1" : "0"));
         }
@@ -1362,6 +1641,8 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
             },
             &state.coalescer, now);
         native_config.present_motion_copy = present_motion_wanted;
+        // Plan 18 Task 12: the game released its Vulkan DLSS here (asked of the registry once the context saw DLSS: fix round 1, M-5).
+        native_config.dlss_released = addon::DlssReleased(state.bridge.Registry(), device, ngx_hooks::NgxApi::VULKAN, native.DlssSeen());
         // Key decision g: the effect runtime's queue (none until the runtime is up: the frame is then not signalled).
         native.BeginFrame(entry.queue, native_config, native_allowed, state.claim.Owner() == device, now);
         NoteLatchIfTripped(&state, &native);
@@ -1389,6 +1670,86 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
           state.bridge.SetPreSr(state.settings.enabled && state.settings.pre_upscale && state.settings.source != ui::PlacementSource::PRESENT
                                 && state.dlss_unavailable_reason.empty());
           return;
+        }
+      }
+    }
+    if (Bridged(entry)) {
+      // Plan 17: Vulkan bridges a retry tore down go once the game's queue has passed the fences behind their imports.
+      for (auto retiring = entry.retiring_vk.begin(); retiring != entry.retiring_vk.end();) {
+        addon::ReshadeVkHost host(device, entry.queue, (*retiring)->VulkanDevice().vkQueueSubmit);
+        if (entry.queue != nullptr && (*retiring)->FreeRetired(host)) {
+          vk_after_unlock.push_back(std::move(*retiring));
+          retiring = entry.retiring_vk.erase(retiring);
+        } else {
+          ++retiring;
+        }
+      }
+      // Plan 17 (1.0.1 design §3): a stop is counted once for the 2-strike rule. A private device the context found removed latches its bridge too, so the
+      // card and the log name it.
+      if (entry.context && entry.strikes.Note(PrivateDeviceStopped(entry), PrivateDeviceIndependent(entry))) {
+        if (const std::optional<addon::NrHeartbeat::Figures> figures = entry.heartbeat.Stop(now)) {
+          LogHeartbeat(entry, device, "NR stopped after", *figures);  // 1.0.1 (F2): how long NR ran, with what, and the memory then
+        }
+        if (BridgeLatch(entry).empty()) {
+          const std::string reason = std::format("The {} bridge stopped: its private Direct3D 12 device was removed",
+                                                 (entry.d3d11 ? "Direct3D 11" : entry.d3d10 ? "Direct3D 10" : entry.vulkan ? "Vulkan" : "OpenGL"));
+          nr::Log(nr::LogLevel::ERR, reason);
+          StopBridge(entry, reason);
+        }
+        if (entry.strikes.Exhausted()) {
+          nr::Logf(nr::LogLevel::WARN, "NR stopped twice this session on this device: it stays off until the game restarts");
+        } else if (entry.strikes.Unretryable()) {
+          // Test phase (review M-3): the fallback's private device is the adapter's shared one, which the abandoned NR runtime keeps removed: no new device
+          // can be made in this process, so there is no Retry now.
+          nr::Log(nr::LogLevel::WARN, std::string(ui::PRIVATE_DEVICE_STOPPED_FINAL_REASON));
+        } else {
+          nr::Logf(nr::LogLevel::INFO, "NR stopped on this device ({} of {} this session): Retry now in Uplift's panel starts it again on a new private "
+                   "Direct3D 12 device", entry.strikes.Stops(), addon::BridgeStrikes::LIMIT);
+          if (state.settings.diagnostic_remove_device != 0u) {
+            entry.diagnostic_retry_in = DIAGNOSTIC_RETRY_PRESENTS;
+          }
+        }
+      }
+      if (entry.diagnostic_retry_in != 0u && --entry.diagnostic_retry_in == 0u && entry.strikes.RetryAllowed()) {
+        nr::Log(nr::LogLevel::WARN, "Diagnostic (DiagnosticRemoveDevice): pressing Retry now");
+        entry.retry_pending = true;
+      }
+      if (entry.retry_pending) {
+        // Plan 17: Retry now. As the game's own device going (Plan 7/11/12): Stop before Teardown, so a wedged private queue drains during Teardown's wait;
+        // the private device is only released (Teardown abandons a removed one's NR without an NGX call, spec §13). The game's side of the bridge goes by
+        // its API's own rules: GL names now, on the present thread with the runtime's context current (else at a later present); Vulkan imports behind
+        // fences (retiring_vk); D3D11 and D3D10 objects with the bridge, after the lock. The next present builds a new bridge and context.
+        const bool gl_ready = (!entry.gl_bridge || addon::ReshadeGlHost(entry.gl_bridge->Gl(), entry.queue, entry.present_queue).Valid());
+        if (gl_ready) {
+          entry.retry_pending = false;
+          if (entry.strikes.Retried()) {
+            StopBridge(entry, "Retry now");
+            if (entry.context) {
+              entry.context->Teardown();
+              entry.context.reset();
+            }
+            state.claim.Forget(device);
+            if (entry.vk_bridge) {
+              addon::ReshadeVkHost host(device, entry.queue, entry.vk_bridge->VulkanDevice().vkQueueSubmit);
+              entry.vk_bridge->RetireAll(host);
+              entry.retiring_vk.push_back(std::move(entry.vk_bridge));
+            }
+            if (entry.gl_bridge) {
+              addon::ReshadeGlHost host(entry.gl_bridge->Gl(), entry.queue, entry.present_queue);
+              entry.gl_bridge->ReleaseGl(host);
+              entry.gl_bridge->ForgetGl();  // nothing is left to delete; the destructor makes no GL call
+              gl_after_unlock = std::move(entry.gl_bridge);
+            }
+            state.bridge.NoteD3D11Watch(entry.d3d11_watch_counted, false);  // Plan 18: the next context counts again
+            entry.present_motion_logged = false;
+            d3d11_after_unlock = std::move(entry.d3d11_bridge);
+            d3d10_after_unlock = std::move(entry.d3d10_bridge);
+            entry.rejected = false;
+            entry.message.clear();
+            entry.diagnostic_frames = 0u;
+            nr::Log(nr::LogLevel::INFO, "Retry now: the stopped bridge and its NR are gone; a new private Direct3D 12 device starts with the next frame");
+          }
+          return;  // this frame goes without NR
         }
       }
     }
@@ -1486,7 +1847,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       std::string error;
       entry.context = addon::DeviceContext::Create(
           native_device, {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory}, &error,
-          {.bridged = Bridged(entry)});
+          {.bridged = Bridged(entry), .dlss_stages = entry.d3d11});  // Plan 18: a Direct3D 11 bridge's context runs the DLSS stages
       if (!entry.context) {
         entry.rejected = true;
         // Safe under the lock: release_after_unlock and relay_after_unlock still hold the proxies.
@@ -1506,10 +1867,14 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       entry.message.clear();
       entry.context->SetDlssUnavailableReason(state.dlss_unavailable_reason);
       note_static_block(snippet);
+      if (entry.d3d11) {
+        // Plan 18 (design §2): the mark the hooked Direct3D 11 calls find this device by, whichever pointer the game hands NGX (ReShade's proxy forwards it).
+        addon::MarkD3D11Device(reinterpret_cast<ID3D11Device*>(device->get_native()), device);
+      }
       if (!Bridged(entry)) {
         // Plan 15: the mark the game's NGX shutdown finds this device by (BeforeCoreShutdownD3D12), whichever pointer the game hands NGX.
         api::device* const owner = device;
-        native_device->SetPrivateData(UPLIFT_RESHADE_DEVICE_GUID, sizeof(owner), &owner);
+        native_device->SetPrivateData(addon::UPLIFT_RESHADE_DEVICE_GUID, sizeof(owner), &owner);
         // Fix round, minor 3: a context made after the game shut NGX down here (its last one ended with its present queue) starts held, or abandoned.
         entry.context->SeedCoreHold(entry.core_hold);
       }
@@ -1518,7 +1883,41 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     const ui::Settings& settings = state.settings;
     hash_runtime_once();
     entry.context->SetBlockedReason(blocked_reason());
+    if (entry.d3d11) {
+      // Plan 18 (design §5, §6): a foreign Direct3D 12 DLSS device can appear at any time; the game's own device removed decides the latch window; the hooks
+      // watch this device's evaluates while NR is on or not yet released (Plan 13 I-2's rule).
+      if (!entry.foreign_dlss && state.bridge.ForeignD3D12Dlss() && !entry.context->DlssSeen()) {
+        entry.foreign_dlss = true;
+        nr::Logf(nr::LogLevel::INFO, "Direct3D 11: {}", ui::FOREIGN_D3D12_DLSS_REASON);
+      }
+      entry.context->SetDlssUnavailableReason(std::string(D3D11DlssReason(state, entry)));
+      if (const HRESULT removed = reinterpret_cast<ID3D11Device*>(device->get_native())->GetDeviceRemovedReason(); FAILED(removed)) {
+        entry.context->NoteGameDeviceRemoved(removed, now);
+        NoteLatchIfTripped(&state, entry.context.get());  // fix round 1 (M-2): now, as the evaluate path does, with the removal's own text
+      }
+      state.bridge.NoteD3D11Watch(entry.d3d11_watch_counted, state.settings.enabled || entry.context->NrState() != nr::SessionState::OFF);
+    }
     const addon::ContextStatus before = entry.context->Status();
+    // 1.0.1 (F2): a line a minute while NR runs, from the recordings that applied NR (any placement, any thread) and the latest one's motion source. A
+    // native Direct3D 12 device's removal is reported right after BeginFrame below, which is where it is found; a bridged device's stop where its strike
+    // is counted, above.
+    if (const std::optional<addon::NrHeartbeat::Figures> figures =
+            entry.heartbeat.Note(entry.context->NrRecordings(), entry.context->LatestMotionSource(), now)) {
+      LogHeartbeat(entry, device, "NR running:", *figures);
+    }
+    // Plan 17: DiagnosticRemoveDevice (hidden, diagnostic only): Uplift's own private device is removed once NR has run that many frames on it (never the
+    // game's: Bridged only), so Retry now and the 2-strike rule can be tested without a real hang.
+    if (state.settings.diagnostic_remove_device != 0u && Bridged(entry) && before.nr_applied && !entry.strikes.Stopped()
+        && !(entry.d3d11 && addon::IsDlssStage(entry.context->CurrentPlacement()))  // Plan 18: DiagnosticRemoveMidFrame's
+        && ++entry.diagnostic_frames == state.settings.diagnostic_remove_device) {
+      Microsoft::WRL::ComPtr<ID3D12Device5> removable;
+      if (ID3D12Device* const private_device = PrivateDevice(entry);
+          private_device != nullptr && SUCCEEDED(private_device->QueryInterface(IID_PPV_ARGS(&removable)))) {
+        nr::Logf(nr::LogLevel::WARN, "Diagnostic (DiagnosticRemoveDevice = {}): removing Uplift's own private Direct3D 12 device",
+                 state.settings.diagnostic_remove_device);
+        removable->RemoveDevice();
+      }
+    }
     const bool nr_allowed =
         state.claim.Update(device, settings.enabled, before.dlss_seen, before.session.state != nr::SessionState::OFF);
     // Plan 5 (key decision 8): without a running UPLIFT_MASK there is no mask to bind; the copy is released (and the native context's too, in the Vulkan block
@@ -1551,8 +1950,15 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     // Plan 14 (batch 2 review, minor 2): the bridged context's Details motion line says what is true on Vulkan, where DLSS's vectors come as copies.
     frame_config.vulkan = entry.vulkan;
     frame_config.present_motion_copy = present_motion_wanted;
+    if (entry.d3d11) {
+      // Plan 18 (design §4): Direct3D 11's ring, as Direct3D 12's amendment 7: Source = Present.
+      frame_config.present_motion_copy = (settings.source == ui::PlacementSource::PRESENT && frame_config.motion_vectors);
+    }
     // Plan 15: a Direct3D 12 context held after the game's NGX shutdown resumes once this rises (the game created its DLSS again); bridged ones never hold.
     frame_config.upscaler_creates = state.bridge.Registry().UpscalerCreates(device);
+    // Plan 18 Task 12: the game released its DLSS on this device (or on Direct3D 11 shut NGX down): once that holds, its DLSS stages fall back to Present.
+    // Fix round 1 (M-5): the registry is asked once the context saw DLSS.
+    frame_config.dlss_released = addon::DlssReleased(state.bridge.Registry(), device, DlssApiOf(entry), entry.context->DlssSeen());
     addon::TargetInfo target = {
         .resource = reinterpret_cast<ID3D12Resource*>(entry.back_buffer.handle),
         .color_space = static_cast<color::ColorSpace>(swapchain->get_color_space()),
@@ -1582,7 +1988,9 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         frame = entry.d3d10_bridge->BeginFrame(reinterpret_cast<ID3D10Resource*>(entry.back_buffer.handle), settings.enabled, running, now);
         frame_queue = entry.d3d10_bridge->Queue();
       } else {
-        frame = entry.d3d11_bridge->BeginFrame(reinterpret_cast<ID3D11Resource*>(entry.back_buffer.handle), settings.enabled, running, now);
+        // Plan 18: at a DLSS stage NR runs inside the game's frame, so the back buffer is only described.
+        frame = entry.d3d11_bridge->BeginFrame(reinterpret_cast<ID3D11Resource*>(entry.back_buffer.handle), settings.enabled, running, now,
+                                               /*present_copy=*/!addon::IsDlssStage(entry.context->CurrentPlacement()));
         frame_queue = entry.d3d11_bridge->Queue();
       }
       target.resource = frame.color;
@@ -1593,6 +2001,24 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     }
     const addon::TriggerPoint point =
         entry.context->BeginFrame(frame_queue, frame_config, target, entry.marker.handle != 0u, now);
+    if (entry.d3d11_bridge) {
+      // Plan 18: the shares of what no longer runs go now: the DLSS stages' when NR runs at Present, the ring when its copies are not wanted (NR off
+      // included, so "copied for Present" is logged once per activation).
+      const addon::Placement placement = entry.context->CurrentPlacement();
+      if (!addon::IsDlssStage(placement)) {
+        entry.d3d11_bridge->ReleaseDlss();
+      }
+      if (!frame_config.present_motion_copy || placement != addon::Placement::PRESENT || entry.context->NrState() == nr::SessionState::OFF) {
+        entry.d3d11_bridge->ReleasePresentMotion();
+        entry.present_motion_logged = false;
+      }
+    }
+    if (!Bridged(entry) && entry.context->DeviceLost()) {
+      // 1.0.1 (F2): the game's own Direct3D 12 device, found removed by this very BeginFrame (or earlier): the heartbeat's figures, once.
+      if (const std::optional<addon::NrHeartbeat::Figures> figures = entry.heartbeat.Stop(now)) {
+        LogHeartbeat(entry, device, "NR stopped after", *figures);
+      }
+    }
     if (Bridged(entry)) {
       RunBridged(entry, device, point, 0u, vk::Usage::PRESENT, entry.back_buffer);
     } else {
@@ -1616,7 +2042,9 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     // also gated on the latch (or any other reason DLSS placements stopped being available mid-session).
     // Key decision 6: tracking runs whatever Source says now, so a live Source switch applies at once; a
     // Source = Present game still needs it once MotionVectors wants DLSS's motion vectors there too.
-    addon::SetTracking(state.tracking_registered && state.settings.enabled && before.dlss_seen
+    // Plan 18: never for a bridged device: a bridge never records on a game's Direct3D 12 list, and a Direct3D 11 DLSS game must not turn state tracking
+    // on for a mod's device.
+    addon::SetTracking(state.tracking_registered && state.settings.enabled && before.dlss_seen && !Bridged(entry)
                        && state.dlss_unavailable_reason.empty()
                        && (state.settings.source != ui::PlacementSource::PRESENT
                            || state.settings.motion_vectors == ui::MotionVectorSource::AUTO
@@ -1838,7 +2266,16 @@ ui::StatusCard CardFor(const AddonState& state, const DeviceEntry& entry, const 
                                                  : std::string_view(entry.message)),
     });
   }
+  // Plan 17: a stopped private-device bridge is its own card (Retry now, or the second time the restart); its latch text names what stopped.
+  const bool private_stopped = (Bridged(entry) && (entry.strikes.Stopped() || PrivateDeviceStopped(entry)));  // the present counts it next
+  std::string_view private_reason = BridgeLatch(entry);
+  if (private_reason.empty()) {
+    private_reason = status->output_problem;
+  }
   return ui::BuildStatusCard({
+      .private_stopped = (private_stopped ? private_reason : std::string_view()),
+      .private_stops_final = (Bridged(entry) && entry.strikes.Exhausted()),
+      .private_stop_unretryable = (Bridged(entry) && entry.strikes.Unretryable()),
       .device_lost = status->device_lost,
       .stopped = (status->abandoned ? ui::D3D12_NGX_ABANDONED_REASON : std::string_view()),  // Plan 15 fix round (minor 6)
       .blocked = status->blocked,
@@ -1871,6 +2308,8 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     view.dlss_explicit = (overlay_device_api == api::device_api::vulkan);
     // Plan 14 (design §1): Setup's facts. The stored preference here; what is possible and what runs below, per path; the draw resolves them.
     ui::SetupFacts facts;
+    std::string after_dlss_problem;  // Plan 18: Setup's facts view these; they outlive FinishSetup
+    std::string before_upscaling_problem;
     addon::FillPreference(&facts, state.settings, view.dlss_explicit);
     if (overlay_device_api != api::device_api::d3d9) {
       view.d3d9ex_unavailable = "Only for Direct3D 9 games";  // Plan 10: the 9Ex toggle works in 64-bit Direct3D 9 games too
@@ -1892,7 +2331,11 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       [[maybe_unused]] const auto& [device, entry] = *found;
       // ui-review.md §4.1: known before a context exists, so a D3D11 game greys the DLSS toggles from
       // its first frame.
-      view.dlss_unavailable = (Bridged(entry) ? std::string(addon::BRIDGED_DLSS_REASON) : state.dlss_unavailable_reason);
+      // Plan 18 (design §5): a Direct3D 11 device runs the DLSS stages through its bridge; its own reasons (a foreign Direct3D 12 DLSS device) replace the
+      // bridged one.
+      view.dlss_unavailable = (entry.d3d11   ? std::string(D3D11DlssReason(state, entry))
+                               : Bridged(entry) ? std::string(addon::BRIDGED_DLSS_REASON)
+                                                : state.dlss_unavailable_reason);
       // Final review I-1: the native Vulkan context stopped for good (the game shut NGX down on the device, or it was lost): nothing inside the game's frame
       // runs again this session, so the DLSS stages and DLSS's vectors are a fixed cause.
       const bool native_stopped = (entry.vk_dlss && !entry.vk_dlss->CanCopy());
@@ -1914,12 +2357,12 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       // Batch 1 review I-1: on Direct3D 12 only a real evaluate counts (added below from the context's status); a create counts on Vulkan, where the passthrough
       // context sees no evaluate until a DLSS pick makes it watch.
       facts.dlss_seen = addon::SetupDlssSeen(entry.vulkan, state.bridge.Registry().UpscalerCreated(device), (entry.vk_dlss && entry.vk_dlss->DlssSeen()));
-      if (const NVSDK_NGX_Handle* const main_handle = state.bridge.Registry().MainHandle(device, entry.swapchain_size)) {
+      if (const NVSDK_NGX_Handle* const main_handle = state.bridge.Registry().MainHandle(device, entry.swapchain_size, DlssApiOf(entry))) {
         const std::optional<ngx_hooks::FeatureRecord> main_record = state.bridge.Registry().Find(main_handle);
         facts.ray_reconstruction = main_record && main_record->feature == NVSDK_NGX_Feature_RayReconstruction;
       }
       facts.launchpad_ready = entry.launchpad_ready;
-      facts.match_game_readable = (!Bridged(entry) || native_view);  // the bridges never see the game's DLSS create
+      facts.match_game_readable = (!Bridged(entry) || entry.d3d11 || native_view);  // the bridges never see the game's DLSS create (Plan 18: Direct3D 11's context reads it)
       // Final review, minor 3: at Present on Vulkan a DLSS stage reads it when it can run here, so Match game waits for one (temporary).
       facts.match_game_at_dlss_stages = (entry.vulkan && !native_view && view.dlss_unavailable.empty());
       if (entry.vulkan && !native_view) {
@@ -1961,6 +2404,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         view.placement_line = status.placement_line;
         view.motion_line = status.motion_line;
         view.work_line = status.work_line;  // P17, D4: the "Working at" readout
+        view.exposure_line = status.exposure_line;  // Plan 17: which input exposure NR used
         view.mask_note = entry.mask_note;
         view.ui_correction_note = status.ui_correction_note;
         view.frame_generation_line = ui::FormatFrameGenerationLine(
@@ -1977,7 +2421,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         if (entry.d3d11_bridge) {
           // Final review Minor 1: the bridge's shared textures count as Uplift's, and its busy skips show here.
           view.intermediate_bytes += entry.d3d11_bridge->SharedBytes();
-          view.api_line = entry.d3d11_bridge->StatusLine();
+          view.api_line = entry.d3d11_bridge->StatusLine(status.placement);  // Plan 18: names the DLSS stage NR runs at
         }
         if (entry.d3d10_bridge) {
           // Plan 8: the relay's keyed textures and the bridge's shared ones count as Uplift's; its busy skips show here.
@@ -2007,6 +2451,10 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         view.card = CardFor(state, entry, &status, view.status_line);
         // Plan 14: what runs, and the card's detail and notes (the working card's fixes hold only the passes note).
         addon::FillRunning(&facts, status, view.card.working);
+        after_dlss_problem = status.after_dlss_problem;  // Plan 18 (design §3): an image the bridge cannot share greys its stage
+        before_upscaling_problem = status.before_upscaling_problem;
+        facts.after_dlss_fixed = after_dlss_problem;
+        facts.before_upscaling_fixed = before_upscaling_problem;
         if (entry.vulkan && !native_view && entry.vk_dlss) {
           // Plan 14 (design §2.6): at Present on Vulkan the bridged context never sees the game's evaluate; the native context made (or missed) the copies.
           facts.dlss_motion_gap = entry.vk_dlss->PresentMotionGap();
@@ -2020,6 +2468,11 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
           view.dlss_unavailable = std::string(ui::D3D12_NGX_ABANDONED_REASON);
           facts.stopped = ui::D3D12_NGX_ABANDONED_REASON;
         }
+        if (Bridged(entry) && entry.strikes.Exhausted()) {
+          facts.stopped = ui::PRIVATE_DEVICE_STOPPED_TWICE_REASON;  // Plan 17: the 2-strike rule's second stop is a fixed cause
+        } else if (Bridged(entry) && entry.strikes.Unretryable()) {
+          facts.stopped = ui::PRIVATE_DEVICE_STOPPED_FINAL_REASON;  // review M-3: a stop on the shared device, final at once
+        }
         facts.frame_generation_blocks_present = (status.frame_generation.active && !state.settings.present_with_frame_gen);
         facts.vram_bytes = view.runtime_bytes.value_or(0u) + view.intermediate_bytes;
         facts.latch_note = (state.settings.dlss_placement_blocked ? addon::LATCH_UNAVAILABLE_REASON : std::string_view());
@@ -2028,6 +2481,9 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       } else {
         view.card = CardFor(state, entry, nullptr, {});
       }
+      // Plan 18 Task 12: DLSS seen here, and the game switched it off since (a release, or on Direct3D 11 an NGX shutdown): the DLSS stages, DLSS's vectors
+      // and Match game wait for it (temporary), Present runs. Plan 15's hold, the stopped Vulkan context and the fixed causes keep their own text (ResolveSetup).
+      facts.dlss_off = addon::DlssReleased(state.bridge.Registry(), device, DlssApiOf(entry), facts.dlss_seen);
     }
     view.dlss_latched = state.settings.dlss_placement_blocked;
     if (overlay_device_api != api::device_api::d3d9) {
@@ -2047,6 +2503,8 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     if (std::exchange(state.overlay.retry_now, false)) {
       if (overlay_device_api == api::device_api::d3d9) {
         state.front->RetryNow(found != state.devices.end() ? &found->second.helper : nullptr);  // Plan 10
+      } else if (found != state.devices.end() && Bridged(found->second) && found->second.strikes.RetryAllowed()) {
+        found->second.retry_pending = true;  // Plan 17: the card shown was the stopped bridge's; the next present tears it down
       } else if (found != state.devices.end() && found->second.vk_dlss
                  && (found->second.vk_dlss->WantsNr() || found->second.vk_dlss->NrState() != nr::SessionState::OFF)) {
         found->second.vk_dlss->RetryNow();  // Plan 13: the card shown was the native context's
@@ -2087,8 +2545,8 @@ void OnVulkanBindPipeline(api::command_list* /*cmd_list*/, api::pipeline_stage s
 // Plan 10 (design §2.1, §2.9): ReShade's create_device event (id 96), for the 9Ex toggle of 64-bit Direct3D 9 games. Registered raw in
 // AddonInit; the front answers only for a Direct3D 9 device with UseD3D9Ex on.
 // It must not take the lock for any other API (batch 2 review C-1): ReShade raises create_device inside D3D12CreateDevice and
-// D3D11CreateDevice too, which OnPresent calls for the D3D10 relay and the D3D11 and D3D10 bridges' private devices while it holds the lock
-// exclusively, and the lock is not recursive. Nothing Uplift does creates a Direct3D 9 device under it (D3D9Client only calls Direct3DCreate9Ex,
+// D3D11CreateDevice too, which OnPresent calls for the D3D10 relay, and on the fallback without a device factory for the bridges' private devices,
+// while it holds the lock exclusively, and the lock is not recursive. Nothing Uplift does creates a Direct3D 9 device under it (D3D9Client only calls Direct3DCreate9Ex,
 // which raises no event).
 bool OnCreateDevice(api::device_api device_api, uint32_t& api_version) {
   if (device_api == api::device_api::vulkan) {
@@ -2255,9 +2713,8 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
            (reshade_version ? addon::FormatModuleVersion(*reshade_version) : std::string("of unknown version")));
   if (hooks_started) {
     for (const ngx_hooks::HookedModule& module : g_state->hooks.Modules()) {
-      const std::string_view apis = (module.d3d12 && module.vulkan ? " (Direct3D 12 and Vulkan entry points)"
-                                                                   : (module.vulkan ? " (Vulkan entry points)" : ""));
-      nr::Logf(nr::LogLevel::INFO, "NGX hooks on {}{}{}", addon::Utf8FromPath(module.file_name), apis,
+      // Plan 18: every API the module's hooks cover, Direct3D 11 included (ngx_hooks::HookedApis).
+      nr::Logf(nr::LogLevel::INFO, "NGX hooks on {} ({} entry points){}", addon::Utf8FromPath(module.file_name), ngx_hooks::HookedApis(module),
                (module.evaluate_c ? " (with EvaluateFeature_C)" : ""));
     }
   }

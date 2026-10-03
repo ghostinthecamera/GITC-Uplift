@@ -57,6 +57,9 @@ class RemoteNr final : public NrLink {
   [[nodiscard]] bool FrameSent() const { return frame_sent_; }
   void Detach();                                                       // DETACH (destroy_device, D3D9 Reset); the next Present re-ATTACHes
   void RetryNow();                                                     // after a failure: forget it, so the next Present starts a fresh helper
+  // Plan 17: ends the helper as a failure with `text` for the card (its log drained first): its own Direct3D 12 device was removed, so a fresh helper is
+  // the only way NR runs again (Retry now).
+  void Abort(std::string text) { Fail(std::move(text)); }
   void Quit();                                                         // AddonUninit: QUIT, then close (kill-on-close ends a helper that does not exit)
   [[nodiscard]] bool Running() const { return launcher_ != nullptr; }  // a helper process exists (until it has exited)
   [[nodiscard]] bool Attached() const { return attached_; }

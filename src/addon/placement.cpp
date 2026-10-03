@@ -4,21 +4,44 @@
 
 namespace uplift::addon {
 
-PlacementChoice ChoosePlacement(ui::PlacementSource source, std::string_view dlss_unavailable_reason, bool dlss_seen,
-                                bool before_upscaling) {
+PlacementChoice ChoosePlacement(ui::PlacementSource source, std::string_view dlss_unavailable_reason, bool dlss_seen, bool before_upscaling,
+                                const StageProblems& problems, bool dlss_off) {
   const bool dlss_available = dlss_unavailable_reason.empty();
+  // Plan 18: the DLSS stage that can run: Before upscaling when asked and it can, else After DLSS when it can (Ray Reconstruction's own fallback), else none.
+  std::optional<Placement> stage;
+  if (before_upscaling && problems.before_upscaling.empty()) {
+    stage = Placement::BEFORE_UPSCALING;
+  } else if (problems.after_dlss.empty()) {
+    stage = Placement::AFTER_DLSS;
+  }
   switch (source) {
     case ui::PlacementSource::PRESENT:
       return {.placement = Placement::PRESENT};
     case ui::PlacementSource::DLSS:
       if (!dlss_available) return {.placement = Placement::NONE, .reason = std::string(dlss_unavailable_reason)};
+      if (dlss_off) return {.placement = Placement::PRESENT};  // Plan 18 Task 12: never a wait for a DLSS the game switched off
       if (!dlss_seen) return {.placement = Placement::NONE, .reason = "Waiting for DLSS: the game has not run DLSS yet"};
-      return {.placement = (before_upscaling ? Placement::BEFORE_UPSCALING : Placement::AFTER_DLSS)};
+      if (!stage) return {.placement = Placement::NONE, .reason = std::string(problems.after_dlss)};
+      return {.placement = *stage};
     case ui::PlacementSource::AUTO:
       break;
   }
-  return {.placement = ((dlss_available && dlss_seen) ? (before_upscaling ? Placement::BEFORE_UPSCALING : Placement::AFTER_DLSS)
-                                                      : Placement::PRESENT)};
+  return {.placement = ((dlss_available && dlss_seen && !dlss_off && stage) ? *stage : Placement::PRESENT)};
+}
+
+std::string DlssOnAgainLine(const PlacementChoice& resumed) {
+  constexpr std::string_view LEAD = "DLSS is on again on this device: ";
+  switch (resumed.placement) {
+    case Placement::AFTER_DLSS:       return std::format("{}After DLSS resumes", LEAD);
+    case Placement::BEFORE_UPSCALING: return std::format("{}Before upscaling resumes", LEAD);
+    case Placement::PRESENT:          return std::format("{}NR stays at Present", LEAD);
+    case Placement::NONE:             break;
+  }
+  return std::format("{}NR stays off ({})", LEAD, resumed.reason);
+}
+
+bool DlssReleased(const ngx_hooks::FeatureRegistry& registry, const void* device, ngx_hooks::NgxApi api, bool dlss_seen) {
+  return dlss_seen && !registry.UpscalerLive(device, api);
 }
 
 bool SetupDlssSeen(bool vulkan, bool upscaler_created, bool context_evaluated) {

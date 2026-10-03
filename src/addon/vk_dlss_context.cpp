@@ -14,8 +14,7 @@ namespace uplift::addon {
 namespace {
 
 constexpr uint32_t TRACE_FRAMES = 8u;  // spec §13: per-frame traces for 8 frames after a state change
-// v2 design §3.1 (plan amendment 11): DLSS counts as idle only after this long without a main evaluate.
-constexpr auto DLSS_IDLE_MINIMUM = std::chrono::milliseconds(250);
+// v2 design §3.1 (plan amendment 11): DLSS_IDLE_MINIMUM is in addon/placement.hpp since Plan 18 Task 12 (fix round 1), which shares it.
 // v2 design §3.2: a device lost this soon after Uplift recorded in a game command buffer latches the DLSS placements off.
 constexpr auto DLSS_LATCH_WINDOW = std::chrono::seconds(10);
 // Key decision h (design §1.2): the per-device reservation NGX keeps on a Vulkan device after native NR's first use.
@@ -136,10 +135,22 @@ void VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& config, b
   completion_->DropStale(now, timeline.CurrentFrame());
   pipeline_->FreeFinished();  // final review C-1: the retired copy slots and mask copies whose marks the GPU has passed
 
+  // Plan 18 Task 12: the game switched its DLSS off after this context saw it run (it released its last DLSS feature; fix round 1, I-2: and that held for
+  // DLSS_IDLE_MINIMUM and two presents): the DLSS placement falls back to Present (the bridge's, through NrClaim's hand-off) until the next main evaluate
+  // shows DLSS on again. Never after the game's NGX shutdown: the stopped rule (above) keeps priority.
+  dlss_off_.OnPresent(dlss_seen_ && config.dlss_released && dlss_unavailable_reason_.empty(), now);
   // The user's decision 1: Auto stays at Present on Vulkan. Source = DLSS is the explicit choice, which takes the DLSS placement once the game's DLSS
   // is seen (Present, the bridge's, until then) and never while a reason makes the DLSS placements unavailable.
-  placement_ = (config.source == ui::PlacementSource::DLSS ? ChoosePlacement(ui::PlacementSource::AUTO, dlss_unavailable_reason_, dlss_seen_, BeforeUpscaling())
-                                                           : PlacementChoice{.placement = Placement::PRESENT});
+  const auto choose = [this, &config](bool dlss_off) {
+    return (config.source == ui::PlacementSource::DLSS
+                ? ChoosePlacement(ui::PlacementSource::AUTO, dlss_unavailable_reason_, dlss_seen_, BeforeUpscaling(), {}, dlss_off)
+                : PlacementChoice{.placement = Placement::PRESENT});
+  };
+  placement_ = choose(dlss_off_.Off());
+  if (dlss_off_.Off() && !dlss_off_logged_ && placement_.placement != choose(false).placement) {
+    dlss_off_logged_ = true;  // fix round 1 (M-6): logged once a DLSS placement really fell back (with Source = Auto or Present nothing did)
+    nr::Log(nr::LogLevel::INFO, DLSS_OFF_LINE);
+  }
   NotePlacementChange();
   if (placement_.placement != Placement::AFTER_DLSS && placement_.placement != Placement::BEFORE_UPSCALING) {
     ResetFrameStatus();  // the DLSS placements keep their last evaluate's result
@@ -195,7 +206,7 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, bool before_ups
     case ui::ResolutionMode::PERFORMANCE: scale = sources::PERFORMANCE_SCALE; break;
     case ui::ResolutionMode::CUSTOM:      scale = config_.resolution_scale / 100.0; break;
     case ui::ResolutionMode::MATCH_GAME:
-      if (main_snapshot_ && !main_snapshot_->render.Empty() && !before_upscaling) {
+      if (main_snapshot_ && !main_snapshot_->render.Empty() && !before_upscaling && !dlss_off_.Off()) {  // Plan 18 Task 12 (fix round 1, M-1): Full while off
         target_width = main_snapshot_->render.width;
         target_height = main_snapshot_->render.height;
       }
@@ -288,6 +299,13 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
   last_main_evaluate_ = now;
   main_snapshot_ = frame.snapshot;
   main_feature_ = frame.feature;
+  if (dlss_off_.OnEvaluate(true) && std::exchange(dlss_off_logged_, false)) {
+    // Plan 18 Task 12: the game's DLSS runs again after it switched it off: the DLSS placement returns from the next present, as on first sight. Every
+    // evaluate starts the release window over (fix round 1, I-2).
+    nr::Log(nr::LogLevel::INFO, DlssOnAgainLine(config_.source == ui::PlacementSource::DLSS
+                                                    ? ChoosePlacement(ui::PlacementSource::AUTO, dlss_unavailable_reason_, true, BeforeUpscaling())
+                                                    : PlacementChoice{.placement = Placement::PRESENT}));
+  }
   last_motion_vectors_missing_ = (frame.motion_vectors == nullptr);
   // No present-starvation catch-up on Vulkan (D3D12's ticks the Session here): the frame semaphore can only be signalled in the present, where
   // ReShade holds the queue's lock. A newly seen DLSS moves the placement at the next present.
@@ -770,7 +788,8 @@ ContextStatus VkDlssContext::Status() const {
   if (dlss_seen_ && last_motion_vectors_missing_) {
     status.dlss_motion_gap = ui::MotionGap::GAME_PASSED_NONE;
   }
-  const bool match_game_waiting = (config_.resolution == ui::ResolutionMode::MATCH_GAME && !main_snapshot_ && !before_upscaling);
+  // Plan 18 Task 12 (fix round 1, M-1): while the game's DLSS is off, Match game runs at Full too.
+  const bool match_game_waiting = (config_.resolution == ui::ResolutionMode::MATCH_GAME && (!main_snapshot_ || dlss_off_.Off()) && !before_upscaling);
   status.resolution_applied = (match_game_waiting ? ui::ResolutionMode::FULL : config_.resolution);
   status.upsampling = config_.upsampling;
   if (!status.canvas.Empty() && dlss_placement) {
@@ -785,6 +804,9 @@ ContextStatus VkDlssContext::Status() const {
       detail += " (Match game: waiting for DLSS)";
     }
     status.work_line = std::format("Working at {}x{}{}", status.canvas.width, status.canvas.height, detail);
+  }
+  if (nr_applied_ && pipeline_) {
+    status.exposure_line = sources::ExposureLine(pipeline_->LastExposure());  // Plan 17
   }
   status.motion_source = motion_source_;
   switch (motion_source_) {

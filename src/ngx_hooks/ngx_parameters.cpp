@@ -47,4 +47,12 @@ ID3D12Resource* ReadResource(const NVSDK_NGX_Parameter& parameters, const char* 
   return nullptr;
 }
 
+ID3D11Resource* ReadD3D11Resource(const NVSDK_NGX_Parameter& parameters, const char* key) {
+  ID3D11Resource* resource = nullptr;
+  if (NVSDK_NGX_SUCCEED(parameters.Get(key, &resource))) return resource;
+  void* pointer = nullptr;
+  if (NVSDK_NGX_SUCCEED(parameters.Get(key, &pointer))) return static_cast<ID3D11Resource*>(pointer);
+  return nullptr;
+}
+
 }  // namespace uplift::ngx_hooks

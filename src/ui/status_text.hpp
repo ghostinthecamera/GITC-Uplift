@@ -22,6 +22,9 @@ struct OptionState {
   bool temporary = false;  // the cause can clear by itself this session (DLSS starting, Ray Reconstruction off, Launchpad turned on)
 };
 inline constexpr std::string_view DLSS_NOT_SEEN_REASON = "Available once the game renders with DLSS";
+// Plan 18 Task 12: the game switched its DLSS off (it released its last DLSS feature, or on Direct3D 11 shut NGX down) after DLSS ran on this device: the
+// DLSS stages, DLSS's vectors and Match game wait for it (a temporary cause: SetupFacts::dlss_off), and NR runs at Present, at Full, meanwhile.
+inline constexpr std::string_view DLSS_OFF_REASON = "The game's DLSS is off: turn it on in the game's settings";
 // On Vulkan at Present the game's DLSS motion vectors reach NR through copies made in the game's frame, on a GPU-ordered bridge only: a CPU-ordered Vulkan
 // bridge holds the add-on's lock across capped CPU waits, which a hooked DLSS evaluate must not wait on.
 inline constexpr std::string_view VULKAN_CPU_ORDERED_MOTION = "Needs the GPU-ordered Vulkan bridge, which this device cannot have (Details says why once NR has run)";
@@ -42,8 +45,19 @@ inline constexpr std::string_view D3D12_NGX_SHUT_DOWN_REASON = "The game shut NV
 // this session (fix round, minor 6: SetupFacts::stopped greys every option with it, and the card is "NR stopped" with it).
 inline constexpr std::string_view D3D12_NGX_ABANDONED_REASON =
     "The game shut NVIDIA's NGX down while NR's work was still running: NR stays off on this device until the game restarts";
+// Plan 17 (the 2-strike rule): NR's private Direct3D 12 device (a bridge's, or the 64-bit helper's) stopped a second time this session, so Retry now is no
+// longer offered: the card's reason, and Setup's fixed cause (SetupFacts::stopped).
+inline constexpr std::string_view PRIVATE_DEVICE_STOPPED_TWICE_REASON = "NR stopped twice this session: it stays off on this device until the game restarts";
+// Test phase (review M-3): a bridge's private device that is the adapter's shared one (no device factory in this game's D3D12 runtime) stopped. No new device
+// can be made while the game runs, so the first stop is final: Setup's fixed cause, and the log's line.
+inline constexpr std::string_view PRIVATE_DEVICE_STOPPED_FINAL_REASON =
+    "NR stopped, and this game's Direct3D 12 runtime cannot give Uplift a new device: it stays off on this device until the game restarts";
 // Final review, minor 3: on Vulkan at Present Match game cannot read the game's DLSS render size, but a DLSS stage can (a temporary cause).
 inline constexpr std::string_view VULKAN_MATCH_GAME_REASON = "On Vulkan, Match game applies at After DLSS and Before upscaling";
+// Plan 18 (design §5): in a Direct3D 11 game whose DLSS runs on a separate Direct3D 12 device (a mod's own), which Uplift cannot reach: a fixed cause for the
+// DLSS stages and DLSS's vectors (SetupFacts::dlss_unavailable). NR at Present runs as before.
+inline constexpr std::string_view FOREIGN_D3D12_DLSS_REASON =
+    "This game's DLSS runs on a separate Direct3D 12 device (a mod), which Uplift cannot reach. NR runs at Present";
 
 // A selectable motion source that delivered nothing on the latest recording (design §1.4).
 enum class MotionGap : uint8_t {
@@ -64,7 +78,12 @@ struct SetupFacts {
   float custom_scale = 100.f;
   // What is possible now (§1.2).
   std::string_view dlss_unavailable;  // fixed: the bridges, OpenGL, the helper, hooks, ReShade, the latch, Vulkan's native problems
+  // Plan 18 (design §3): a DLSS stage that cannot run here although DLSS runs (the Direct3D 11 bridge cannot share its image): a fixed cause for that stage
+  // alone; Present and DLSS's vectors stay as they are.
+  std::string_view after_dlss_fixed;
+  std::string_view before_upscaling_fixed;
   bool dlss_seen = false;             // sticky for the session
+  bool dlss_off = false;              // Plan 18 Task 12: seen, and the game switched its DLSS off since (DLSS_OFF_REASON); a pause is not off
   bool ray_reconstruction = false;    // the main DLSS feature is Ray Reconstruction
   bool frame_generation_blocks_present = false;
   std::string_view present_fixed;      // final review I-1: Present cannot run this session (VULKAN_NGX_SHUT_DOWN_PRESENT_REASON)
@@ -157,9 +176,9 @@ class SetupSettle {
   std::optional<std::chrono::steady_clock::time_point> last_update_;
 };
 
-// Plan 7: the DLSS placements' reason on a bridged context (the D3D11 and D3D10 bridges, and the 32-bit helper). Plan 9
-// moved it here, from addon/device_context.hpp, so the 32-bit add-on shows the same text without that header.
-inline constexpr std::string_view BRIDGED_DLSS_REASON = "NR after DLSS needs a Direct3D 12 game";
+// Plan 7: the DLSS placements' reason on a bridged context without them (the Direct3D 10 bridge, OpenGL, the 32-bit helper); Plan 18: Direct3D 11 has them.
+// Plan 9 moved it here, from addon/device_context.hpp, so the 32-bit add-on shows the same text without that header.
+inline constexpr std::string_view BRIDGED_DLSS_REASON = "NR after DLSS needs a 64-bit Direct3D 11, Direct3D 12 or Vulkan game";
 
 struct StatusView {
   nr::SessionState state = nr::SessionState::OFF;
@@ -215,6 +234,14 @@ struct CardFacts {
   // Plan 9: the 32-bit add-on's 64-bit helper exited, hung or could not start; checked right after device_problem, and only
   // while `enabled` (with NR off the card is the normal off state; the failure shows again when NR is turned on).
   std::string_view helper_problem;
+  // Plan 17: NR's private Direct3D 12 device (a bridge's) stopped: its device was removed or hung, or the CPU-ordered timeouts. While `enabled` the card offers
+  // Retry now. `private_stops_final`: it stopped twice this session (the 2-strike rule), so the card says so instead, whatever `enabled` is; the helper's
+  // second stop sets it too.
+  std::string_view private_stopped;
+  bool private_stops_final = false;
+  // Test phase (review M-3): the stop in `private_stopped` cannot be retried (the adapter's shared device): the card says to restart, with no Retry now,
+  // whatever `enabled` is.
+  bool private_stop_unretryable = false;
   bool device_lost = false;
   std::string_view stopped;  // Plan 15 fix round (minor 6): NR stopped on this device for the session (D3D12_NGX_ABANDONED_REASON); checked after `device_lost`
   std::string_view blocked;  // a conflicting host, a missing runtime, another NR producer

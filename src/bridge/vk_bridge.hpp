@@ -37,8 +37,9 @@ using VkImageInfo = vk::ImageInfo;
 class VkBridge {
  public:
   // nullptr, with `error` set, when the adapter is not NVIDIA's, the LUID is unknown or the D3D12 side cannot be made. A device that cannot be
-  // ordered on the GPU still gets a bridge: it builds CPU-ordered and StatusLine says why. `created` receives the device as D3D12CreateDevice
-  // returned it, whether or not this succeeds (ReShade's proxy under the Vulkan layer, R56): release it only outside the add-on's lock.
+  // ordered on the GPU still gets a bridge: it builds CPU-ordered and StatusLine says why. `created` receives the private device as D3D12Side made
+  // it, whether or not this succeeds (on the fallback D3D12CreateDevice's, ReShade's proxy under the Vulkan layer, R56): release it only outside the
+  // add-on's lock.
   static std::unique_ptr<VkBridge> Create(vk::Device device, LUID luid, Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
   // Waits up to 2 s for the private queue, then releases the D3D12 side. It frees no Vulkan image: FreeVulkan first (destroy_device).
   ~VkBridge();
@@ -47,6 +48,7 @@ class VkBridge {
 
   [[nodiscard]] ID3D12Device* Device() const { return side_->Device(); }
   [[nodiscard]] ID3D12CommandQueue* Queue() const { return side_->Queue(); }
+  [[nodiscard]] bool Independent() const { return side_->Independent(); }  // D3D12Side::Independent: whether Retry now can replace it
   [[nodiscard]] const vk::Device& VulkanDevice() const { return interop_.Functions(); }
   // First thing at every present, as D3D11Bridge::BeginFrame: the watchdog (GPU-ordered), the frees of what the queues have passed (both
   // sides), and the description of `back_buffer`; while `running` also the shared copy sized like it. Otherwise, and after a latch, the shared
@@ -72,6 +74,11 @@ class VkBridge {
   // wait was queued for (which also releases a Vulkan wait on the imported semaphore, the same kernel object). Before DeviceContext::Teardown.
   // Every latch ends here too (LatchVulkan), so a private queue never waits for a signal a lost device will not make.
   void Stop(std::string reason);
+  // Plan 17: Retry now, after Stop, at a present (a host with the runtime's queue): the shared images and the two imported semaphores go behind fences
+  // submitted now (Plan 14's rule: the game's queue may still use them), and FreeRetired frees them once that queue has passed those fences. True from
+  // FreeRetired when nothing Vulkan is left (the wait fences went too): the bridge can then be destroyed.
+  void RetireAll(vk::GameHost& host);
+  bool FreeRetired(vk::GameHost& host);
   // destroy_device, after Stop: every Vulkan object (key decision f, R62). `host` needs only the device; nothing here calls a Vulkan function that
   // ReShade's layer intercepts. The D3D12 resources stay for the destructor.
   void FreeVulkan(vk::GameHost& host);
@@ -81,6 +88,7 @@ class VkBridge {
   [[nodiscard]] uint64_t SharedBytes() const;
   [[nodiscard]] std::string StatusLine() const;
   [[nodiscard]] bool Stopped() const { return !latch_.empty(); }
+  [[nodiscard]] std::string_view Latch() const { return latch_; }  // Plan 17: the card's reason; empty while it runs
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
 
  private:
@@ -106,7 +114,7 @@ class VkBridge {
   // Creates `shared` in COMMON on the private device and imports it. False, leaving `shared` untouched, on failure; `failure` says which call.
   bool CreateShared(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, uint32_t bytes_per_pixel, const wchar_t* name, Shared* shared,
                     std::string* failure);
-  // Latches the bridge for the session: "The Vulkan bridge stopped: <failure>. Restart the game to use NR again" (a lost device says so
+  // Latches the bridge: "The Vulkan bridge stopped: <failure>" (a lost device says so
   // instead), and Stops it (design §6: a device loss stops the bridge).
   void LatchVulkan(std::string_view failure);
   // A capped wait ran its full 2 s: counted in `consecutive` (reset by the caller when that kind of wait finishes). At the third in a row the
@@ -125,7 +133,7 @@ class VkBridge {
   // Stamps every surface this recording used with its progress value.
   void StampUsed(uint64_t value, bool used_mask, bool used_motion);
 
-  // Declared first, so released last: its created device is the one D3D12CreateDevice returned (ReShade's proxy under the layer).
+  // Declared first, so released last: its created device is the one D3D12Side made (on the fallback, ReShade's proxy under the layer).
   std::unique_ptr<D3D12Side> side_;
   vk::Interop interop_;
   bool gpu_ordered_ = false;

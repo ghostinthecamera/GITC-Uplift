@@ -217,6 +217,19 @@ void Interop::FreeNow(SharedImage* image, GameHost& host) {
   *image = {};
 }
 
+bool Interop::Idle() {
+  if (!retired_.empty()) return false;
+  for (WaitFence& wait : waits_) {
+    if (wait.pending && wait.fence != VK_NULL_HANDLE) {
+      const VkResult status = device_.vkGetFenceStatus(device_.handle, wait.fence);
+      Note(status);
+      if (status == VK_NOT_READY) return false;
+      wait.pending = false;  // signalled, or the device is lost and nothing more will run
+    }
+  }
+  return true;
+}
+
 void Interop::FreeAll(GameHost& host) {
   for (Retired& retired : retired_) {
     if (retired.fence != VK_NULL_HANDLE) {

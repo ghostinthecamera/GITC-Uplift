@@ -1,5 +1,6 @@
 #include "ngx_hooks/feature_registry.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <mutex>
 
@@ -33,19 +34,60 @@ FeatureKind KindOf(NVSDK_NGX_Feature feature) {
   }
 }
 
-void FeatureRegistry::OnCreate(const NVSDK_NGX_Handle* handle, NVSDK_NGX_Feature feature, const void* device,
-                               const CreateSnapshot& snapshot) {
+void FeatureRegistry::OnCreate(const NVSDK_NGX_Handle* handle, NVSDK_NGX_Feature feature, const void* device, const CreateSnapshot& snapshot,
+                               NgxApi api) {
   if (handle == nullptr) return;
   const std::unique_lock lock(mutex_);
-  features_.insert_or_assign(handle, FeatureRecord{.feature = feature, .device = device, .snapshot = snapshot, .serial = next_serial_++});
+  features_.insert_or_assign(handle,
+                             FeatureRecord{.feature = feature, .device = device, .snapshot = snapshot, .serial = next_serial_++, .api = api});
+  not_adopted_.erase(handle);  // Plan 18 fix round 1 (I-1): a reused handle
   if (device != nullptr && KindOf(feature) == FeatureKind::UPSCALER) {
     ++upscaler_creates_[device];
   }
 }
 
+bool FeatureRegistry::TryAdopt(const NVSDK_NGX_Handle* handle, NVSDK_NGX_Feature feature, const void* device, const CreateSnapshot& snapshot,
+                               NgxApi api) {
+  if (handle == nullptr) return false;
+  const std::unique_lock lock(mutex_);
+  // Insert-if-absent under the lock: a hooked create of the same handle on another thread keeps its own record.
+  const bool inserted =
+      features_.try_emplace(handle, FeatureRecord{.feature = feature, .device = device, .snapshot = snapshot, .serial = next_serial_, .api = api}).second;
+  if (!inserted) return false;
+  ++next_serial_;
+  not_adopted_.erase(handle);
+  if (device != nullptr && KindOf(feature) == FeatureKind::UPSCALER) {
+    ++upscaler_creates_[device];
+  }
+  return true;
+}
+
+void FeatureRegistry::NoteNotAdopted(const NVSDK_NGX_Handle* handle) {
+  if (handle == nullptr) return;
+  const std::unique_lock lock(mutex_);
+  if (!features_.contains(handle)) {
+    not_adopted_.insert(handle);
+  }
+}
+
+bool FeatureRegistry::NotAdopted(const NVSDK_NGX_Handle* handle) const {
+  const std::shared_lock lock(mutex_);
+  return not_adopted_.contains(handle);
+}
+
 void FeatureRegistry::OnRelease(const NVSDK_NGX_Handle* handle) {
   const std::unique_lock lock(mutex_);
   features_.erase(handle);
+  not_adopted_.erase(handle);  // Plan 18 fix round 1 (I-1): the core may hand the handle out again
+}
+
+size_t FeatureRegistry::OnCoreShutdown(NgxApi api, const void* device) {
+  const std::unique_lock lock(mutex_);
+  not_adopted_.clear();  // Plan 18 fix round 1 (I-1): every handle the shutdown ended may come back
+  return std::erase_if(features_, [api, device](const auto& entry) {
+    const FeatureRecord& record = entry.second;
+    return record.api == api && (device == nullptr || record.device == device || record.device == nullptr);
+  });
 }
 
 void FeatureRegistry::OnDeviceDestroyed(const void* device) {
@@ -86,7 +128,15 @@ uint64_t FeatureRegistry::UpscalerCreates(const void* device) const {
   return (found == upscaler_creates_.end() ? 0u : found->second);
 }
 
-const NVSDK_NGX_Handle* FeatureRegistry::MainHandle(const void* device, nr::Size swapchain) const {
+bool FeatureRegistry::UpscalerLive(const void* device, NgxApi api) const {
+  const std::shared_lock lock(mutex_);
+  return std::ranges::any_of(features_, [device, api](const auto& entry) {
+    const FeatureRecord& record = entry.second;
+    return KindOf(record.feature) == FeatureKind::UPSCALER && record.api == api && (record.device == device || record.device == nullptr);
+  });
+}
+
+const NVSDK_NGX_Handle* FeatureRegistry::MainHandle(const void* device, nr::Size swapchain, NgxApi api) const {
   const std::shared_lock lock(mutex_);
   const NVSDK_NGX_Handle* best = nullptr;
   bool best_matches = false;
@@ -94,6 +144,7 @@ const NVSDK_NGX_Handle* FeatureRegistry::MainHandle(const void* device, nr::Size
   uint64_t best_serial = 0u;
   for (const auto& [handle, record] : features_) {
     if (KindOf(record.feature) != FeatureKind::UPSCALER) continue;
+    if (record.api != api) continue;  // Plan 18
     if (record.device != nullptr && record.device != device) continue;
     // Inlined from the brief's AspectMatches (controller ruling: a single-call-site helper is
     // inlined at its call site): whether this feature's output shares the swap chain's aspect

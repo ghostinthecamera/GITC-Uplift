@@ -10,20 +10,17 @@
 #include "nr/log.hpp"
 
 namespace uplift::bridge {
-namespace {
 
 using Microsoft::WRL::ComPtr;
 
-// The description behind a D3D11 resource; nullopt for anything that is not a 2D texture.
-std::optional<D3D11_TEXTURE2D_DESC> TextureDesc(ID3D11Resource* resource) {
+// The description behind a D3D11 resource; nullopt for anything that is not a 2D texture. Plan 18: public (the DLSS hand-off reads DLSS's textures).
+std::optional<D3D11_TEXTURE2D_DESC> TextureDesc11(ID3D11Resource* resource) {
   ComPtr<ID3D11Texture2D> texture;
   if (resource == nullptr || FAILED(resource->QueryInterface(IID_PPV_ARGS(&texture)))) return std::nullopt;
   D3D11_TEXTURE2D_DESC description = {};
   texture->GetDesc(&description);
   return description;
 }
-
-}  // namespace
 
 void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
                 D3D12_RESOURCE_STATES after) {
@@ -57,8 +54,8 @@ std::unique_ptr<D3D11Bridge> D3D11Bridge::Create(ID3D11Device* device, ComPtr<ID
   if (adapter_description.VendorId != addon::NVIDIA_VENDOR_ID) {
     return fail("Uplift needs an NVIDIA GPU; this game renders on another adapter");
   }
-  // Plan 9: the private device, queue, ring, list and progress fence are D3D12Side's; `created` is D3D12CreateDevice's own
-  // (under ReShade its proxy, whose last release raises destroy_device).
+  // Plan 9: the private device, queue, ring, list and progress fence are D3D12Side's; `created` is the device as it made it (on the fallback,
+  // D3D12CreateDevice's: under ReShade its proxy, whose last release raises destroy_device).
   bridge->side_ = D3D12Side::Create(adapter_description.AdapterLuid, created, error);
   if (bridge->side_ == nullptr) return nullptr;
   const std::pair<ComPtr<ID3D12Fence>*, ID3D11Fence**> fences[] = {{&bridge->to12_, bridge->to12_11_.GetAddressOf()},
@@ -83,7 +80,7 @@ D3D11Bridge::~D3D11Bridge() {
 
 bool D3D11Bridge::CreateShared(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, uint32_t bytes_per_pixel,
                                const wchar_t* name, Shared* shared, HRESULT* result) {
-  Shared created = {.size = size, .format = format, .bytes = size.Pixels() * bytes_per_pixel};
+  Shared created = {.size = size, .format = format, .bytes = size.Pixels() * bytes_per_pixel, .flags = flags};
   HANDLE handle = nullptr;
   *result = side_->CreateShared(size, format, flags, name, &created.d3d12, &handle);
   if (FAILED(*result)) return false;
@@ -104,25 +101,33 @@ void D3D11Bridge::Retire(Shared* shared) {
   *shared = {};
 }
 
+void D3D11Bridge::CheckWatchdog(std::chrono::steady_clock::time_point now) {
+  if (!latch_.empty()) return;
+  // Both directions count as progress, so a frame shows two steps: the game's work up to the copy-in, then NR's.
+  const uint64_t completed = to11_->GetCompletedValue();
+  if (const std::optional<std::string_view> stopped = watchdog_.Check(completed, completed + to12_->GetCompletedValue(), now)) {
+    std::string reason = std::format("The {} bridge stopped: {}", label_, *stopped);
+    nr::Log(nr::LogLevel::ERR, reason);
+    Stop(std::move(reason));
+  }
+}
+
 BridgeFrame D3D11Bridge::BeginFrame(ID3D11Resource* back_buffer, bool enabled, bool running,
-                                    std::chrono::steady_clock::time_point now) {
+                                    std::chrono::steady_clock::time_point now, bool present_copy) {
+  ++presents_;  // Plan 18: the frame being rendered from here is presents_ + 1 (the ring's slots)
   if (side_->FreeFinished()) {
     released_ = true;
   }
-  if (latch_.empty()) {
-    // Both directions count as progress, so a frame shows two steps: the game's work up to the copy-in, then NR's.
-    const uint64_t completed = to11_->GetCompletedValue();
-    if (const std::optional<std::string_view> stopped =
-            watchdog_.Check(completed, completed + to12_->GetCompletedValue(), now)) {
-      std::string reason = std::format("The {} bridge stopped: {}. Restart the game to use NR again", label_, *stopped);
-      nr::Log(nr::LogLevel::ERR, reason);
-      Stop(std::move(reason));
-    }
-  }
+  CheckWatchdog(now);
   if (!enabled) {
     color_failure_.reset();
     mask_failure_.reset();
     motion_failure_.reset();
+    dlss_image_failure_.reset();  // Plan 18: re-enabling retries the DLSS stages' shares too
+    dlss_motion_failure_.reset();
+    dlss_exposure_failure_.reset();
+    dlss_swap_failure_.reset();
+    ring_failure_.reset();
   }
   if (!running || !latch_.empty()) {
     // NR is off, or the bridge stopped (final review C-1): the shared surfaces go with NR's own (the stutter fix).
@@ -132,11 +137,18 @@ BridgeFrame D3D11Bridge::BeginFrame(ID3D11Resource* back_buffer, bool enabled, b
     Retire(&mask_);
     Retire(&motion_);
     mask_fresh_ = false;
+    ReleaseDlss();  // Plan 18
+    ReleasePresentMotion();
+  }
+  if (!present_copy) {
+    // Plan 18: NR runs at a DLSS stage, inside the game's frame: the Present path's copies are not needed.
+    Retire(&color_);
+    Retire(&motion_);
   }
   if (!latch_.empty()) return {.problem = latch_};
   if (back_buffer == nullptr) return {};  // Plan 8: housekeeping only (the D3D10 relay has no copy while NR is off)
   std::string problem;
-  const std::optional<D3D11_TEXTURE2D_DESC> description = TextureDesc(back_buffer);
+  const std::optional<D3D11_TEXTURE2D_DESC> description = TextureDesc11(back_buffer);
   const std::optional<color::FormatInfo> format = (description ? color::DescribeFormat(description->Format) : std::nullopt);
   const nr::Size size = (description ? nr::Size{description->Width, description->Height} : nr::Size{});
   if (!description) {
@@ -147,7 +159,7 @@ BridgeFrame D3D11Bridge::BeginFrame(ID3D11Resource* back_buffer, bool enabled, b
   } else if (!format) {
     problem = std::format("Unsupported back-buffer format (DXGI_FORMAT {})", static_cast<int>(description->Format));
   } else {
-    if (running && !(color_failure_ && color_failure_->Matches(size, description->Format))
+    if (running && present_copy && !(color_failure_ && color_failure_->Matches(size, description->Format))
         && (!color_.d3d12 || color_.size != size || color_.format != description->Format)) {
       Retire(&color_);
       HRESULT share_result = S_OK;
@@ -172,22 +184,31 @@ BridgeFrame D3D11Bridge::BeginFrame(ID3D11Resource* back_buffer, bool enabled, b
   }
   const DXGI_FORMAT back_buffer_format = (description ? description->Format : DXGI_FORMAT_UNKNOWN);
   if (!problem_.empty()) return {.size = size, .format = back_buffer_format, .problem = problem_};
-  return {.color = color_.d3d12.Get(), .size = size, .format = back_buffer_format};
+  return {.color = (present_copy ? color_.d3d12.Get() : nullptr), .size = size, .format = back_buffer_format};
 }
 
-bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const Recorder& record) {
+bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const Recorder& record, bool dlss_motion) {
   if (!latch_.empty() || !color_.d3d12 || back_buffer == nullptr) return false;
   if (!side_->SlotFree()) {
     ++busy_skips_;  // this frame goes without NR rather than waiting
     return false;
+  }
+  // Plan 18 (design §4): with `dlss_motion`, this frame's ring slot (copied in the game's evaluate) is DLSS's vectors for the Present path, before Launchpad's.
+  RingSlot* ring_slot = nullptr;
+  if (dlss_motion) {
+    RingSlot& slot = ring_[presents_ % RING_SLOTS];
+    if (slot.shared.d3d12 && slot.frame == presents_) ring_slot = &slot;
   }
   // Decision 3: LaunchPad's UPLIFT_MV, shared like the mask (RG16F, +32 MiB at 4K). The sharing rule (design §9 g):
   // D3D11 can only open a D3D12 shared texture made ALLOW_RENDER_TARGET, and outside R8, R16 and the display formats
   // it also needs ALLOW_SIMULTANEOUS_ACCESS. Retired when a recording comes without one: LaunchPad off, or NR at the
   // present or after the effects.
   ID3D12Resource* motion12 = nullptr;
-  const std::optional<D3D11_TEXTURE2D_DESC> motion_description = TextureDesc(motion);
-  if (motion_description && motion_description->Format == DXGI_FORMAT_R16G16_FLOAT
+  const std::optional<D3D11_TEXTURE2D_DESC> motion_description = (ring_slot == nullptr ? TextureDesc11(motion) : std::nullopt);
+  if (ring_slot != nullptr) {
+    motion12 = ring_slot->shared.d3d12.Get();  // Plan 18: DLSS's own vectors this frame; UPLIFT_MV does not cross
+    Retire(&motion_);
+  } else if (motion_description && motion_description->Format == DXGI_FORMAT_R16G16_FLOAT
       && motion_description->SampleDesc.Count == 1u) {
     const nr::Size size = {motion_description->Width, motion_description->Height};
     if (!motion_.d3d12 || motion_.size != size) {
@@ -214,14 +235,14 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
   class Steps final : public BridgeSteps {
    public:
     Steps(D3D11Bridge& bridge, ID3D11Resource* back_buffer, ID3D11Resource* motion, ID3D12Resource* motion12,
-          const Recorder& record)
-        : bridge_(bridge), back_buffer_(back_buffer), motion11_(motion), motion12_(motion12), record_(record) {}
+          const Recorder& record, const RingSlot* ring_slot)
+        : bridge_(bridge), back_buffer_(back_buffer), motion11_(motion), motion12_(motion12), record_(record), ring_slot_(ring_slot) {}
     bool used_mask = false;
     bool executed = false;  // the list was submitted: its surfaces are in use until the side's progress passes it
 
     void CopyIn() override {
       bridge_.context11_->CopyResource(bridge_.color_.d3d11.Get(), back_buffer_);
-      if (motion12_ != nullptr) {
+      if (motion12_ != nullptr && motion11_ != nullptr) {  // Plan 18: a ring slot was copied in the game's evaluate
         bridge_.context11_->CopyResource(bridge_.motion_.d3d11.Get(), motion11_);
       }
     }
@@ -241,6 +262,10 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
           .color = bridge_.color_.d3d12.Get(),
           .mask = (bridge_.mask_fresh_ ? bridge_.mask_.d3d12.Get() : nullptr),
           .motion = motion12_,
+          .motion_is_dlss = (ring_slot_ != nullptr),
+          .motion_scale_x = (ring_slot_ != nullptr ? ring_slot_->scale_x : 1.f),
+          .motion_scale_y = (ring_slot_ != nullptr ? ring_slot_->scale_y : 1.f),
+          .motion_region = (ring_slot_ != nullptr ? ring_slot_->region : nr::Rect{}),  // fix round 1 (M-4): the slot is the vectors' whole size
       };
       if (targets.mask != nullptr) {
         Transition(list, targets.mask, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -288,8 +313,9 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
     ID3D11Resource* motion11_;
     ID3D12Resource* motion12_;
     const Recorder& record_;
+    const RingSlot* ring_slot_;
   };
-  Steps steps(*this, back_buffer, motion, motion12, record);
+  Steps steps(*this, back_buffer, (ring_slot != nullptr ? nullptr : motion), motion12, record, ring_slot);
   const uint64_t in = ++last_value_;  // monotonic even when a step fails
   const uint64_t out = ++last_value_;
   const BridgedFrame frame = RunBridgedFrame(steps, in, out);
@@ -302,7 +328,9 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
       mask_.last_use = out;
       mask_fresh_ = false;
     }
-    if (motion12 != nullptr) {
+    if (ring_slot != nullptr) {
+      ring_slot->shared.last_use = out;  // Plan 18: the slot, in place of UPLIFT_MV's share
+    } else if (motion12 != nullptr) {
       motion_.last_use = out;
     }
   }
@@ -310,7 +338,7 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
     watchdog_.Submitted(out, std::chrono::steady_clock::now());  // final review I-2: from submission, after recording
   }
   if (!frame.failure.empty()) {
-    latch_ = std::format("The {} bridge stopped: {}. Restart the game to use NR again", label_, frame.failure);
+    latch_ = std::format("The {} bridge stopped: {}", label_, frame.failure);
     nr::Log(nr::LogLevel::ERR, latch_);
   }
   return frame.wrote;
@@ -318,7 +346,7 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
 
 MaskCopy D3D11Bridge::CopyMask(ID3D11Resource* mask) {
   if (!latch_.empty()) return {};
-  const std::optional<D3D11_TEXTURE2D_DESC> description = TextureDesc(mask);
+  const std::optional<D3D11_TEXTURE2D_DESC> description = TextureDesc11(mask);
   const std::optional<color::MaskFormatInfo> format =
       (description ? color::DescribeMaskFormat(description->Format) : std::nullopt);
   if (!format || description->SampleDesc.Count != 1u) {
@@ -370,15 +398,40 @@ void D3D11Bridge::Stop(std::string reason) {
   }
 }
 
-uint64_t D3D11Bridge::SharedBytes() const {
-  return color_.bytes + mask_.bytes + motion_.bytes;
+bool D3D11Bridge::DiagnosticWaitForGameSignal(DWORD cap_ms) {
+  context11_->Flush();
+  const ULONGLONG deadline = GetTickCount64() + cap_ms;
+  while (to12_->GetCompletedValue() < waited12_) {
+    if (GetTickCount64() >= deadline) return false;
+    Sleep(1u);
+  }
+  return true;
 }
 
-std::string D3D11Bridge::StatusLine() const {
-  std::string line = std::format("{}: NR runs on a private Direct3D 12 device (shared {:.1f} MiB)", label_,
-                                 static_cast<double>(SharedBytes()) / (1024.0 * 1024.0));
+uint64_t D3D11Bridge::SharedBytes() const {
+  return color_.bytes + mask_.bytes + motion_.bytes + dlss_image_.bytes + dlss_motion_.bytes + dlss_exposure_.bytes + dlss_swap_.bytes + RingBytes();
+}
+
+uint64_t D3D11Bridge::RingBytes() const {
+  uint64_t bytes = 0u;
+  for (const RingSlot& slot : ring_) {
+    bytes += slot.shared.bytes;
+  }
+  return bytes;
+}
+
+std::string D3D11Bridge::StatusLine(addon::Placement placement) const {
+  // Plan 18 (design §5): the Details line names the DLSS stage NR runs at.
+  const std::string_view where = (placement == addon::Placement::AFTER_DLSS        ? "NR after DLSS on Uplift's private Direct3D 12 device"
+                                  : placement == addon::Placement::BEFORE_UPSCALING ? "NR before upscaling on Uplift's private Direct3D 12 device"
+                                                                                    : "NR runs on a private Direct3D 12 device");
+  std::string line = std::format("{}: {} (shared {:.1f} MiB)", label_, where, static_cast<double>(SharedBytes()) / (1024.0 * 1024.0));
   if (busy_skips_ > 0u) {
     line += std::format(", {} frame(s) without NR while the bridge was busy", busy_skips_);
+  }
+  if (const uint64_t ring = RingBytes(); ring > 0u) {
+    // Plan 18 (design §4): as Vulkan's Details line says its copies.
+    line += std::format("; DLSS's motion vectors copied in the game's frame ({:.1f} MiB)", static_cast<double>(ring) / (1024.0 * 1024.0));
   }
   return line;
 }

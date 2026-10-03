@@ -59,6 +59,8 @@ A picture guide to every setting: [the wiki](https://github.com/ghostinthecamera
 An option that can't work in your game right now is greyed out: hover over it to see why. Your choice is remembered and comes back by
 itself when it can.
 
+In most games, if you turn DLSS off in the game, NR moves to Present by itself and comes back when DLSS is on again.
+
 The **Look** section below lets you tune the result to taste. When you switch NR off, it frees its memory after a few seconds.
 
 The shaders are optional:
@@ -71,12 +73,15 @@ The shaders are optional:
 
 | | DX12 | DX11 | DX10 | DX9 | Vulkan | OpenGL |
 |---|---|---|---|---|---|---|
-| **64-bit** | ✓ + DLSS | ✓ | ✓ | ✓ | ✓ + DLSS | ✓ |
+| **64-bit** | ✓ + DLSS | ✓ + DLSS | ✓ | ✓ | ✓ + DLSS | ✓ |
 | **32-bit** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 - **✓** NR runs on the finished image, with everything in the Uplift tab.
-- **+ DLSS** In games that use DLSS, NR can also run right after DLSS inside the game's frame, use the game's own motion vectors and
-  work with frame generation. On Vulkan, pick After DLSS yourself: Auto stays at Present (see "If you know what you are doing").
+- **+ DLSS** In games that use DLSS, NR can also run right after DLSS inside the game's frame and use the game's own motion vectors. On
+  DX12 and Vulkan it also works with frame generation. On Vulkan, pick After DLSS yourself: Auto stays at Present (see "If you know what
+  you are doing").
+- DX11 games with DLSS added by a mod work too. If the mod runs DLSS on a DirectX 12 device of its own, NR stays at Present, and the
+  Uplift tab says so.
 - DXVK games count as Vulkan. dgVoodoo2 games count as 32-bit DX11 or DX12.
 
 **Tested with:** Onimusha: Way of the Sword (DX12), Final Fantasy XV (DX11), No Man's Sky (Vulkan), Lightning Returns: Final Fantasy
@@ -91,6 +96,7 @@ The card at the top of the Uplift tab tells you what's wrong. The usual ones:
 | "The NR runtime was not found" | Put `nvngx_dlssnr.dll` next to the add-ons and restart the game. |
 | "NR failed", with an NVIDIA error code | Your `nvngx_dlssnr.dll` doesn't work with your card (see "What you need"), or your driver is out of date. |
 | "Uplift's 64-bit helper stopped" | Copy `gitc-uplift-helper64.exe` from the same release next to the add-ons, then press **Retry now**. |
+| "The GPU device was removed" | Press **Retry now** if the card has it; otherwise restart the game. After a stop, some video memory (1 GB or more at 4K) stays in use until you restart the game. If it happens twice, restart the game, and please report it with `ReShade.log`. |
 | "NR needs at least 1280x720" | Raise the game's resolution or window size. |
 | "Another NR tool is running" | Remove the other DLSS5 add-on (see "Other DLSS5 add-ons") and restart the game. |
 | "The Vulkan swap chain cannot take NR's result" | Update ReShade to 6.8 (choose **Update ReShade only** in the installer). If it mentions exclusive fullscreen, use borderless or windowed mode. |
@@ -102,6 +108,10 @@ Still stuck? [Open an issue](https://github.com/ghostinthecamera/GITC-Uplift/iss
 - what the card says, and its **Details** lines;
 - your graphics card, driver and ReShade version;
 - the game.
+
+## Known limitations
+
+- If NVIDIA's NR crashes on the GPU, the game can crash too (as with any GPU crash). Restart the game, and please report it with `ReShade.log`.
 
 ## If you know what you are doing
 

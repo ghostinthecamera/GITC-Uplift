@@ -105,7 +105,7 @@ void VkBridge::Retire(vk::GameHost& host, Shared* shared) {
 
 void VkBridge::LatchVulkan(std::string_view failure) {
   if (!latch_.empty()) return;
-  std::string reason = std::format("The Vulkan bridge stopped: {}. Restart the game to use NR again",
+  std::string reason = std::format("The Vulkan bridge stopped: {}",
                                    (interop_.DeviceLost() ? std::string_view("the game's Vulkan device was lost") : failure));
   nr::Log(nr::LogLevel::ERR, reason);
   // Batch 2 review, minor 1: after a failed Vulkan wait on a lost device the private queue would otherwise wait on `to12` until destroy_device.
@@ -127,7 +127,7 @@ BridgeFrame VkBridge::BeginFrame(vk::GameHost& host, const VkImageInfo& back_buf
     // Both directions count as progress, so a frame shows two steps: the game's work up to the copy-in, then NR's.
     const uint64_t completed = to11_->GetCompletedValue();
     if (const std::optional<std::string_view> stopped = watchdog_.Check(completed, completed + to12_->GetCompletedValue(), now)) {
-      std::string reason = std::format("The Vulkan bridge stopped: {}. Restart the game to use NR again", *stopped);
+      std::string reason = std::format("The Vulkan bridge stopped: {}", *stopped);
       nr::Log(nr::LogLevel::ERR, reason);
       Stop(std::move(reason));
     }
@@ -472,6 +472,23 @@ void VkBridge::Stop(std::string reason) {
   if (to12_ && to12_->GetCompletedValue() < waited12_) {
     to12_->Signal(waited12_);
   }
+}
+
+void VkBridge::RetireAll(vk::GameHost& host) {
+  Retire(host, &color_);
+  Retire(host, &mask_);
+  Retire(host, &motion_);
+  mask_fresh_ = false;
+  interop_.RetireSemaphore(&to12_vk_, host);
+  interop_.RetireSemaphore(&to11_vk_, host);
+}
+
+bool VkBridge::FreeRetired(vk::GameHost& host) {
+  side_->FreeFinished();
+  interop_.FreeFinished(host);
+  if (!interop_.Idle()) return false;
+  interop_.FreeAll(host);  // nothing is retired any more: the wait fences, none of them in flight
+  return true;
 }
 
 void VkBridge::FreeVulkan(vk::GameHost& host) {

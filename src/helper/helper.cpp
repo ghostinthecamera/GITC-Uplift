@@ -293,6 +293,14 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
   }
   const bool running = (context_->NrState() != nr::SessionState::OFF);
   const auto now = std::chrono::steady_clock::now();
+  // 1.0.1 (F2): a line a minute while NR runs here, from the context's count of NR recordings (cheap accessors, no Status), and the figures once more
+  // when this helper's device is found removed (by BeginFrame below, or earlier). The memory is the helper's own: NR lives in this process.
+  const auto log_figures = [this](std::string_view lead, const addon::NrHeartbeat::Figures& figures) {
+    nr::Log(nr::LogLevel::INFO, addon::HeartbeatLine(lead, figures, addon::ProcessPrivateMiB(), nr_vram_.MiB(side_->Device()->GetAdapterLuid())));
+  };
+  if (const std::optional<addon::NrHeartbeat::Figures> figures = nr_heartbeat_.Note(context_->NrRecordings(), context_->LatestMotionSource(), now)) {
+    log_figures("NR running:", *figures);
+  }
   const addon::TargetInfo target = transport_->Describe(frame.target, settings_.enabled, running, &reply->handles);
   const addon::FrameConfig config = addon::BuildFrameConfig(
       {
@@ -305,6 +313,11 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
       },
       &coalescer_, now);
   context_->BeginFrame(side_->Queue(), config, target, frame.marker_expected != 0u, now);
+  if (context_->DeviceLost()) {
+    if (const std::optional<addon::NrHeartbeat::Figures> figures = nr_heartbeat_.Stop(now)) {
+      log_figures("NR stopped after", *figures);
+    }
+  }
   reply->ok = 1u;
   reply->frame_ready = context_->FrameReady() ? 1u : 0u;
   reply->running = (context_->NrState() != nr::SessionState::OFF) ? 1u : 0u;
@@ -389,6 +402,7 @@ void Helper::FillStatus(ipc::Status* out) const {
   ipc::CopyText(out->placement_line, status.placement_line);
   ipc::CopyText(out->motion_line, status.motion_line);
   ipc::CopyText(out->work_line, status.work_line);
+  ipc::CopyText(out->exposure_line, status.exposure_line);  // Plan 17
   ipc::CopyText(out->ui_correction_note, status.ui_correction_note);
   ipc::CopyText(out->transport_line, transport_->Line());
 }

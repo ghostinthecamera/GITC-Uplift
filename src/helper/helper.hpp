@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "addon/device_context.hpp"
+#include "addon/nr_heartbeat.hpp"
 #include "bridge/d3d12_side.hpp"
 #include "helper/transports.hpp"
 #include "ipc/protocol.hpp"
@@ -90,6 +91,9 @@ class Helper {
   std::optional<nr::MemoryInfo> last_game_memory_;  // the add-on's figures, for RealHost::QueryMemory (design §2.10)
   bool snippet_found_ = false;
   uint64_t busy_skips_ = 0u;
+  // 1.0.1 (F2): the once-a-minute "NR running" line and the "NR stopped after" one, with this (the helper's) process's private bytes and VRAM.
+  addon::NrHeartbeat nr_heartbeat_;
+  addon::ProcessVram nr_vram_;
   Heartbeat heartbeat_;  // declared last: its thread stops first
 };
 

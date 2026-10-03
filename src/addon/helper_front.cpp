@@ -454,7 +454,16 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   }
   wire.target.color_space = static_cast<uint32_t>(frame.swapchain->get_color_space());
 
-  const std::optional<ipc::Reply> reply = remote.Present(settings.enabled, wire, settings_text_, HELPER_LOG);
+  std::optional<ipc::Reply> reply = remote.Present(settings.enabled, wire, settings_text_, HELPER_LOG);
+  if (remote.Attached() && remote.LastStatus().device_lost != 0u) {
+    // Plan 17: the helper's own Direct3D 12 device was removed, so its NR would stay off for the session. The helper is ended as a hung one is, and Retry
+    // now starts a fresh one with a new device, under the same 2-strike rule as a bridge's private device.
+    remote.Abort("Its Direct3D 12 device was removed (ReShade.log has the details)");
+    reply.reset();
+  }
+  if (remote_owner_ == device) {
+    entry.strikes.Note(!remote.Failure().empty(), true);  // a fresh helper process brings a fresh device: always retryable
+  }
   if (remote.FrameSent()) {
     if (entry.vulkan) {
       entry.vulkan->NoteFrameSent();  // the colour handle a reply (or a stash of an earlier one) brings is for this target, not the next present's
@@ -698,6 +707,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
       }
     }
     view->work_line = std::string(ipc::TextOf(status->work_line));
+    view->exposure_line = std::string(ipc::TextOf(status->exposure_line));  // Plan 17
     view->ui_correction_note = std::string(ipc::TextOf(status->ui_correction_note));
     view->mask_note = device->mask_note;
     view->intermediate_bytes = status->intermediate_bytes;
@@ -742,7 +752,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   } else if (!device->snippet_problem.empty()) {
     view->card = ui::BuildStatusCard({.blocked = device->snippet_problem, .blocked_stage = ui::CardStage::RUNTIME, .enabled = settings.enabled, .addon_file = addon_file_});
   } else if (!helper_problem.empty()) {
-    view->card = ui::BuildStatusCard({.helper_problem = helper_problem, .enabled = settings.enabled});
+    view->card = ui::BuildStatusCard({.helper_problem = helper_problem, .private_stops_final = device->strikes.Exhausted(), .enabled = settings.enabled});
   } else if (!latch.empty()) {
     view->card = ui::BuildStatusCard({.device_problem = latch});
   } else if (status != nullptr) {
@@ -771,6 +781,9 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   if (status != nullptr) {
     FillRunning(&facts, *status, view->card.working);
   }
+  if (device->strikes.Exhausted() && !helper_problem.empty()) {
+    facts.stopped = ui::PRIVATE_DEVICE_STOPPED_TWICE_REASON;  // Plan 17: the helper's second stop is a fixed cause
+  }
   facts.vram_bytes = view->runtime_bytes.value_or(0u) + view->intermediate_bytes;
   facts.passes_note = ((view->card.working && !view->card.fixes.empty()) ? std::string_view(view->card.fixes.front()) : std::string_view());
   ui::FinishSetup(view, state, game_device, facts, now);
@@ -778,6 +791,11 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
 
 void HelperFront::RetryNow(HelperDevice* device) {
   if (remote_ && !remote_->Failure().empty()) {
+    // Plan 17: the 2-strike rule; the card offers no Retry now after the second stop, and this refuses it too.
+    if (device != nullptr) {
+      if (!device->strikes.Retried()) return;
+      device->ClearClientLatch();
+    }
     remote_->RetryNow();
   } else if (device != nullptr) {
     device->retry_now = true;

@@ -148,12 +148,16 @@ struct VkMeterPass {
   Encoding encoding = Encoding::LINEAR_BT709;
   uint32_t primaries = 0u;  // the SourcePrimaries index (Primaries; 0 = automatic)
   float input_scale = 1.f;
-  VkImageView state = VK_NULL_HANDLE;  // 1x1 RGBA32F storage, GENERAL: (2^E, E, the last anchor, set)
+  VkImageView state = VK_NULL_HANDLE;  // 2x1 RGBA32F storage, GENERAL: (2^E, E, the last anchor, set) at (0, 0)
   bool snap = false;
   bool smooth = true;
   float brighter_rate = 2.f;
   float darker_rate = 0.7f;
   float frame_seconds = 1.f / 60.f;
+  // Plan 17: Input exposure = Auto's check, as Direct3D 12's MeterPass: the game's exposure (a sampled view, or none) and its target into texel (1, 0).
+  bool probe = false;
+  VkSampledView game_exposure;
+  float game_exposure_factor = 1.f;
 };
 
 // Plan 14 Task 10 (v2 design §3.10): pass n's own Transfer and Colour strength, applied to its raw output in place. Every image GENERAL.

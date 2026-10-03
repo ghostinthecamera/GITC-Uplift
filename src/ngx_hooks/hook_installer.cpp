@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "ngx_hooks/minhook_once.hpp"
+#include "nr/d3d11_handles.hpp"
 #include "nr/log.hpp"
 #include "nr/vk_handles.hpp"
 
@@ -45,6 +46,19 @@ using VkShutdown1Fn = NVSDK_NGX_Result(NVSDK_CONV*)(void*, void*, void*, void*);
 // device's GetAdapterLuid (vtable +0x158) for its LUID, and calls the shared shutdown routine (RVA 0x44DC0) with the device, the LUID and RDX as the count
 // pointer; it reads neither R8, R9 nor any stack argument. Detoured with the same four pointer-sized parameters, forwarded unchanged.
 using D3D12Shutdown1Fn = VkShutdown1Fn;
+// Plan 18 (design §2): the core's Direct3D 11 entry points (nvsdk_ngx.h, the non-snippet declarations). ReleaseFeature has the Direct3D 12 signature.
+using D3D11CreateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D11DeviceContext*, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
+using D3D11EvaluateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D11DeviceContext*, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
+                                                      PFN_NVSDK_NGX_ProgressCallback);
+using D3D11EvaluateCFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D11DeviceContext*, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
+                                                       PFN_NVSDK_NGX_ProgressCallback_C);
+// Plan 18: NVSDK_NGX_D3D11_Shutdown1 has the Direct3D 12 one's shape (the same core, the export at RVA 0x659E0): it keeps RCX (the ID3D11Device) and RDX,
+// reads the device's LUID (a call at RVA 0x64F30), and tail-jumps to the shared shutdown routine (RVA 0x44DC0) with RDX as the count pointer; it reads neither
+// R8, R9 nor any stack argument. Detoured with the same four pointer-sized parameters, forwarded unchanged.
+using D3D11Shutdown1Fn = VkShutdown1Fn;
+// Plan 18: the device-less NVSDK_NGX_D3D11_Shutdown (RVA 0x65970) takes no argument: it calls the shared routine with a null device and a count of its own.
+// Games on an SDK older than Shutdown1 (Final Fantasy XV's DLSS 1) call it.
+using D3D11ShutdownFn = NVSDK_NGX_Result(NVSDK_CONV*)();
 
 // The trampolines of one hooked module copy; stored before its detours are enabled. `poisoned`
 // latches when MinHook fails to disable or remove one of this slot's hooks: the hook may still be
@@ -56,6 +70,12 @@ struct SlotOriginals {
   std::atomic<EvaluateCFn> evaluate_c{nullptr};
   std::atomic<ReleaseFn> release{nullptr};
   std::atomic<D3D12Shutdown1Fn> shutdown1{nullptr};
+  std::atomic<D3D11CreateFn> d3d11_create{nullptr};
+  std::atomic<D3D11EvaluateFn> d3d11_evaluate{nullptr};
+  std::atomic<D3D11EvaluateCFn> d3d11_evaluate_c{nullptr};
+  std::atomic<ReleaseFn> d3d11_release{nullptr};
+  std::atomic<D3D11Shutdown1Fn> d3d11_shutdown1{nullptr};
+  std::atomic<D3D11ShutdownFn> d3d11_shutdown{nullptr};
   std::atomic<VkCreateFn> vk_create{nullptr};
   std::atomic<VkCreate1Fn> vk_create1{nullptr};
   std::atomic<VkEvaluateFn> vk_evaluate{nullptr};
@@ -70,6 +90,12 @@ struct SlotOriginals {
     evaluate_c.store(nullptr, std::memory_order_release);
     release.store(nullptr, std::memory_order_release);
     shutdown1.store(nullptr, std::memory_order_release);
+    d3d11_create.store(nullptr, std::memory_order_release);
+    d3d11_evaluate.store(nullptr, std::memory_order_release);
+    d3d11_evaluate_c.store(nullptr, std::memory_order_release);
+    d3d11_release.store(nullptr, std::memory_order_release);
+    d3d11_shutdown1.store(nullptr, std::memory_order_release);
+    d3d11_shutdown.store(nullptr, std::memory_order_release);
     vk_create.store(nullptr, std::memory_order_release);
     vk_create1.store(nullptr, std::memory_order_release);
     vk_evaluate.store(nullptr, std::memory_order_release);
@@ -224,7 +250,8 @@ void NotifyEvaluate(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX
 // v2 design §3.9 step 7: pre-SR's Color swap for one evaluate. The observer decides before the original
 // runs; the destructor puts the game's own Color back on every path, so the game's block never keeps a
 // texture of Uplift's past this call. It writes back with the type the game used. Plan 13: a Vulkan block
-// holds its resources as void* (NGX_VULKAN_EVALUATE_DLSS_EXT), so only that type is read and written there.
+// holds its resources as void* (NGX_VULKAN_EVALUATE_DLSS_EXT), so only that type is read and written there. Plan 18: a Direct3D 11 block holds
+// them as ID3D11Resource* (NGX_D3D11_EVALUATE_DLSS_EXT), read and written with that overload (a void* one, as an engine may set, takes the pointer branch).
 class ColorSwap {
  public:
   ColorSwap(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters) noexcept {
@@ -236,10 +263,22 @@ class ColorSwap {
       if (call.color == nullptr) return;
       // NGX takes the block as const, but it is the game's own mutable object, set again every frame.
       auto* const block = const_cast<NVSDK_NGX_Parameter*>(parameters);
+      if (api == NgxApi::D3D11) {
+        // Plan 18: `call.color` is an ID3D11Resource*, punned (nr/d3d11_handles.hpp). Fix round 1 (M-3): held for the original call, so a present on another
+        // thread that releases the bridge's texture cannot free it under NGX. Final review: taken before the branch is chosen, so the ID3D11Resource* branch and
+        // the void* one (an engine that sets Color as a pointer) both hold it, and the destructor releases it once, on every path (a rejected swap too).
+        swapped11_ = nr::D3D11ResourceOf(call.color);
+        swapped11_->AddRef();
+      }
       if (api == NgxApi::D3D12 && NVSDK_NGX_SUCCEED(block->Get(NVSDK_NGX_Parameter_Color, &game_color_))) {
+        kind_ = Kind::D3D12;
         block->Set(NVSDK_NGX_Parameter_Color, call.color);
+      } else if (api == NgxApi::D3D11 && NVSDK_NGX_SUCCEED(block->Get(NVSDK_NGX_Parameter_Color, &game_color11_))) {
+        // NGX_D3D11_EVALUATE_DLSS_EXT sets Color as an ID3D11Resource*.
+        kind_ = Kind::D3D11;
+        block->Set(NVSDK_NGX_Parameter_Color, swapped11_);
       } else if (NVSDK_NGX_SUCCEED(block->Get(NVSDK_NGX_Parameter_Color, &game_pointer_))) {
-        as_pointer_ = true;
+        kind_ = Kind::POINTER;
         block->Set(NVSDK_NGX_Parameter_Color, static_cast<void*>(call.color));
       } else {
         // Minor 9: pre-SR already applied NR into call.color, on the assumption the swap below would
@@ -256,21 +295,28 @@ class ColorSwap {
     }
   }
   ~ColorSwap() {
-    if (block_ == nullptr) return;
-    if (as_pointer_) {
-      block_->Set(NVSDK_NGX_Parameter_Color, game_pointer_);
-    } else {
-      block_->Set(NVSDK_NGX_Parameter_Color, game_color_);
+    if (block_ != nullptr) {
+      switch (kind_) {
+        case Kind::D3D12:   block_->Set(NVSDK_NGX_Parameter_Color, game_color_); break;
+        case Kind::D3D11:   block_->Set(NVSDK_NGX_Parameter_Color, game_color11_); break;
+        case Kind::POINTER: block_->Set(NVSDK_NGX_Parameter_Color, game_pointer_); break;
+      }
+    }
+    if (swapped11_ != nullptr) {
+      swapped11_->Release();  // Plan 18 (fix round 1, M-3): after the game's own Color is back
     }
   }
   ColorSwap(const ColorSwap&) = delete;
   ColorSwap& operator=(const ColorSwap&) = delete;
 
  private:
+  enum class Kind : uint8_t { D3D12, D3D11, POINTER };  // the type the game's Color was read with, and is put back with
   NVSDK_NGX_Parameter* block_ = nullptr;
+  Kind kind_ = Kind::D3D12;
   ID3D12Resource* game_color_ = nullptr;
+  ID3D11Resource* game_color11_ = nullptr;  // Plan 18
+  ID3D11Resource* swapped11_ = nullptr;     // Plan 18 (fix round 1, M-3): the bridge's texture DLSS reads, referenced until the swap ends (either branch)
   void* game_pointer_ = nullptr;
-  bool as_pointer_ = false;
 };
 
 // Every evaluate detour's body (Plan 13: shared by both APIs and both callback kinds). `original()` runs the hooked copy's own entry
@@ -374,12 +420,72 @@ NVSDK_NGX_Result NVSDK_CONV VkShutdown1Detour(void* device, void* second, void* 
   return RunShutdown1(NgxApi::VULKAN, g_originals[SLOT].vk_shutdown1.load(std::memory_order_acquire), _ReturnAddress(), device, second, third, fourth);
 }
 
+// Plan 18 (design §2): the Direct3D 11 detours mirror the Direct3D 12 ones; the evaluate's ID3D11DeviceContext rides as the command list (nr::AsList).
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV D3D11CreateDetour(ID3D11DeviceContext* context, NVSDK_NGX_Feature feature, NVSDK_NGX_Parameter* parameters,
+                                              NVSDK_NGX_Handle** out_handle) {
+  const D3D11CreateFn original = g_originals[SLOT].d3d11_create.load(std::memory_order_acquire);
+  return RunCreate({.api = NgxApi::D3D11, .list = nr::AsList(context), .feature = feature, .parameters = parameters, .caller = _ReturnAddress()},
+                   out_handle, [&] { return original(context, feature, parameters, out_handle); });
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV D3D11EvaluateDetour(ID3D11DeviceContext* context, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
+                                                PFN_NVSDK_NGX_ProgressCallback callback) {
+  const D3D11EvaluateFn original = g_originals[SLOT].d3d11_evaluate.load(std::memory_order_acquire);
+  return RunEvaluate(NgxApi::D3D11, nr::AsList(context), handle, parameters, [&] { return original(context, handle, parameters, callback); });
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV D3D11EvaluateCDetour(ID3D11DeviceContext* context, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
+                                                 PFN_NVSDK_NGX_ProgressCallback_C callback) {
+  const D3D11EvaluateCFn original = g_originals[SLOT].d3d11_evaluate_c.load(std::memory_order_acquire);
+  return RunEvaluate(NgxApi::D3D11, nr::AsList(context), handle, parameters, [&] { return original(context, handle, parameters, callback); });
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV D3D11ReleaseDetour(NVSDK_NGX_Handle* handle) {
+  return RunRelease(handle, g_originals[SLOT].d3d11_release.load(std::memory_order_acquire));
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV D3D11Shutdown1Detour(void* device, void* second, void* third, void* fourth) {
+  return RunShutdown1(NgxApi::D3D11, g_originals[SLOT].d3d11_shutdown1.load(std::memory_order_acquire), _ReturnAddress(), device, second, third, fourth);
+}
+
+// Plan 18: the device-less NVSDK_NGX_D3D11_Shutdown: BeforeCoreShutdown with a null device on an outermost call, then the core's own.
+NVSDK_NGX_Result RunShutdownAll(D3D11ShutdownFn original, const void* caller) {
+  const DepthGuard depth;
+  NgxObserver* const observer = g_observer.load(std::memory_order_acquire);
+  if (!depth.Nested() && observer != nullptr) {
+    try {
+      observer->BeforeCoreShutdown(NgxApi::D3D11, nullptr, caller);
+    } catch (const std::exception& e) {
+      LogObserverFailure(ObserverCall::SHUTDOWN, e.what());
+    } catch (...) {
+      LogObserverFailure(ObserverCall::SHUTDOWN, nullptr);
+    }
+  }
+  return original();
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV D3D11ShutdownDetour() {
+  return RunShutdownAll(g_originals[SLOT].d3d11_shutdown.load(std::memory_order_acquire), _ReturnAddress());
+}
+
 struct DetourSet {
   CreateFn create;
   EvaluateFn evaluate;
   EvaluateCFn evaluate_c;
   ReleaseFn release;
   D3D12Shutdown1Fn shutdown1;
+  D3D11CreateFn d3d11_create;
+  D3D11EvaluateFn d3d11_evaluate;
+  D3D11EvaluateCFn d3d11_evaluate_c;
+  ReleaseFn d3d11_release;
+  D3D11Shutdown1Fn d3d11_shutdown1;
+  D3D11ShutdownFn d3d11_shutdown;
   VkCreateFn vk_create;
   VkCreate1Fn vk_create1;
   VkEvaluateFn vk_evaluate;
@@ -398,6 +504,12 @@ constexpr std::array<DetourSet, HookInstaller::MAX_MODULES> DETOURS =
               .evaluate_c = &EvaluateCDetour<SLOTS>,
               .release = &ReleaseDetour<SLOTS>,
               .shutdown1 = &Shutdown1Detour<SLOTS>,
+              .d3d11_create = &D3D11CreateDetour<SLOTS>,
+              .d3d11_evaluate = &D3D11EvaluateDetour<SLOTS>,
+              .d3d11_evaluate_c = &D3D11EvaluateCDetour<SLOTS>,
+              .d3d11_release = &D3D11ReleaseDetour<SLOTS>,
+              .d3d11_shutdown1 = &D3D11Shutdown1Detour<SLOTS>,
+              .d3d11_shutdown = &D3D11ShutdownDetour<SLOTS>,
               .vk_create = &VkCreateDetour<SLOTS>,
               .vk_create1 = &VkCreate1Detour<SLOTS>,
               .vk_evaluate = &VkEvaluateDetour<SLOTS>,
@@ -458,6 +570,19 @@ bool IsNgxCoreFileName(std::wstring_view file_name) {
     return CompareStringOrdinal(file_name.data(), static_cast<int>(file_name.size()), candidate, -1, TRUE) == CSTR_EQUAL;
   };
   return equals(L"_nvngx.dll") || equals(L"nvngx.dll");
+}
+
+std::string HookedApis(const HookedModule& module) {
+  std::vector<std::string_view> names;
+  if (module.d3d12) names.push_back("Direct3D 12");
+  if (module.d3d11) names.push_back("Direct3D 11");
+  if (module.vulkan) names.push_back("Vulkan");
+  std::string text;
+  for (size_t index = 0u; index < names.size(); ++index) {
+    text += (index == 0u ? "" : (index + 1u == names.size() ? " and " : ", "));
+    text += names[index];
+  }
+  return text;
 }
 
 HookInstaller::~HookInstaller() {
@@ -569,13 +694,19 @@ size_t HookInstaller::ScanLocked() {
         return std::ranges::find(entry.targets, target) != entry.targets.end();
       });
     };
-    // Plan 13 (design §5): either API's entry points make a copy worth hooking. Each API is taken when its create (Vulkan: either of
-    // its two), evaluate and release are exported and none of them is hooked already (a copy that forwards to a hooked one).
+    // Plan 13 (design §5): any API's entry points make a copy worth hooking. Each API is taken when its create (Vulkan: either of
+    // its two), evaluate and release are exported and none of them is hooked already (a copy that forwards to a hooked one). Plan 18: Direct3D 11 too.
     void* const create = export_address("NVSDK_NGX_D3D12_CreateFeature");
     void* const evaluate = export_address("NVSDK_NGX_D3D12_EvaluateFeature");
     void* const evaluate_c = export_address("NVSDK_NGX_D3D12_EvaluateFeature_C");
     void* const release = export_address("NVSDK_NGX_D3D12_ReleaseFeature");
     void* const shutdown1 = export_address("NVSDK_NGX_D3D12_Shutdown1");
+    void* const d3d11_create = export_address("NVSDK_NGX_D3D11_CreateFeature");
+    void* const d3d11_evaluate = export_address("NVSDK_NGX_D3D11_EvaluateFeature");
+    void* const d3d11_evaluate_c = export_address("NVSDK_NGX_D3D11_EvaluateFeature_C");
+    void* const d3d11_release = export_address("NVSDK_NGX_D3D11_ReleaseFeature");
+    void* const d3d11_shutdown1 = export_address("NVSDK_NGX_D3D11_Shutdown1");
+    void* const d3d11_shutdown = export_address("NVSDK_NGX_D3D11_Shutdown");
     void* const vk_create = export_address("NVSDK_NGX_VULKAN_CreateFeature");
     void* const vk_create1 = export_address("NVSDK_NGX_VULKAN_CreateFeature1");
     void* const vk_evaluate = export_address("NVSDK_NGX_VULKAN_EvaluateFeature");
@@ -583,17 +714,20 @@ size_t HookInstaller::ScanLocked() {
     void* const vk_release = export_address("NVSDK_NGX_VULKAN_ReleaseFeature");
     void* const vk_shutdown1 = export_address("NVSDK_NGX_VULKAN_Shutdown1");
     const bool d3d12_exported = (create != nullptr && evaluate != nullptr && release != nullptr);
+    const bool d3d11_exported = (d3d11_create != nullptr && d3d11_evaluate != nullptr && d3d11_release != nullptr);  // Plan 18
     const bool vulkan_exported = ((vk_create != nullptr || vk_create1 != nullptr) && vk_evaluate != nullptr && vk_release != nullptr);
-    if (!d3d12_exported && !vulkan_exported) {
-      nr::Logf(nr::LogLevel::INFO, "{} exports no D3D12 or Vulkan feature entry points; not hooked", name);
+    if (!d3d12_exported && !d3d11_exported && !vulkan_exported) {
+      nr::Logf(nr::LogLevel::INFO, "{} exports no D3D12, D3D11 or Vulkan feature entry points; not hooked", name);
       rejected_.push_back(module);
       continue;
     }
     const bool hook_d3d12 =
         (d3d12_exported && !hooked_already(create) && !hooked_already(evaluate) && !hooked_already(release));
+    const bool hook_d3d11 =
+        (d3d11_exported && !hooked_already(d3d11_create) && !hooked_already(d3d11_evaluate) && !hooked_already(d3d11_release));  // Plan 18
     const bool hook_vulkan = (vulkan_exported && !hooked_already(vk_create) && !hooked_already(vk_create1) && !hooked_already(vk_evaluate)
                               && !hooked_already(vk_release));
-    if (!hook_d3d12 && !hook_vulkan) {
+    if (!hook_d3d12 && !hook_d3d11 && !hook_vulkan) {
       nr::Logf(nr::LogLevel::INFO, "{} forwards to an NGX core that is hooked already", name);
       rejected_.push_back(module);
       continue;
@@ -621,7 +755,8 @@ size_t HookInstaller::ScanLocked() {
     // review, minor 4: every exported Vulkan create is required, so a copy that exports both never stays hooked without one of them (its
     // features would never register). Shutdown1 (I-1) is hooked where exported, and left to the hook of a copy it forwards to. Plan 15: the
     // Direct3D 12 Shutdown1 is optional, as EvaluateFeature_C: a copy where it cannot be hooked keeps its DLSS placements, without the guard
-    // (Plan 14's behaviour), and the log line says so.
+    // (Plan 14's behaviour), and the log line says so. Plan 18: the Direct3D 11 entry points are [5..10] (create, evaluate, release required; EvaluateFeature_C,
+    // Shutdown1 and the device-less Shutdown optional), the Vulkan ones [11..16].
     const DetourSet& detours = DETOURS[slot];
     struct EntryPoint {
       void* target = nullptr;
@@ -629,12 +764,21 @@ size_t HookInstaller::ScanLocked() {
       bool required = false;
       void* original = nullptr;  // MinHook's trampoline, once hooked
     };
-    std::array<EntryPoint, 11> entry_points = {{
+    std::array<EntryPoint, 17> entry_points = {{
+        // [0..4] Direct3D 12
         {(hook_d3d12 ? create : nullptr), reinterpret_cast<void*>(detours.create), true},
         {(hook_d3d12 ? evaluate : nullptr), reinterpret_cast<void*>(detours.evaluate), true},
         {(hook_d3d12 ? evaluate_c : nullptr), reinterpret_cast<void*>(detours.evaluate_c), false},
         {(hook_d3d12 ? release : nullptr), reinterpret_cast<void*>(detours.release), true},
         {(hook_d3d12 ? shutdown1 : nullptr), reinterpret_cast<void*>(detours.shutdown1), false},
+        // [5..10] Direct3D 11 (Plan 18)
+        {(hook_d3d11 ? d3d11_create : nullptr), reinterpret_cast<void*>(detours.d3d11_create), true},
+        {(hook_d3d11 ? d3d11_evaluate : nullptr), reinterpret_cast<void*>(detours.d3d11_evaluate), true},
+        {(hook_d3d11 ? d3d11_evaluate_c : nullptr), reinterpret_cast<void*>(detours.d3d11_evaluate_c), false},
+        {(hook_d3d11 ? d3d11_release : nullptr), reinterpret_cast<void*>(detours.d3d11_release), true},
+        {(hook_d3d11 ? d3d11_shutdown1 : nullptr), reinterpret_cast<void*>(detours.d3d11_shutdown1), false},
+        {(hook_d3d11 ? d3d11_shutdown : nullptr), reinterpret_cast<void*>(detours.d3d11_shutdown), false},
+        // [11..16] Vulkan
         {(hook_vulkan ? vk_create : nullptr), reinterpret_cast<void*>(detours.vk_create), true},
         {(hook_vulkan ? vk_create1 : nullptr), reinterpret_cast<void*>(detours.vk_create1), true},
         {(hook_vulkan ? vk_evaluate : nullptr), reinterpret_cast<void*>(detours.vk_evaluate), true},
@@ -664,37 +808,47 @@ size_t HookInstaller::ScanLocked() {
 
     std::vector<void*> created;
     bool ok = true;
+    bool d3d11_hooked = hook_d3d11;
     bool vulkan_hooked = hook_vulkan;
-    constexpr size_t FIRST_VULKAN = 5u;  // entry_points[5..10] are the Vulkan ones
+    constexpr size_t FIRST_D3D11 = 5u;    // entry_points[5..10] are the Direct3D 11 ones (Plan 18)
+    constexpr size_t FIRST_VULKAN = 11u;  // entry_points[11..16] the Vulkan ones
+    // Plan 13 and 18: a Direct3D 11 or Vulkan entry point that cannot be hooked costs that API's placements only, never the Direct3D 12 ones. That API's
+    // hooks made so far go now: none was enabled yet, so none can be live.
+    const auto drop_api = [&entry_points, &created](size_t first, size_t end) {
+      for (size_t made = first; made < end; ++made) {
+        if (entry_points[made].original == nullptr) continue;
+        MH_RemoveHook(entry_points[made].target);
+        std::erase(created, entry_points[made].target);
+        entry_points[made].original = nullptr;
+      }
+    };
     for (size_t index = 0u; index < entry_points.size(); ++index) {
       EntryPoint& entry_point = entry_points[index];
+      const bool d3d11_entry = (index >= FIRST_D3D11 && index < FIRST_VULKAN);
       const bool vulkan_entry = (index >= FIRST_VULKAN);
       // An optional entry point that another copy's hook already covers (a forwarding stub) is left to that hook.
-      if (!ok || entry_point.target == nullptr || (vulkan_entry && !vulkan_hooked) || (!entry_point.required && hooked_already(entry_point.target))) {
+      if (!ok || entry_point.target == nullptr || (d3d11_entry && !d3d11_hooked) || (vulkan_entry && !vulkan_hooked)
+          || (!entry_point.required && hooked_already(entry_point.target))) {
         continue;
       }
       if (const MH_STATUS status = MH_CreateHook(entry_point.target, entry_point.detour, &entry_point.original); status != MH_OK) {
         nr::Logf(nr::LogLevel::WARN, "MinHook could not hook {}: {}", name, MH_StatusToString(status));
         entry_point.original = nullptr;
         if (!entry_point.required) continue;
-        if (!vulkan_entry) {
+        if (d3d11_entry) {
+          d3d11_hooked = false;
+          drop_api(FIRST_D3D11, FIRST_VULKAN);
+        } else if (vulkan_entry) {
+          vulkan_hooked = false;
+          drop_api(FIRST_VULKAN, entry_points.size());
+        } else {
           ok = false;
-          continue;
-        }
-        // Plan 13: a Vulkan entry point that cannot be hooked costs the Vulkan placements only, never the Direct3D 12 ones. The Vulkan hooks made so
-        // far go now: none was enabled yet, so none can be live.
-        vulkan_hooked = false;
-        for (size_t made = FIRST_VULKAN; made < entry_points.size(); ++made) {
-          if (entry_points[made].original == nullptr) continue;
-          MH_RemoveHook(entry_points[made].target);
-          std::erase(created, entry_points[made].target);
-          entry_points[made].original = nullptr;
         }
         continue;
       }
       created.push_back(entry_point.target);
     }
-    ok = ok && (hook_d3d12 || vulkan_hooked);  // something is left to hook
+    ok = ok && (hook_d3d12 || d3d11_hooked || vulkan_hooked);  // something is left to hook
     const bool with_evaluate_c = (entry_points[2].original != nullptr);
     if (ok) {
       SlotOriginals& originals = g_originals[slot];
@@ -703,12 +857,18 @@ size_t HookInstaller::ScanLocked() {
       originals.evaluate_c.store(reinterpret_cast<EvaluateCFn>(entry_points[2].original), std::memory_order_release);
       originals.release.store(reinterpret_cast<ReleaseFn>(entry_points[3].original), std::memory_order_release);
       originals.shutdown1.store(reinterpret_cast<D3D12Shutdown1Fn>(entry_points[4].original), std::memory_order_release);
-      originals.vk_create.store(reinterpret_cast<VkCreateFn>(entry_points[5].original), std::memory_order_release);
-      originals.vk_create1.store(reinterpret_cast<VkCreate1Fn>(entry_points[6].original), std::memory_order_release);
-      originals.vk_evaluate.store(reinterpret_cast<VkEvaluateFn>(entry_points[7].original), std::memory_order_release);
-      originals.vk_evaluate_c.store(reinterpret_cast<VkEvaluateCFn>(entry_points[8].original), std::memory_order_release);
-      originals.vk_release.store(reinterpret_cast<ReleaseFn>(entry_points[9].original), std::memory_order_release);
-      originals.vk_shutdown1.store(reinterpret_cast<VkShutdown1Fn>(entry_points[10].original), std::memory_order_release);
+      originals.d3d11_create.store(reinterpret_cast<D3D11CreateFn>(entry_points[5].original), std::memory_order_release);
+      originals.d3d11_evaluate.store(reinterpret_cast<D3D11EvaluateFn>(entry_points[6].original), std::memory_order_release);
+      originals.d3d11_evaluate_c.store(reinterpret_cast<D3D11EvaluateCFn>(entry_points[7].original), std::memory_order_release);
+      originals.d3d11_release.store(reinterpret_cast<ReleaseFn>(entry_points[8].original), std::memory_order_release);
+      originals.d3d11_shutdown1.store(reinterpret_cast<D3D11Shutdown1Fn>(entry_points[9].original), std::memory_order_release);
+      originals.d3d11_shutdown.store(reinterpret_cast<D3D11ShutdownFn>(entry_points[10].original), std::memory_order_release);
+      originals.vk_create.store(reinterpret_cast<VkCreateFn>(entry_points[11].original), std::memory_order_release);
+      originals.vk_create1.store(reinterpret_cast<VkCreate1Fn>(entry_points[12].original), std::memory_order_release);
+      originals.vk_evaluate.store(reinterpret_cast<VkEvaluateFn>(entry_points[13].original), std::memory_order_release);
+      originals.vk_evaluate_c.store(reinterpret_cast<VkEvaluateCFn>(entry_points[14].original), std::memory_order_release);
+      originals.vk_release.store(reinterpret_cast<ReleaseFn>(entry_points[15].original), std::memory_order_release);
+      originals.vk_shutdown1.store(reinterpret_cast<VkShutdown1Fn>(entry_points[16].original), std::memory_order_release);
       for (void* const target : created) {
         if (const MH_STATUS status = MH_QueueEnableHook(target); status != MH_OK) {
           nr::Logf(nr::LogLevel::WARN, "MinHook could not queue {} for enabling: {}", name, MH_StatusToString(status));
@@ -748,20 +908,27 @@ size_t HookInstaller::ScanLocked() {
       continue;
     }
     const bool with_d3d12_shutdown = (hook_d3d12 && entry_points[4].original != nullptr);
-    const bool with_vulkan_shutdown = (vulkan_hooked && entry_points[10].original != nullptr);
+    const bool with_vulkan_shutdown = (vulkan_hooked && entry_points[16].original != nullptr);
+    const bool with_d3d11_shutdown = (d3d11_hooked && entry_points[9].original != nullptr);
+    const bool with_d3d11_shutdown_all = (d3d11_hooked && entry_points[10].original != nullptr);
     installed_.push_back({.module = {.file_name = file_name,
                                      .module = module,
                                      .evaluate_c = with_evaluate_c,
                                      .d3d12 = hook_d3d12,
                                      .vulkan = vulkan_hooked,
                                      .vulkan_shutdown = with_vulkan_shutdown,
-                                     .d3d12_shutdown = with_d3d12_shutdown},
+                                     .d3d12_shutdown = with_d3d12_shutdown,
+                                     .d3d11 = d3d11_hooked,
+                                     .d3d11_shutdown = with_d3d11_shutdown,
+                                     .d3d11_shutdown_all = with_d3d11_shutdown_all},
                           .targets = std::move(created),
                           .slot = slot});
-    const std::string_view apis = (hook_d3d12 && vulkan_hooked ? "Direct3D 12 and Vulkan" : (hook_d3d12 ? "Direct3D 12" : "Vulkan"));
-    nr::Logf(nr::LogLevel::INFO, "NGX hooks installed on {} ({} entry points; EvaluateFeature_C {}{}{})", name, apis,
+    nr::Logf(nr::LogLevel::INFO, "NGX hooks installed on {} ({} entry points; EvaluateFeature_C {}{}{}{})", name, HookedApis(installed_.back().module),
              (with_evaluate_c ? "hooked" : (evaluate_c == nullptr ? "not exported" : "not hooked")),
              (!hook_d3d12 ? "" : (with_d3d12_shutdown ? "; D3D12_Shutdown1 hooked" : "; D3D12_Shutdown1 not hooked")),
+             (!d3d11_hooked ? std::string()
+                            : std::format("; D3D11_Shutdown1 {}; D3D11_Shutdown {}", (with_d3d11_shutdown ? "hooked" : "not hooked"),
+                                          (with_d3d11_shutdown_all ? "hooked" : "not hooked"))),
              (!vulkan_hooked ? "" : (with_vulkan_shutdown ? "; VULKAN_Shutdown1 hooked" : "; VULKAN_Shutdown1 not hooked")));
     ++hooked;
   }

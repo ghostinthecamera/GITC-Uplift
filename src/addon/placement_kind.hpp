@@ -12,4 +12,9 @@ enum class Placement : uint8_t {
   BEFORE_UPSCALING,  // v2 design §3.9: NR on the render image before DLSS-SR upscales it
 };
 
+// Plan 18: NR runs inside the game's frame (the DLSS stages), not on the presented image.
+[[nodiscard]] constexpr bool IsDlssStage(Placement placement) {
+  return placement == Placement::AFTER_DLSS || placement == Placement::BEFORE_UPSCALING;
+}
+
 }  // namespace uplift::addon

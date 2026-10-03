@@ -78,6 +78,9 @@ struct FrameConfig {
   bool present_motion_copy = false;   // Plan 14 (design §2.2): a native Vulkan context copies DLSS's motion vectors for the Present path (set by the add-on only)
   bool vulkan = false;                // Plan 14 (batch 2 review, minor 2): a Vulkan device's bridged context, whose motion line must not name Direct3D 12 or Launchpad (set by the add-on only)
   uint64_t upscaler_creates = 0u;     // Plan 15: the game's DLSS creates on this device so far (FeatureRegistry::UpscalerCreates; set by the add-on only)
+  // Plan 18 Task 12: DLSS was seen on this device and no DLSS feature of its API is live there now (addon::DlssReleased; set by the add-on only): the game
+  // released it, or on Direct3D 11 shut NGX down. The context's DlssOffLatch decides from it when the game switched its DLSS off.
+  bool dlss_released = false;
   uint32_t pass_view_limit = 0u;      // Plan 6 (D6): the Defaults view's passes on the live features; 0 = all
   uint64_t settings_generation = 0u;  // Plan 6 (D11): changes with every saved settings change; restarts the retry backoff
 };
@@ -111,6 +114,7 @@ struct ContextStatus {
   nr::Size work;                    // the settled work image of the chosen placement
   nr::Size canvas;                  // NR's network size: `work`, or the floor canvas it is padded into
   std::string work_line;            // "Working at 1920x1080 of 3840x2160 (Edge-aware)"; empty before a frame
+  std::string exposure_line;        // Plan 17: "Input exposure: the game's" (sources::ExposureLine); empty unless NR ran on the latest frame and used one
   sources::MotionSource motion_source = sources::MotionSource::NONE;  // the latest recording's
   std::string motion_line;  // "Motion vectors: DLSS (the game's own, scale 1 x 1)"; never empty
   std::string ui_correction_note;  // Plan 5 (D7): why UI correction does nothing on this placement
@@ -132,6 +136,8 @@ struct ContextStatus {
   // (`abandoned`: the shutdown's wait ran out, so NR stays off for the session; the output problem says so).
   std::string_view held;
   bool abandoned = false;
+  std::string after_dlss_problem;        // Plan 18: NoteStageProblem's, for Setup
+  std::string before_upscaling_problem;
 };
 
 // Plan 15: how long the game's Direct3D 12 NGX shutdown waits for NR's submitted work before Uplift releases NR on the device (else abandons it), as Vulkan's.
@@ -146,9 +152,23 @@ inline constexpr std::chrono::milliseconds D3D12_CORE_SHUTDOWN_WAIT{2000};
 // defined in ui/status_text.hpp, so the 32-bit add-on has it without this header.
 inline constexpr std::string_view BRIDGED_DLSS_REASON = ui::BRIDGED_DLSS_REASON;
 
+// Plan 18 (design §3, §4): what a Direct3D 11 bridge's context wants done at one hooked DLSS evaluate of the main handle, decided before anything is copied.
+enum class BridgedDlssWork : uint8_t {
+  NONE,              // a passthrough: nothing crosses for this evaluate
+  AFTER_DLSS,        // after the original evaluate: the hand-off around NR on DLSS's output
+  BEFORE_UPSCALING,  // before the original evaluate: the hand-off around NR on DLSS's colour input
+  PRESENT_MOTION,    // after the original evaluate: DLSS's vectors into the Present path's ring
+};
+struct BridgedDlssDecision {
+  BridgedDlssWork work = BridgedDlssWork::NONE;
+  float motion_scale_x = 1.f;  // PRESENT_MOTION: MV.Scale x MotionScaleX, the scale the ring slot carries to the Present path
+  float motion_scale_y = 1.f;
+};
+
 // Plan 7: how a context runs.
 struct ContextOptions {
   bool bridged = false;            // on the D3D11 bridge's private device (design §2): the DLSS placements are unavailable
+  bool dlss_stages = false;        // Plan 18: a Direct3D 11 bridge's context: the DLSS stages run through the bridge's mid-frame hand-off (no BRIDGED_DLSS_REASON)
   std::unique_ptr<nr::Host> host;  // tests: an NR stand-in; null runs NVIDIA's runtime (RealHost)
   // Plan 9 (design §2.10): the game process's DXGI local budget and usage, for RealHost::QueryMemory to combine with its
   // own (the 32-bit helper); nullopt or a zero budget = not measured. Called on the frame's thread, under the caller's lock.
@@ -162,7 +182,8 @@ struct ContextOptions {
 class DeviceContext {
  public:
   // nullptr with `error` set when the frame fence or the colour pipeline cannot be created. A bridged context keeps
-  // BRIDGED_DLSS_REASON whatever SetDlssUnavailableReason says, and initialises an adopted NGX core for its device.
+  // BRIDGED_DLSS_REASON whatever SetDlssUnavailableReason says (Plan 18: unless made with ContextOptions::dlss_stages), and initialises an adopted NGX
+  // core for its device.
   static std::unique_ptr<DeviceContext> Create(ID3D12Device* device, nr::SnippetConfig snippet_config,
                                                std::string* error, ContextOptions options = {});
   ~DeviceContext();
@@ -182,9 +203,13 @@ class DeviceContext {
   // Records Present-path NR for this frame. `entry_state`: the back buffer's state in the calling event.
   // `motion`: this frame's UPLIFT_MV, only from the Uplift technique's event; or, with `motion_is_dlss` (Plan 14: the Vulkan bridge's copy of DLSS's vectors,
   // made in the game's frame), those vectors, bound as DLSS's own copy for this present (no Launchpad then).
+  // Plan 18: `dlss_scale_x/y`, with `motion_is_dlss`: the vectors' scale (MV.Scale x MotionScale), for Direct3D 11's ring, which keeps DLSS's raw vectors;
+  // 1 for Vulkan's copies, which the copy already scaled. Fix round 1 (M-1, M-4): on a context made with ContextOptions::dlss_stages they are raw, so the
+  // Present path filters and scales them through the motion copy first, from `dlss_motion_region` (empty: the whole texture).
   // Returns the recording's result; an empty one when nothing ran.
   sources::PresentResult Run(FrameHost* host, D3D12_RESOURCE_STATES entry_state, TriggerPoint point,
-                             ID3D12Resource* motion = nullptr, bool motion_is_dlss = false);
+                             ID3D12Resource* motion = nullptr, bool motion_is_dlss = false, float dlss_scale_x = 1.f,
+                             float dlss_scale_y = 1.f, nr::Rect dlss_motion_region = {});
   // v2 design §3.1/§3.4: after the hooked evaluate of this device's main handle returned, under the
   // add-on's lock. Records NR after DLSS when that is the chosen placement; otherwise notes the evaluate.
   sources::PipelineResult OnDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
@@ -199,6 +224,35 @@ class DeviceContext {
   // so DLSS reads its own Color unchanged this evaluate. Same call, same thread as BeforeDlssEvaluate;
   // corrects the status to skipped with a reason, instead of leaving it saying NR applied.
   void OnColorSwapRejected();
+  // Plan 18 (design §3): before the original evaluate of the main handle on a Direct3D 11 bridge's context: BEFORE_UPSCALING when NR runs before upscaling
+  // for this evaluate (the placement, DLSS not idle, DLSS-SR, NR ACTIVE, Intensity above 0), after settling the work size on `render_region` (N10: in every
+  // state); NONE otherwise, with the status as BeforeDlssEvaluate leaves it. Only for a context made with ContextOptions::dlss_stages.
+  BridgedDlssDecision DecideBeforeEvaluate(const ngx_hooks::DlssFrame& frame, nr::Size render_region, std::chrono::steady_clock::time_point now);
+  // After the original evaluate: OnDlssEvaluate's bookkeeping (DLSS seen, the cadence, the present-starvation catch-up), then AFTER_DLSS when NR runs after
+  // DLSS for this evaluate (the work size settled on `output_region` first, the NR floor, Intensity above 0), PRESENT_MOTION when Source = Present wants
+  // DLSS's vectors (NR ACTIVE, the game passed vectors), else NONE.
+  BridgedDlssDecision DecideAfterEvaluate(const ngx_hooks::DlssFrame& frame, nr::Size output_region, std::chrono::steady_clock::time_point now);
+  // The decided AFTER_DLSS or BEFORE_UPSCALING on the private list `host` names, `frame` pointing at the bridge's shared copies; the status as OnDlssEvaluate
+  // and BeforeDlssEvaluate set it. Before upscaling with nr_applied: PrivateColor() holds NR's result.
+  sources::PipelineResult RecordBridgedStage(BridgedDlssWork work, const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
+                                             std::chrono::steady_clock::time_point now);
+  // Plan 18: the pipeline's private colour (RGBA16F at the colour's size), where Before upscaling's recording leaves NR's result.
+  [[nodiscard]] ID3D12Resource* PrivateColor() const { return present_source_->Pipeline().PrivateColor(); }
+  // Plan 18 (design §3): the bridge cannot share this stage's image: the stage is greyed with `problem` (Setup) and Auto runs at Present from the next
+  // present (Before upscaling: NR runs after DLSS). Logged once per stage.
+  void NoteStageProblem(BridgedDlssWork stage, std::string problem);
+  // Plan 18 (fix round 1, I-1): a decided stage's evaluate did not reach NR (the Decide skips, or the bridge's hand-off skipped before its recording or never
+  // submitted it): the status says NR was not applied, with `reason` (static text), and the stage's next recording starts NR's history afresh, as
+  // Direct3D 12's sources owe it for their own skips.
+  void NoteBridgedSkip(BridgedDlssWork stage, std::string_view reason);
+  // Plan 18 (fix round 1, I-1): whether the stage's next recording starts NR's history afresh. For the tests.
+  [[nodiscard]] bool StageResetOwed(BridgedDlssWork stage) const;
+  // Plan 18 (design §6): the game's own Direct3D 11 device was removed (`reason`): within 10 s of NR running inside its frame the DLSS placements latch off
+  // (LatchTripped), as a Direct3D 12 game's removal does. A bridged context's own private device never latches them: its removal gets Retry now.
+  void NoteGameDeviceRemoved(HRESULT reason, std::chrono::steady_clock::time_point now);
+  // Plan 18: a main-handle evaluate reached this context (the add-on's foreign-device reason gives way to it), and the placement BeginFrame chose.
+  [[nodiscard]] bool DlssSeen() const { return dlss_seen_; }
+  [[nodiscard]] Placement CurrentPlacement() const { return placement_.placement; }
   // Completion tokens (v2 design §3.3): ReShade's execute_command_list submits; a reset or destroyed
   // list completes at once through DropTokens. Thread-safe.
   void SubmitTokens(std::span<const uint64_t> tokens, ID3D12CommandQueue* queue, uint32_t thread_id,
@@ -236,6 +290,8 @@ class DeviceContext {
   ID3D12Resource* PrepareMaskCopy(const D3D12_RESOURCE_DESC* mask);
   void NoteMaskCopied() { present_source_->Pipeline().NoteMaskCopied(); }
   // Plan 6 (D11): "Retry now". Never after a removal or a teardown.
+  // Plan 17: the device was found removed (a bridged context's is the private device): Retry now's cue.
+  [[nodiscard]] bool DeviceLost() const { return device_lost_; }
   void RetryNow() {
     if (torn_down_ || device_lost_) return;  // never back into the snippet after a removal
     session_->RetryNow();
@@ -251,6 +307,10 @@ class DeviceContext {
   [[nodiscard]] bool FrameReady() const { return frame_ready_; }
   // Plan 7: the Session's state (OFF once torn down after a removal), for the bridge's surfaces and its mask copy.
   [[nodiscard]] nr::SessionState NrState() const { return (session_ ? session_->State() : nr::SessionState::OFF); }
+  // 1.0.1 (F2): the recordings that applied NR so far, at every placement (each Present-path run, each DLSS evaluate's), and the latest recording's
+  // motion source. NR's heartbeat counts NR frames from these, never from presents: a DLSS placement keeps nr_applied_ while the game's DLSS idles.
+  [[nodiscard]] uint64_t NrRecordings() const { return nr_recordings_; }
+  [[nodiscard]] sources::MotionSource LatestMotionSource() const { return motion_source_; }
 
  private:
   DeviceContext(ID3D12Device* device, nr::SnippetConfig snippet_config, std::unique_ptr<nr::Timeline> timeline,
@@ -273,6 +333,15 @@ class DeviceContext {
   void NotePlacementChange();
   // The per-evaluate settings both DLSS placements run with.
   [[nodiscard]] sources::AfterDlssConfig DlssConfig(const sources::WorkLayout& layout) const;
+  // Plan 18: OnDlssEvaluate's opening, shared with DecideAfterEvaluate: the removal check (false, with the status reset, after a removal), the core hold's
+  // resume, DLSS seen, the cadence and the present-starvation catch-up.
+  bool NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chrono::steady_clock::time_point now);
+  // Plan 18: the recordings of both DLSS placements on `host`'s list, with the status they set: shared by the Direct3D 12 paths (OnDlssEvaluate,
+  // BeforeDlssEvaluate) and the Direct3D 11 bridge's (RecordBridgedStage).
+  sources::PipelineResult RecordAfterDlss(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host, const sources::WorkLayout& layout,
+                                          std::chrono::steady_clock::time_point now);
+  sources::PipelineResult RecordBeforeUpscaling(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host, const sources::WorkLayout& layout,
+                                                std::chrono::steady_clock::time_point now);
   // PreUpscale is on and the main handle is DLSS-SR (Ray Reconstruction keeps NR after DLSS).
   [[nodiscard]] bool BeforeUpscaling() const;
   // Plan 5: FrameConfig::look for the recording about to run, with Δt since this context's last recording (v2 design
@@ -319,6 +388,7 @@ class DeviceContext {
   uint32_t passes_run_ = 0u;
   uint32_t trace_frames_ = 0u;
   bool nr_applied_ = false;
+  uint64_t nr_recordings_ = 0u;  // 1.0.1 (F2): recordings that applied NR, for NrRecordings
   sources::MotionSource motion_source_ = sources::MotionSource::NONE;  // the latest recording's
   float motion_scale_x_ = 1.f;
   float motion_scale_y_ = 1.f;
@@ -330,6 +400,11 @@ class DeviceContext {
   std::atomic<bool> device_lost_{false};  // also read by StampThread on game threads
   bool torn_down_ = false;
   bool dlss_seen_ = false;
+  // Plan 18 Task 12: the game switched its DLSS off here (FrameConfig::dlss_released held long enough, DLSS seen, the DLSS placements available, not held):
+  // the DLSS stages run at Present, and Match game at Full, until the next main evaluate shows DLSS on again (as on first sight). Plan 15's hold keeps
+  // priority while it lasts. `dlss_off_logged_`: a stage really fell back, so the off line was logged and the on line is owed (fix round 1, M-6).
+  DlssOffLatch dlss_off_;
+  bool dlss_off_logged_ = false;
   bool dlss_idle_ = false;
   bool dlss_paused_ = false;  // final review, minor 1: no evaluate for 250 ms, at any placement (Status's DLSS_PAUSED)
   bool dlss_latch_tripped_ = false;
@@ -343,6 +418,13 @@ class DeviceContext {
   uint64_t settings_generation_ = 0u;  // Plan 6 (D11): the last FrameConfig::settings_generation seen
   bool bridged_ = false;               // Plan 7: ContextOptions::bridged
   CoreShutdownHold core_hold_;         // Plan 15: the game shut NGX down on this device; NR waits for its DLSS (OnCoreShutdown)
+  bool dlss_stages_ = false;           // Plan 18: ContextOptions::dlss_stages
+  std::string after_dlss_problem_;     // Plan 18: NoteStageProblem's; empty while the stage can run
+  std::string before_upscaling_problem_;
+  sources::WorkLayout bridged_layout_;  // Plan 18: the layout the latest Decide*Evaluate settled, for RecordBridgedStage
+  // Plan 18 (fix round 1, M-2): NoteGameDeviceRemoved's text, kept apart from output_message_ (which every BeginFrame rebuilds), so the card and the latch
+  // marker keep it. Status prefers it as the output problem.
+  std::string game_device_removed_;
 };
 
 }  // namespace uplift::addon

@@ -35,7 +35,7 @@ enum class Primaries : uint32_t {
 
 // F17: the InputExposure index.
 enum class InputExposure : uint32_t {
-  AUTO = 0u,     // Game when DLSS passes an exposure, else Metered
+  AUTO = 0u,     // Plan 17: Game while DLSS's exposure agrees with the meter, Metered once it does not (and without one)
   GAME = 1u,     // DLSS's exposure (Plan 4's rule; none at Present)
   METERED = 2u,  // Uplift's own meter and governor
   MANUAL = 3u,   // DiffuseWhiteNits alone

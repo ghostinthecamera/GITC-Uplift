@@ -18,9 +18,9 @@ namespace uplift::bridge {
 // which now composes it; the helper's transports sit on it too. ReShade-free; not thread-safe.
 class D3D12Side {
  public:
-  // nullptr + error when the adapter is not NVIDIA's or a D3D12 object cannot be made. `created` receives the device
-  // D3D12CreateDevice returned (ReShade's proxy in a game): release it only outside the add-on's lock. The native
-  // device comes from the progress fence's GetDevice (Plan 7 key decision a).
+  // nullptr + error when the adapter is not NVIDIA's or a D3D12 object cannot be made. `created` receives the device as made:
+  // an independent one from the device factory, or without one D3D12CreateDevice's (ReShade's proxy in a game): release it
+  // only outside the add-on's lock. The native device comes from the progress fence's GetDevice (Plan 7 key decision a).
   static std::unique_ptr<D3D12Side> Create(LUID luid, Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
   ~D3D12Side();  // waits up to 2 s for the last signalled progress value, then releases, the created device last
   D3D12Side(const D3D12Side&) = delete;
@@ -28,6 +28,9 @@ class D3D12Side {
 
   [[nodiscard]] ID3D12Device* Device() const { return device_.Get(); }
   [[nodiscard]] ID3D12CommandQueue* Queue() const { return queue_.Get(); }
+  // An independent device from the device factory: after its removal another can be made in this process (Retry now). False on the fallback, the
+  // adapter's singleton, which the NR runtime abandoned on it keeps removed: a stop there is final until the game restarts.
+  [[nodiscard]] bool Independent() const { return independent_; }
   // The `progress` fence, for a caller that wants its own completion event (SetEventOnCompletion). Never signal it.
   [[nodiscard]] ID3D12Fence* Progress() const { return progress_.Get(); }
   // A committed 2D texture in COMMON on a D3D12_HEAP_FLAG_SHARED heap. `handle`, when non-null, also receives an NT
@@ -71,7 +74,7 @@ class D3D12Side {
   // Plan 7 key decision c: the CPU runs up to DXGI's frame latency ahead; a busy ring skips NR for that frame.
   static constexpr size_t RING = 8u;
 
-  // Declared first, so released last: the device as D3D12CreateDevice returned it (ReShade's proxy in a game).
+  // Declared first, so released last: the device as made (without a device factory, ReShade's proxy in a game).
   Microsoft::WRL::ComPtr<ID3D12Device> created_;
   Microsoft::WRL::ComPtr<ID3D12Device> device_;  // native
   // Not shared, and only ever signalled by this side's queue: what the queue really finished. Allocators and retired
@@ -85,6 +88,7 @@ class D3D12Side {
   uint64_t last_signalled_ = 0u;  // the newest value progress_ was asked to reach
   bool list_open_ = false;        // BeginList ran and the list is neither executed nor closed
   bool executed_ = false;         // a list was submitted since the last SignalProgress
+  bool independent_ = false;      // the device came from the device factory (Independent())
 };
 
 }  // namespace uplift::bridge

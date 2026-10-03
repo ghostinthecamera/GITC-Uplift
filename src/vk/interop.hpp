@@ -75,6 +75,8 @@ class Interop {
   void RetireSemaphore(VkSemaphore* semaphore, GameHost& host);
   // Frees the retired images and semaphores whose fence has signalled; true when any went. An image whose fence could not be submitted gets another try.
   bool FreeFinished(GameHost& host);
+  // Plan 17: nothing is retired and no capped wait is still in flight (a timed-out one's fence unsignalled): FreeAll then frees nothing the GPU may use.
+  [[nodiscard]] bool Idle();
   // destroy_device: `host` needs only the device. The retired images go, the wait fences too.
   void FreeAll(GameHost& host);
   // destroy_device, or a device known to be idle: frees `image` at once and empties it.

@@ -13,8 +13,8 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // 2: Target::block_mapped; 3: Api::D3D10, Share::kmt_handle, mask/motion blocks; 4: Api::VULKAN, Transport::SHARED_CPU;
 // 5 (Plan 12): Api::OPENGL, Api::D3D12, Handles::color_bytes (and FENCED's mask_bytes and motion_bytes), Reply::to12_completed and to11_completed;
 // 6 (Plan 14): Status::placement, motion_source, dlss_motion_gap, launchpad_gap, resolution_applied, upsampling and the work, canvas and frame sizes
-// (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read.
-inline constexpr uint32_t PROTOCOL_VERSION = 6u;
+// (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read; 7 (Plan 17): Status::exposure_line (+256 bytes).
+inline constexpr uint32_t PROTOCOL_VERSION = 7u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t PATH_BYTES = 1024u;
 inline constexpr size_t BUILD_ID_BYTES = 64u;
@@ -182,6 +182,7 @@ struct Status {
   char work_line[TEXT_BYTES] = {};
   char ui_correction_note[TEXT_BYTES] = {};
   char transport_line[TEXT_BYTES] = {};  // the helper's half of the Details line
+  char exposure_line[TEXT_BYTES] = {};   // Plan 17: ContextStatus::exposure_line
 };
 
 struct Reply {
@@ -229,7 +230,7 @@ struct ControlBlock {
   LogRing log;
 };
 
-inline constexpr size_t CONTROL_BLOCK_BYTES = 55880u;  // protocol 5's 55832 + 48 (Status's twelve new uint32_t); the x64 and x86 builds both assert it
+inline constexpr size_t CONTROL_BLOCK_BYTES = 56136u;  // protocol 6's 55880 + 256 (Status::exposure_line); the x64 and x86 builds both assert it
 static_assert(sizeof(ControlBlock) == CONTROL_BLOCK_BYTES, "the add-on and the helper disagree on the control block");
 static_assert(offsetof(ControlBlock, request) % 8u == 0u && offsetof(ControlBlock, reply) % 8u == 0u);
 // Both processes use the Interlocked*64 functions on it, which need 8 alignment on x86 too.

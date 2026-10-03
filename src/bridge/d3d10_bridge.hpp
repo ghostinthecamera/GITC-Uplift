@@ -31,8 +31,8 @@ namespace uplift::bridge {
 class D3D10Bridge {
  public:
   // nullptr, with `error` set, when the adapter is not NVIDIA's, or the relay or the D3D11 bridge cannot be made.
-  // `relay_created` and `created` receive the relay and the private D3D12 device as D3D11CreateDevice and
-  // D3D12CreateDevice returned them, whether or not this succeeds. Under ReShade those are its proxies, whose last
+  // `relay_created` and `created` receive the relay as D3D11CreateDevice returned it and the private D3D12 device as D3D12Side made it,
+  // whether or not this succeeds. Under ReShade the relay is its proxy, and so is the private device on the fallback (D3D12CreateDevice's): their last
   // release raises destroy_device, so the caller releases them only outside its own lock.
   static std::unique_ptr<D3D10Bridge> Create(ID3D10Device* device, Microsoft::WRL::ComPtr<ID3D11Device>* relay_created,
                                              Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
@@ -45,6 +45,7 @@ class D3D10Bridge {
 
   [[nodiscard]] ID3D12Device* Device() const { return bridge_->Device(); }  // native: NGX and every Uplift object use it
   [[nodiscard]] ID3D12CommandQueue* Queue() const { return bridge_->Queue(); }
+  [[nodiscard]] bool Independent() const { return bridge_->Independent(); }  // D3D12Side::Independent: whether Retry now can replace it
   // As D3D11Bridge::BeginFrame, for the game's D3D10 back buffer. The keyed colour exists only while `running` on a
   // usable image and no bridge stopped; otherwise it, the keyed mask and the keyed motion are retired (Plan 7 C-1). The
   // relay has no Present, so a frame that released anything on it also flushes it, whether or not NR runs (Plan 8 final
@@ -60,6 +61,8 @@ class D3D10Bridge {
   void Stop(std::string reason);
   [[nodiscard]] uint64_t SharedBytes() const;
   [[nodiscard]] std::string StatusLine() const;
+  [[nodiscard]] bool Stopped() const { return bridge_->Stopped() || relay_->Stopped(); }
+  [[nodiscard]] std::string_view Latch() const { return bridge_->Latch(); }  // Plan 17: the card's reason (the relay's reaches it at the next BeginFrame)
 
  private:
   D3D10Bridge() = default;
@@ -86,7 +89,6 @@ class D3D10Bridge {
     std::string text;
   };
 
-  [[nodiscard]] bool Stopped() const { return bridge_->Stopped() || relay_->Stopped(); }
   // Passes the relay's latch (a key that did not come) into the D3D11 bridge, whose Stop also signals its fences, and the D3D11
   // bridge's latch into the relay, so a key released after either says nothing more. Called before the call that saw a latch returns.
   void SyncLatches();

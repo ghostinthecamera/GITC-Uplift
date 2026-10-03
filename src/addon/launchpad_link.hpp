@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <optional>
+#include <string>
+#include <string_view>
 
 namespace uplift::addon {
 
@@ -18,13 +20,19 @@ struct LaunchPadLinkFrame {
   // ReShade is not (re)loading effects, and Uplift.fx is among them: only then may UPLIFT_USE_LAUNCHPAD be set.
   bool ready = false;
   bool wanted = false;  // Motion vectors can use LaunchPad, and LaunchPad's technique is enabled
+  // 1.0.1 (test phase): the UPLIFT_USE_LAUNCHPAD Uplift.fx compiles with now, as far as Uplift can tell (LaunchPadDefinition): false without any
+  // definition (Uplift.fx's own #ifndef), and nullopt, "unknown", for a value other than exactly 0 or 1, which never vetoes a set.
+  std::optional<bool> current;
 };
 
 // User-approved addition, final review I-1: when Uplift sets UPLIFT_USE_LAUNCHPAD itself. Every change reloads
 // Uplift.fx (a one-time hitch the user accepted), so a value is set only when the wanted state really changes, and
 // compared with the value Uplift itself last set, never with ReShade's read-back. The first ready frame after the
 // link's own set never sets again: that reload re-applies the preset's technique states, which can flip `wanted`
-// (a LaunchPad toggled but not saved), and the link must not answer its own reload with another one. Pure.
+// (a LaunchPad toggled but not saved), and the link must not answer its own reload with another one.
+// 1.0.1 (test phase): ReShade's value (`current`) only vetoes a set that would change nothing, when it is known. Every set recompiles Uplift.fx, a
+// single-effect reload that can leave other add-ons holding stale handles, and a game without LaunchPad got one at every start (0 over Uplift.fx's own 0).
+// Pure.
 class LaunchPadLink {
  public:
   // At every present: the value to set now, or nullopt.
@@ -37,6 +45,18 @@ class LaunchPadLink {
   std::optional<bool> seen_;  // `wanted` at the last ready frame
   bool settling_ = false;     // Uplift set a value, and no ready frame has followed yet
 };
+
+// 1.0.1 (the Launchpad investigation, F3): the INFO line when the link sets UPLIFT_USE_LAUNCHPAD. Each set makes ReShade recompile Uplift.fx, which
+// frees and rebuilds its technique and texture lists for every effect: an add-on that keeps ReShade handles across that and does not refresh them on
+// reshade_reloaded_effects is left holding freed memory. Uplift keeps none (it looks every handle up again each frame); the line says so in the log, in
+// both halves, at the moment it happens.
+[[nodiscard]] std::string LaunchPadLinkLine(bool value);
+
+// 1.0.1 (test phase, review I-4): the UPLIFT_USE_LAUNCHPAD that Uplift.fx compiles with. ReShade takes the effect scope's definition first, then the
+// preset's, then the global one. `effect_value` is the effect scope's (get_preprocessor_definition_for_effect on "Uplift.fx", which reads that scope only),
+// and `outer_value` the preset's or global one (get_preprocessor_definition); nullopt where there is none. With neither, false (Uplift.fx's #ifndef).
+// Known only for exactly "0" or "1"; any other value (empty, " 1", "0x1") is nullopt, unknown, so the link sets its own value over it.
+[[nodiscard]] std::optional<bool> LaunchPadDefinition(std::optional<std::string_view> effect_value, std::optional<std::string_view> outer_value);
 
 // Plan 14 (batch 1 review, minor 6): Setup's "Launchpad is ready" (its technique and Uplift.fx's Uplift technique are both enabled). ReShade lists no technique
 // while it reloads effects, which choosing Launchpad does (the link flips UPLIFT_USE_LAUNCHPAD): a loading frame must not read as "turned off", or the option
