@@ -534,13 +534,22 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
 
   changed |= DrawRow(*FindSetting(ENABLED_KEY), view, settings, state);
   ImGui::SameLine();
+  // 1.1.0 (a player's report): Esc also closes ReShade's overlay, so it cannot be the way to clear the hotkey. A right-click on the button clears it
+  // (capturing or not); Esc only cancels a capture. A capture whose overlay closed ends by itself (ExpireKeyCapture), so the hotkey never stays off.
   if (state->capturing_key) {
-    ImGui::Button("Press a key (Esc clears)");
-    if (view.last_key_pressed != 0u) {
-      settings->enable_key = (view.last_key_pressed == VK_ESCAPE ? 0u : view.last_key_pressed);
+    state->capture_seen = std::chrono::steady_clock::now();
+    ImGui::Button("Press a key (right-click clears)");
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+      settings->enable_key = 0u;
+      state->capturing_key = false;
+      changed = true;
+    } else if (view.last_key_pressed != 0u) {
+      if (view.last_key_pressed != VK_ESCAPE) {
+        settings->enable_key = view.last_key_pressed;
+        changed = true;
+      }
       state->capturing_key = false;
       state->key_captured_this_frame = true;
-      changed = true;
     }
   } else {
     std::string key_label = "Hotkey: none";
@@ -555,6 +564,13 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     }
     if (ImGui::Button(key_label.c_str())) {
       state->capturing_key = true;
+      state->capture_seen = std::chrono::steady_clock::now();
+    } else if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && settings->enable_key != 0u) {
+      settings->enable_key = 0u;
+      changed = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Click, then press a key. Right-click clears it.");
     }
   }
 

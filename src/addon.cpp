@@ -2235,6 +2235,7 @@ void OnReshadePresent(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState& state = *g_state;
+    ui::ExpireKeyCapture(&state.overlay, std::chrono::steady_clock::now());
     if (state.overlay.key_captured_this_frame) {
       // The press that bound the hotkey is still in this frame's input: do not let it toggle Enable.
       state.overlay.key_captured_this_frame = false;

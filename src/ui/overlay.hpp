@@ -59,7 +59,9 @@ struct OverlayState {
   // Set on the frame a new hotkey is captured. That key press is still "pressed" in the same
   // frame's input snapshot, so the hotkey handler must skip it once instead of toggling Enable.
   bool key_captured_this_frame = false;
-  bool defaults_view = false;    // Plan 6 (D6): session only; the add-on keeps it when the overlay closes
+  // 1.1.0: when DrawOverlay last showed the capture; a capture not shown for a moment (the overlay closed, another tab) ends (ExpireKeyCapture).
+  std::chrono::steady_clock::time_point capture_seen;
+  bool defaults_view = false;   // Plan 6 (D6): session only; the add-on keeps it when the overlay closes
   bool confirm_restore = false;  // G2: the first click of Restore all defaults
   bool retry_now = false;        // D11: the add-on calls DeviceContext::RetryNow after DrawOverlay and clears it
   // An APPLY_ON_RELEASE slider being held: the value it shows. The setting keeps the applied one until release.
@@ -77,5 +79,13 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
 // Draws the Uplift panel (spec §12) inside the window ReShade opened for it, editing `settings`
 // in place. Returns true when a setting changed; the caller then sanitises, saves and applies.
 bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state);
+
+// 1.1.0: a hotkey capture the overlay has not shown for a moment (Esc closed ReShade's overlay, or another tab is open) ends, keeping the old hotkey, so
+// the hotkey (which a capture holds off) works again. Called at each present.
+inline void ExpireKeyCapture(OverlayState* state, std::chrono::steady_clock::time_point now) {
+  if (state->capturing_key && now - state->capture_seen > std::chrono::milliseconds(250)) {
+    state->capturing_key = false;
+  }
+}
 
 }  // namespace uplift::ui
