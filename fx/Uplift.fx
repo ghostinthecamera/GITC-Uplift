@@ -77,7 +77,10 @@ technique Uplift <
 >
 {
 #if UPLIFT_LAUNCHPAD
+  // Newer LaunchPads compute optical flow only when an effect asks for it; older ones always do and have no such request.
+  #ifdef IPC_REQUEST_FEATURE
   IPC_REQUEST_FEATURE(MARTYSMODS_IPC_FEATURE_OPTICALFLOW)
+  #endif
   pass Motion
   {
     VertexShader = UpliftMotionVS;
