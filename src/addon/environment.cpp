@@ -151,7 +151,11 @@ std::optional<std::string> ForeignNrProducer(const ForeignNrSignals& signals) {
     return std::format("another tool created {} NR feature(s) through NVIDIA NGX in this game", signals.live_foreign_nr);
   }
   if (signals.runtime_mapped_elsewhere) {
-    return std::string("nvngx_dlssnr.dll is already mapped in this game by another component, or stayed mapped after Uplift unloaded it");
+    std::string reason = "nvngx_dlssnr.dll is already mapped in this game by another component, or stayed mapped after Uplift unloaded it";
+    if (!signals.runtime_mapped_path.empty()) {
+      reason += std::format(" ({})", signals.runtime_mapped_path);
+    }
+    return reason;
   }
   if (signals.renodx_marker) return std::string("RenoDX DLSS5 is running NR in this game");
   return std::nullopt;

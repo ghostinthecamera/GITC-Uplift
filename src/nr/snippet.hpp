@@ -22,6 +22,8 @@ inline constexpr wchar_t UPLIFT_NR_RUNTIME_MARKER[] = L"UPLIFT_NR_RUNTIME_LOADED
 // module that is not Uplift's own runtime (another NR host, or an Uplift instance that ReShade
 // unloaded after a device loss). Such a runtime is already initialised; Load never initialises it again.
 [[nodiscard]] bool IsRuntimeMappedElsewhere(const std::filesystem::path& snippet_path);
+// 1.1.1: the full path of that other mapping (empty when there is none), so the log says who loaded it.
+[[nodiscard]] std::filesystem::path RuntimeMappedElsewherePath(const std::filesystem::path& snippet_path);
 
 struct SnippetConfig {
   std::filesystem::path snippet_path;           // the user's nvngx_dlssnr.dll

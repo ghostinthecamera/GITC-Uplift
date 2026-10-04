@@ -1499,9 +1499,11 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     const auto blocked_reason = [&state, &entry]() -> std::string {
       std::optional<std::string> foreign;
       if (state.settings.foreign_nr == ui::ForeignNrMode::YIELD) {
+        const std::filesystem::path mapped = (entry.snippet_path.empty() ? std::filesystem::path() : nr::RuntimeMappedElsewherePath(entry.snippet_path));
         foreign = addon::ForeignNrProducer({
             .live_foreign_nr = state.bridge.Registry().LiveCount(ngx_hooks::FeatureKind::NEURAL_RENDERING),
-            .runtime_mapped_elsewhere = (!entry.snippet_path.empty() && nr::IsRuntimeMappedElsewhere(entry.snippet_path)),
+            .runtime_mapped_elsewhere = !mapped.empty(),
+            .runtime_mapped_path = (mapped.empty() ? std::string() : addon::Utf8FromPath(mapped)),
             .renodx_marker = addon::IsEnvironmentMarkerSet(addon::RENODX_NR_MARKER),
         });
       }

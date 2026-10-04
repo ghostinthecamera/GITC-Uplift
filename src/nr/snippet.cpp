@@ -234,13 +234,21 @@ bool IsUpliftRuntimeModule(HMODULE module) {
          || std::ranges::find(own_runtime_modules.abandoned, module) != own_runtime_modules.abandoned.end();
 }
 
-bool IsRuntimeMappedElsewhere(const std::filesystem::path& snippet_path) {
+std::filesystem::path RuntimeMappedElsewherePath(const std::filesystem::path& snippet_path) {
   for (const std::filesystem::path& name : {snippet_path.filename(), std::filesystem::path(L"nvngx_dlssnr.dll")}) {
     if (name.empty()) continue;
     const HMODULE mapped = GetModuleHandleW(name.c_str());
-    if (mapped != nullptr && !IsUpliftRuntimeModule(mapped)) return true;
+    if (mapped == nullptr || IsUpliftRuntimeModule(mapped)) continue;
+    std::wstring path(4096u, L'\0');
+    const DWORD length = GetModuleFileNameW(mapped, path.data(), static_cast<DWORD>(path.size()));
+    path.resize(length);
+    return (path.empty() ? name : std::filesystem::path(path));
   }
-  return false;
+  return {};
+}
+
+bool IsRuntimeMappedElsewhere(const std::filesystem::path& snippet_path) {
+  return !RuntimeMappedElsewherePath(snippet_path).empty();
 }
 
 Snippet::~Snippet() {
@@ -264,11 +272,11 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
     Logf(LogLevel::ERR, "snippet {} not found ({})", ToUtf8(config.snippet_path), error.message());
     return NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
   }
-  if (IsRuntimeMappedElsewhere(snippet_path)) {
+  if (const std::filesystem::path mapped = RuntimeMappedElsewherePath(snippet_path); !mapped.empty()) {
     Logf(LogLevel::ERR,
          "{} is already loaded in this game by another component, or stayed mapped after Uplift unloaded it; Uplift will "
-         "not initialise it a second time",
-         ToUtf8(snippet_path.filename()));
+         "not initialise it a second time (the loaded copy: {})",
+         ToUtf8(snippet_path.filename()), ToUtf8(mapped));
     return NVSDK_NGX_Result_FAIL_FeatureAlreadyExists;
   }
   ModuleReference module(LoadLibraryW(snippet_path.c_str()));

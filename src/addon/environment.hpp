@@ -21,7 +21,8 @@ inline constexpr wchar_t RENODX_NR_MARKER[] = L"RENODX_DLSS5_NR_RUNTIME_LOADED";
 struct ForeignNrSignals {
   uint32_t live_foreign_nr = 0u;          // live NGX feature-18 creates that Uplift did not make
   bool runtime_mapped_elsewhere = false;  // nr::IsRuntimeMappedElsewhere for the located runtime
-  bool renodx_marker = false;             // RENODX_NR_MARKER is set
+  std::string runtime_mapped_path;        // 1.1.1: that other mapping's full path (nr::RuntimeMappedElsewherePath), when known
+  bool renodx_marker = false;            // RENODX_NR_MARKER is set
 };
 
 struct SnippetSearch {
