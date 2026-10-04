@@ -10,6 +10,7 @@
 #include <string_view>
 #include <utility>
 
+#include "addon/dred.hpp"
 #include "addon/frame_trigger.hpp"
 #include "bridge/d3d11_bridge.hpp"
 #include "bridge/record_nr.hpp"
@@ -212,9 +213,7 @@ void BringIn(ID3D12GraphicsCommandList* list, const SharedImage& image, D3D12_RE
 class CpuOrderedTransport : public Transport {
  public:
   void Run(const ipc::Run& run, addon::DeviceContext& context, ipc::Reply* reply, uint64_t* complete_at) override {
-    if (run.motion == 0u) {
-      Retire(&motion_);  // a recording without LaunchPad's motion (it is off, or NR runs at the present): held until progress passes it
-    }
+    // 1.1.2: a recording without LaunchPad's motion keeps the shared motion texture (the add-on keeps its share too); it goes when NR stops.
     ID3D12Resource* const target = Target();
     if (target == nullptr || !latch_.empty()) {
       reply->ok = 0u;
@@ -623,12 +622,8 @@ class FencedTransport final : public Transport {
   void Run(const ipc::Run& run, addon::DeviceContext& context, ipc::Reply* reply, uint64_t* complete_at) override {
     waited12_ = run.in;  // for Stop, whether or not the queue took it
     reply->ok = 1u;
-    if (run.motion == 0u) {
-      // A recording without LaunchPad's motion (it is off, or NR runs at the present or after the effects): the shared motion
-      // texture (RG16F, +32 MiB at 4K) goes until a RUN wants it again, as D3D11Bridge::Run does. Held until progress passes
-      // its last use.
-      Retire(&motion_);
-    }
+    // 1.1.2 (a player's freeze): a recording without LaunchPad's motion keeps the shared motion texture (RG16F, +32 MiB at 4K), as the add-on keeps
+    // its share; it goes when NR stops (Describe's idle path, Detach) or at a new size (Share).
     if (!cpu_ordered_ && FAILED(side_.Queue()->Wait(to12_.Get(), run.in))) return;  // nothing queued: the add-on stops, with no signal owed
     reply->waited = 1u;
     Recorded recorded;
@@ -736,7 +731,14 @@ class FencedTransport final : public Transport {
   }
 
   void Stop(uint64_t waited11, std::string_view reason) override {
-    if (latch_.empty()) latch_ = std::string(reason);
+    if (latch_.empty()) {
+      latch_ = std::string(reason);
+      // 1.1.2 (a player's freeze): a removal the add-on's watchdog saw first never reaches DeviceContext::NoteDeviceRemoved, so say here what DRED found
+      // (the lists in flight, and a page fault's allocations by name).
+      if (FAILED(side_.Device()->GetDeviceRemovedReason())) {
+        addon::LogDred(side_.Device());
+      }
+    }
     ReleaseWaits(waited11);
   }
   void Detach() override {

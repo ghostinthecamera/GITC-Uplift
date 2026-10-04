@@ -416,9 +416,9 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
     if (motion_.texture && motion_.size == motion_size) {
       shared_motion_source = motion;
     }
-  } else if (motion_.texture) {
-    motion_ = {};
   }
+  // 1.1.2 (a player's freeze, NFS Underground 2): a frame without LaunchPad's motion (the Uplift technique skipped a frame) keeps the share; it goes
+  // with NR (Release), at a new size, or when the helper says so. Releasing and re-sharing it around one such frame coincided with a GPU fault.
   run.motion = (shared_motion_source != nullptr ? 1u : 0u);
   run.mask_fresh = ((mask_fresh_ && mask_.texture) ? 1u : 0u);
 

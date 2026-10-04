@@ -279,9 +279,8 @@ bool GlClient::Apply(const ipc::Reply& reply, NrLink& link, gl::GameHost& host) 
 gl::ImageInfo GlClient::PrepareMotion(gl::GameHost& host, const gl::ImageInfo& motion, NrLink& link) {
   // Plan 7 decision 3: LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
   if (motion.handle == 0u || motion.format != DXGI_FORMAT_R16G16_FLOAT || motion.samples != 1u) {
-    if (motion_.gl.texture != 0u) {
-      Retire(host, &motion_);
-    }
+    // 1.1.2 (a player's freeze, NFS Underground 2): a frame without LaunchPad's motion (the Uplift technique skipped a frame) keeps the share; it goes
+    // with NR (Release), at a new size, or when the helper says so. Releasing and re-sharing it around one such frame coincided with a GPU fault.
     return {};
   }
   if (motion_.gl.texture == 0u || motion_.size != motion.size) {

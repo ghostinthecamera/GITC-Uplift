@@ -108,6 +108,11 @@ struct HookedModule {
   bool d3d11_shutdown_all = false;  // Plan 18: the device-less NVSDK_NGX_D3D11_Shutdown is hooked (Final Fantasy XV's DLSS 1 SDK has no Shutdown1)
 };
 
+// 1.1.2 (RTX40MFG-Unlock): where another tool's Windows hotpatch on `entry` leads, or null. The hotpatch is the classic one: `jmp short -7` (EB F9) at
+// the entry, into a `jmp rel32` (E9) written over the five padding bytes before it. MinHook cannot hook such an entry (two bytes, and the padding is
+// taken), so Uplift hooks the jump's target instead and the calls run game -> the tool's patch -> Uplift -> the tool's code -> NGX.
+[[nodiscard]] void* HotpatchChainTarget(const void* entry);
+
 // Plan 18: the hooked APIs of `module` for the log: "Direct3D 12, Direct3D 11 and Vulkan", "Direct3D 12 and Vulkan", "Direct3D 11", ...
 [[nodiscard]] std::string HookedApis(const HookedModule& module);
 

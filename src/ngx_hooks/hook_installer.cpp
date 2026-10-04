@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <format>
 #include <mutex>
 #include <string_view>
@@ -564,6 +565,22 @@ bool InsideVulkanEvaluate() {
   return t_vulkan_evaluate;
 }
 
+void* HotpatchChainTarget(const void* entry) {
+  if (entry == nullptr) return nullptr;
+  const auto* const bytes = static_cast<const uint8_t*>(entry);
+  // The five padding bytes and the two at the entry must be committed, readable code before they are read.
+  MEMORY_BASIC_INFORMATION memory = {};
+  if (VirtualQuery(bytes - 5, &memory, sizeof(memory)) != sizeof(memory) || memory.State != MEM_COMMIT
+      || (memory.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0u
+      || static_cast<const uint8_t*>(memory.BaseAddress) + memory.RegionSize < bytes + 2) {
+    return nullptr;
+  }
+  if (bytes[0] != 0xEBu || bytes[1] != 0xF9u || bytes[-5] != 0xE9u) return nullptr;
+  int32_t relative = 0;
+  std::memcpy(&relative, bytes - 4, sizeof(relative));
+  return const_cast<uint8_t*>(bytes) + relative;  // the E9 at entry - 5 ends at the entry
+}
+
 bool IsNgxCoreFileName(std::wstring_view file_name) {
   if (file_name.empty()) return false;
   const auto equals = [file_name](const wchar_t* candidate) {
@@ -831,7 +848,18 @@ size_t HookInstaller::ScanLocked() {
           || (!entry_point.required && hooked_already(entry_point.target))) {
         continue;
       }
-      if (const MH_STATUS status = MH_CreateHook(entry_point.target, entry_point.detour, &entry_point.original); status != MH_OK) {
+      MH_STATUS status = MH_CreateHook(entry_point.target, entry_point.detour, &entry_point.original);
+      if (status == MH_ERROR_UNSUPPORTED_FUNCTION) {
+        // 1.1.2: another tool hotpatched this entry first (RTX40MFG-Unlock does, on D3D12 CreateFeature): hook where its jump leads, so both see the call.
+        if (void* const chained = HotpatchChainTarget(entry_point.target); chained != nullptr) {
+          status = MH_CreateHook(chained, entry_point.detour, &entry_point.original);
+          if (status == MH_OK) {
+            nr::Logf(nr::LogLevel::INFO, "{}: an entry point another tool hotpatched is hooked through that tool's jump", name);
+            entry_point.target = chained;
+          }
+        }
+      }
+      if (status != MH_OK) {
         nr::Logf(nr::LogLevel::WARN, "MinHook could not hook {}: {}", name, MH_StatusToString(status));
         entry_point.original = nullptr;
         if (!entry_point.required) continue;

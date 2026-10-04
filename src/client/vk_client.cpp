@@ -274,9 +274,8 @@ bool VkClient::SyncPresentQueue(vk::GameHost* present_host, vk::GameHost& host, 
 vk::ImageInfo VkClient::PrepareMotion(vk::GameHost& host, const vk::ImageInfo& motion, NrLink& link) {
   // Plan 7 decision 3: LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
   if (motion.image == VK_NULL_HANDLE || motion.format != DXGI_FORMAT_R16G16_FLOAT || motion.samples != 1u) {
-    if (motion_.vulkan.image != VK_NULL_HANDLE) {
-      Retire(host, &motion_);
-    }
+    // 1.1.2 (a player's freeze, NFS Underground 2): a frame without LaunchPad's motion (the Uplift technique skipped a frame) keeps the share; it goes
+    // with NR (Release), at a new size, or when the helper says so. Releasing and re-sharing it around one such frame coincided with a GPU fault.
     return {};
   }
   if (motion_.vulkan.image == VK_NULL_HANDLE || motion_.size != motion.size) {
