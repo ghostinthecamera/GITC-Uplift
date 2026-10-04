@@ -1500,9 +1500,13 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       std::optional<std::string> foreign;
       if (state.settings.foreign_nr == ui::ForeignNrMode::YIELD) {
         const std::filesystem::path mapped = (entry.snippet_path.empty() ? std::filesystem::path() : nr::RuntimeMappedElsewherePath(entry.snippet_path));
+        // 1.1.3: the very runtime file, mapped by NVIDIA's DLSS (RTX 50 cards map every nvngx_*.dll next to the game's .exe), is no other producer: Uplift
+        // shares it (SnippetConfig::share_idle_mapped_runtime). A live NR feature or RenoDX's marker still blocks.
+        std::error_code same_error;
+        const bool same_file = (!mapped.empty() && std::filesystem::equivalent(mapped, entry.snippet_path, same_error) && !same_error);
         foreign = addon::ForeignNrProducer({
             .live_foreign_nr = state.bridge.Registry().LiveCount(ngx_hooks::FeatureKind::NEURAL_RENDERING),
-            .runtime_mapped_elsewhere = !mapped.empty(),
+            .runtime_mapped_elsewhere = (!mapped.empty() && !same_file),
             .runtime_mapped_path = (mapped.empty() ? std::string() : addon::Utf8FromPath(mapped)),
             .renodx_marker = addon::IsEnvironmentMarkerSet(addon::RENODX_NR_MARKER),
         });
@@ -1580,7 +1584,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
           entry.snippet_path = snippet.value_or(std::filesystem::path());
           entry.vk_dlss = addon::VkDlssContext::Create(
               {
-                  .snippet = {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory},
+                  .snippet = {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory, .share_idle_mapped_runtime = true},
                   .binding = {.instance = record->instance,
                               .physical = record->physical,
                               .device = vk_device,
@@ -1848,7 +1852,8 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       entry.snippet_path = snippet.value_or(std::filesystem::path());
       std::string error;
       entry.context = addon::DeviceContext::Create(
-          native_device, {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory}, &error,
+          native_device,
+          {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory, .share_idle_mapped_runtime = true}, &error,
           {.bridged = Bridged(entry), .dlss_stages = entry.d3d11});  // Plan 18: a Direct3D 11 bridge's context runs the DLSS stages
       if (!entry.context) {
         entry.rejected = true;

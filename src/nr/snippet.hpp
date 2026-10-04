@@ -36,6 +36,10 @@ struct SnippetConfig {
   // Plan 13: BindVulkan reads it too, once per VkDevice: a smoke's "game" device was never initialised by a core that a sibling
   // test loaded; a real game's core is adopted as it is (the game initialised it for its own device).
   bool initialize_core_for_device = false;
+  // 1.1.3: Load uses a runtime that is already mapped when it is this very file (NVIDIA's DLSS loads every nvngx_*.dll next to the game's .exe on RTX 50
+  // cards, and never runs NR on it). The add-on sets it, and blocks NR itself while another tool runs NR (a live NR feature, RenoDX's marker). Off: any
+  // runtime mapped by someone else is refused, as before (the helper, the tests).
+  bool share_idle_mapped_runtime = false;
 };
 
 // Plan 13 (design §3.1): the game's Vulkan device and the loader's exports (the game's own chain, ReShade's layer included).
