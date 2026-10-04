@@ -29,8 +29,8 @@ GITC Uplift is not affiliated with NVIDIA or with ReShade.
 
 Installation is really simple:
 1) Download the latest release from [GitHub Releases](https://github.com/ghostinthecamera/GITC-Uplift/releases).
-2) Copy all the files in the release's `Addons` folder to where your ReShade add-ons are.
-3) Copy the `nvngx_dlssnr.dll` file to the same place as step 2! The dll and the add-ons must be in the same folder.
+2) Copy everything in the release's `Addons` folder (the files and the `GITC-Uplift` folder) to where your ReShade add-ons are.
+3) Copy the `nvngx_dlssnr.dll` file into that `GITC-Uplift` folder!
 4) Copy the files in the release's `Shaders` folder to your ReShade `Shaders` folder.
 
 Done!
@@ -93,7 +93,8 @@ The card at the top of the Uplift tab tells you what's wrong. The usual ones:
 
 | The card says | What to do |
 |---|---|
-| "The NR runtime was not found" | Put `nvngx_dlssnr.dll` next to the add-ons and restart the game. |
+| "The NR runtime was not found" | Put `nvngx_dlssnr.dll` into the `GITC-Uplift` folder next to the add-ons and restart the game. |
+| "Move nvngx_dlssnr.dll" | Move `nvngx_dlssnr.dll` away from the game's .exe into the `GITC-Uplift` folder next to the add-ons, and restart the game. |
 | "NR failed", with an NVIDIA error code | Your `nvngx_dlssnr.dll` doesn't work with your card (see "What you need"), or your driver is out of date. |
 | "Uplift's 64-bit helper stopped" | Copy `gitc-uplift-helper64.exe` from the same release next to the add-ons, then press **Retry now**. |
 | "The GPU device was removed" | Press **Retry now** if the card has it; otherwise restart the game. After a stop, some video memory (1 GB or more at 4K) stays in use until you restart the game. If it happens twice, restart the game, and please report it with `ReShade.log`. |
@@ -121,11 +122,15 @@ reason.
 
 | Game | Files in ReShade's add-on folder |
 |---|---|
-| 64-bit Direct3D 10, 11 or 12, Vulkan, OpenGL | `gitc-uplift.addon64` and `nvngx_dlssnr.dll` |
-| 64-bit Direct3D 9 | `gitc-uplift.addon64`, `gitc-uplift-helper64.exe` and `nvngx_dlssnr.dll` |
-| Any 32-bit game | `gitc-uplift.addon32`, `gitc-uplift-helper64.exe` and the (64-bit) `nvngx_dlssnr.dll` |
+| 64-bit Direct3D 10, 11 or 12, Vulkan, OpenGL | `gitc-uplift.addon64`, and `GITC-Uplift
+vngx_dlssnr.dll` |
+| 64-bit Direct3D 9 | `gitc-uplift.addon64`, `gitc-uplift-helper64.exe`, and `GITC-Uplift
+vngx_dlssnr.dll` |
+| Any 32-bit game | `gitc-uplift.addon32`, `gitc-uplift-helper64.exe`, and the (64-bit) `GITC-Uplift
+vngx_dlssnr.dll` |
 
-- `nvngx_dlssnr.dll` can also sit next to the game's executable, or anywhere you point **Runtime path** (Advanced) at.
+- `nvngx_dlssnr.dll` can also sit right next to the add-ons, or anywhere you point **Runtime path** (Advanced) at. Not next to the game's .exe: on
+  RTX 50 cards NVIDIA's DLSS loads it from there first, and Uplift can't use that copy.
 - The add-ons and `gitc-uplift-helper64.exe` must come from the same release.
 
 ### ReShade for each kind of game
@@ -160,7 +165,7 @@ Settings live in the game's `ReShade.ini`, under `[Uplift]`. Most are in the Upl
 
 | Key | Default | What it does |
 |---|---|---|
-| `SnippetPath` | empty | **Runtime path** (Advanced): the full path of `nvngx_dlssnr.dll`. Empty looks next to the add-on, then next to the game. |
+| `SnippetPath` | empty | **Runtime path** (Advanced): the full path of `nvngx_dlssnr.dll`. Empty looks in the `GITC-Uplift` folder next to the add-on, then next to the add-on, then next to the game. |
 | `UseD3D9Ex` | `0` | **Use Direct3D 9Ex** (Advanced): `1` makes DX9 games much faster (see above). Restart the game. |
 | `NgxHooks` | `0` | **NGX hooks** (Advanced): `1` is safe mode: nothing is hooked, and NR runs at Present only. Restart the game. |
 | `AdjustVulkanDevices` | `1` | Hidden. `0` leaves a Vulkan game's device alone (see above). Uplift sets it to `0` by itself if a game crashed while starting with it. Restart the game. |

@@ -406,9 +406,13 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
                 {"One device per game runs NR; this one waits."}, CardButton::NONE);
   }
   if (!facts.blocked.empty()) {
+    if (facts.runtime_in_game_folder) {
+      return card(CardStage::RUNTIME, "Move nvngx_dlssnr.dll", facts.blocked,
+                  {std::format("Move it into the GITC-Uplift folder next to {}, then restart the game.", facts.addon_file)}, CardButton::NONE);
+    }
     if (facts.blocked_stage == CardStage::RUNTIME) {
       return card(CardStage::RUNTIME, "The NR runtime was not found", facts.blocked,
-                  {std::format("Copy nvngx_dlssnr.dll next to {} or the game, or set Runtime path (Advanced).", facts.addon_file)},
+                  {std::format("Copy nvngx_dlssnr.dll into the GITC-Uplift folder next to {}, or set Runtime path (Advanced).", facts.addon_file)},
                   CardButton::NONE);
     }
     return card(CardStage::CONFLICTS, "Another NR tool is running", facts.blocked,

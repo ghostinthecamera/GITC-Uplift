@@ -246,6 +246,7 @@ struct CardFacts {
   std::string_view stopped;  // Plan 15 fix round (minor 6): NR stopped on this device for the session (D3D12_NGX_ABANDONED_REASON); checked after `device_lost`
   std::string_view blocked;  // a conflicting host, a missing runtime, another NR producer
   CardStage blocked_stage = CardStage::CONFLICTS;
+  bool runtime_in_game_folder = false;  // 1.1.4: `blocked` says NVIDIA's DLSS loaded nvngx_dlssnr.dll from the game's folder first
   bool claimed_elsewhere = false;  // NR runs on another D3D12 device in this game
   bool enabled = false;
   std::string_view held;  // Plan 15: why NR waits for the game's DLSS after the game's NGX shutdown (D3D12_NGX_SHUT_DOWN_REASON); checked right after `enabled`

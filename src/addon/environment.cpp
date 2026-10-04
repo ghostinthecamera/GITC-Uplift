@@ -30,7 +30,9 @@ std::optional<std::filesystem::path> LocateSnippet(const SnippetSearch& search) 
     if (std::filesystem::is_regular_file(configured, error)) return configured;
     return std::nullopt;
   }
-  for (const std::filesystem::path& directory : {search.addon_directory, search.game_directory}) {
+  // 1.1.4: the GITC-Uplift folder next to the add-on first (see RUNTIME_FOLDER), then the add-on's and the game's own folders, as before.
+  const std::filesystem::path runtime_folder = (search.addon_directory.empty() ? std::filesystem::path() : search.addon_directory / RUNTIME_FOLDER);
+  for (const std::filesystem::path& directory : {runtime_folder, search.addon_directory, search.game_directory}) {
     if (directory.empty()) continue;
     std::filesystem::path candidate = directory / SNIPPET_FILE_NAME;
     if (std::filesystem::is_regular_file(candidate, error)) return candidate;

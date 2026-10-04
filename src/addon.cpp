@@ -126,6 +126,7 @@ struct DeviceEntry {
   bool rejected = false;                                 // not NVIDIA, or the context failed to start: decided once
   std::filesystem::path snippet_path;                    // resolved once at context creation; empty when not found
   std::string static_block;                              // a conflicting host or a missing runtime: decided at creation
+  bool runtime_in_game_folder = false;                   // 1.1.4: the runtime is mapped from the game's own folder (NVIDIA's DLSS loaded it)
   ui::CardStage block_stage = ui::CardStage::CONFLICTS;  // which stage static_block fails
   nr::Size swapchain_size;                               // the primary swap chain's back buffer, for the main-handle choice
   // The frame in flight on the primary swap chain, set in the present event.
@@ -1497,16 +1498,23 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     };
     // Why NR stays off on this device whatever the placement: a static block, or (v2 design §3.19, ForeignNr = Yield) another NR producer.
     const auto blocked_reason = [&state, &entry]() -> std::string {
+      // 1.1.4: nvngx_dlssnr.dll mapped from the game's own folder before Uplift loaded it: NVIDIA's DLSS does that on RTX 50 cards, and NR cannot run on that
+      // copy (1.1.3 tried: the game crashed). Said plainly, whatever ForeignNr says.
+      entry.runtime_in_game_folder = false;
+      if (entry.static_block.empty() && !entry.snippet_path.empty() && !state.game_directory.empty()) {
+        const std::filesystem::path mapped = nr::RuntimeMappedElsewherePath(entry.snippet_path);
+        std::error_code same_error;
+        if (!mapped.empty() && std::filesystem::equivalent(mapped.parent_path(), state.game_directory, same_error) && !same_error) {
+          entry.runtime_in_game_folder = true;
+          return "NVIDIA's DLSS loaded nvngx_dlssnr.dll from the game's folder before Uplift could (RTX 50 cards do this), and NR cannot run on that copy";
+        }
+      }
       std::optional<std::string> foreign;
       if (state.settings.foreign_nr == ui::ForeignNrMode::YIELD) {
         const std::filesystem::path mapped = (entry.snippet_path.empty() ? std::filesystem::path() : nr::RuntimeMappedElsewherePath(entry.snippet_path));
-        // 1.1.3: the very runtime file, mapped by NVIDIA's DLSS (RTX 50 cards map every nvngx_*.dll next to the game's .exe), is no other producer: Uplift
-        // shares it (SnippetConfig::share_idle_mapped_runtime). A live NR feature or RenoDX's marker still blocks.
-        std::error_code same_error;
-        const bool same_file = (!mapped.empty() && std::filesystem::equivalent(mapped, entry.snippet_path, same_error) && !same_error);
         foreign = addon::ForeignNrProducer({
             .live_foreign_nr = state.bridge.Registry().LiveCount(ngx_hooks::FeatureKind::NEURAL_RENDERING),
-            .runtime_mapped_elsewhere = (!mapped.empty() && !same_file),
+            .runtime_mapped_elsewhere = !mapped.empty(),
             .runtime_mapped_path = (mapped.empty() ? std::string() : addon::Utf8FromPath(mapped)),
             .renodx_marker = addon::IsEnvironmentMarkerSet(addon::RENODX_NR_MARKER),
         });
@@ -1584,7 +1592,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
           entry.snippet_path = snippet.value_or(std::filesystem::path());
           entry.vk_dlss = addon::VkDlssContext::Create(
               {
-                  .snippet = {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory, .share_idle_mapped_runtime = true},
+                  .snippet = {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory},
                   .binding = {.instance = record->instance,
                               .physical = record->physical,
                               .device = vk_device,
@@ -1852,8 +1860,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       entry.snippet_path = snippet.value_or(std::filesystem::path());
       std::string error;
       entry.context = addon::DeviceContext::Create(
-          native_device,
-          {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory, .share_idle_mapped_runtime = true}, &error,
+          native_device, {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory}, &error,
           {.bridged = Bridged(entry), .dlss_stages = entry.d3d11});  // Plan 18: a Direct3D 11 bridge's context runs the DLSS stages
       if (!entry.context) {
         entry.rejected = true;
@@ -2288,6 +2295,7 @@ ui::StatusCard CardFor(const AddonState& state, const DeviceEntry& entry, const 
       .stopped = (status->abandoned ? ui::D3D12_NGX_ABANDONED_REASON : std::string_view()),  // Plan 15 fix round (minor 6)
       .blocked = status->blocked,
       .blocked_stage = (entry.static_block.empty() ? ui::CardStage::CONFLICTS : entry.block_stage),
+      .runtime_in_game_folder = entry.runtime_in_game_folder,  // 1.1.4
       .claimed_elsewhere = status->claimed_elsewhere,
       .enabled = state.settings.enabled,
       .held = status->held,  // Plan 15

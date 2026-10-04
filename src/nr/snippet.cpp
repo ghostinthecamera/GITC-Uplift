@@ -273,19 +273,11 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
     return NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
   }
   if (const std::filesystem::path mapped = RuntimeMappedElsewherePath(snippet_path); !mapped.empty()) {
-    std::error_code same_error;
-    const bool same_file = std::filesystem::equivalent(mapped, snippet_path, same_error) && !same_error;
-    if (!(config.share_idle_mapped_runtime && same_file)) {
-      Logf(LogLevel::ERR,
-           "{} is already loaded in this game by another component, or stayed mapped after Uplift unloaded it; Uplift will "
-           "not initialise it a second time (the loaded copy: {})",
-           ToUtf8(snippet_path.filename()), ToUtf8(mapped));
-      return NVSDK_NGX_Result_FAIL_FeatureAlreadyExists;
-    }
-    // 1.1.3: the same file, loaded by NVIDIA's DLSS (on RTX 50 cards it maps every nvngx_*.dll next to the game's .exe) and running no NR: LoadLibraryW
-    // below takes another reference to that copy, and Unload gives it back.
-    Logf(LogLevel::INFO, "{} was already loaded in this game (NVIDIA's DLSS loads it from the game's folder) and no other tool runs NR: Uplift uses that copy",
-         ToUtf8(snippet_path.filename()));
+    Logf(LogLevel::ERR,
+         "{} is already loaded in this game by another component, or stayed mapped after Uplift unloaded it; Uplift will "
+         "not initialise it a second time (the loaded copy: {})",
+         ToUtf8(snippet_path.filename()), ToUtf8(mapped));
+    return NVSDK_NGX_Result_FAIL_FeatureAlreadyExists;
   }
   ModuleReference module(LoadLibraryW(snippet_path.c_str()));
   if (!module) {

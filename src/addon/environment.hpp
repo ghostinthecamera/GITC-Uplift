@@ -12,6 +12,9 @@
 namespace uplift::addon {
 
 inline constexpr wchar_t SNIPPET_FILE_NAME[] = L"nvngx_dlssnr.dll";
+// 1.1.4: the folder next to the add-on where nvngx_dlssnr.dll belongs. NVIDIA's DLSS loads every nvngx_*.dll next to the game's .exe on RTX 50 cards (and
+// Uplift cannot run NR on that copy), but never looks in here.
+inline constexpr wchar_t RUNTIME_FOLDER[] = L"GITC-Uplift";
 inline constexpr uint32_t NVIDIA_VENDOR_ID = 0x10DEu;
 
 // RenoDX DLSS5 v7 sets this while its NR runtime is loaded ([V7] §6.8).
