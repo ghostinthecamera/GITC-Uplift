@@ -81,6 +81,7 @@ struct FrameConfig {
   // Plan 18 Task 12: DLSS was seen on this device and no DLSS feature of its API is live there now (addon::DlssReleased; set by the add-on only): the game
   // released it, or on Direct3D 11 shut NGX down. The context's DlssOffLatch decides from it when the game switched its DLSS off.
   bool dlss_released = false;
+  bool effects_on = false;  // 1.1.6: ReShade's effects are on, so NR before effects may wait for their begin-effects event (set by the add-on only)
   uint32_t pass_view_limit = 0u;      // Plan 6 (D6): the Defaults view's passes on the live features; 0 = all
   uint64_t settings_generation = 0u;  // Plan 6 (D11): changes with every saved settings change; restarts the retry backoff
 };
@@ -198,6 +199,7 @@ class DeviceContext {
   // First thing in the present event of the primary swap chain.
   TriggerPoint BeginFrame(ID3D12CommandQueue* queue, const FrameConfig& config, const TargetInfo& target,
                           bool marker_expected, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+  TriggerPoint OnBeginEffects(bool usable) { return trigger_.OnBeginEffects(usable); }  // 1.1.6
   TriggerPoint OnTechnique(bool is_marker) { return trigger_.OnTechnique(is_marker); }
   TriggerPoint OnFinishEffects() { return trigger_.OnFinishEffects(); }
   // Records Present-path NR for this frame. `entry_state`: the back buffer's state in the calling event.

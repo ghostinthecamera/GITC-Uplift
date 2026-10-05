@@ -13,6 +13,8 @@ namespace uplift::bridge {
 
 using Microsoft::WRL::ComPtr;
 
+constexpr ULONGLONG PENDING_WAIT_MS = 2000u;  // the destructor's wait for the game's D3D11 context, as D3D12Side::Drain's
+
 // The description behind a D3D11 resource; nullopt for anything that is not a 2D texture. Plan 18: public (the DLSS hand-off reads DLSS's textures).
 std::optional<D3D11_TEXTURE2D_DESC> TextureDesc11(ID3D11Resource* resource) {
   ComPtr<ID3D11Texture2D> texture;
@@ -72,8 +74,17 @@ std::unique_ptr<D3D11Bridge> D3D11Bridge::Create(ID3D11Device* device, ComPtr<ID
 }
 
 D3D11Bridge::~D3D11Bridge() {
-  // Nothing the private queue may still read is released before it finishes: at most 2 s, as DeviceContext::Teardown.
+  // Nothing either queue may still use is released before it finishes: first the game's D3D11 context, then the private queue,
+  // each at most 2 s (as DeviceContext::Teardown).
   if (side_ != nullptr) {
+    const ULONGLONG deadline = GetTickCount64() + PENDING_WAIT_MS;
+    while (HandOverFinished(), !pending_.empty() && GetTickCount64() < deadline) {
+      Sleep(1u);
+    }
+    for (Pending& pending : pending_) {
+      side_->Retire(std::move(pending.d3d12), std::move(pending.d3d11), pending.last_use);
+    }
+    pending_.clear();
     side_->Drain();
   }
 }
@@ -92,13 +103,35 @@ bool D3D11Bridge::CreateShared(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE
 }
 
 void D3D11Bridge::Retire(Shared* shared) {
-  // D3D11 destroys a released object at its context's next Flush; the D3D12 side must outlive the private queue's last use.
-  // The side decides from one read of its progress whether it kept the pair or dropped it at once, and `released_` follows
-  // that same answer: a second read here could pass `last_use` in between and lose the Flush the D3D10 relay needs.
-  if (shared->d3d12 && side_->Retire(std::move(shared->d3d12), std::move(shared->d3d11), shared->last_use)) {
-    released_ = true;
+  // Two queues use a share: the game's D3D11 context copies into and out of it, the private queue runs NR on it. The pair waits for
+  // an event query ended here, behind every D3D11 use so far, and HandOverFinished then gives it to the side, which keeps it until
+  // the private queue's last use. D3D11 destroys a released object at its context's next Flush.
+  if (shared->d3d12) {
+    Pending pending = {.d3d12 = std::move(shared->d3d12), .d3d11 = std::move(shared->d3d11), .last_use = shared->last_use};
+    const D3D11_QUERY_DESC query = {.Query = D3D11_QUERY_EVENT, .MiscFlags = 0u};
+    if (SUCCEEDED(device11_->CreateQuery(&query, &pending.done))) {
+      context11_->End(pending.done.Get());
+      pending_.push_back(std::move(pending));
+    } else if (side_->Retire(std::move(pending.d3d12), std::move(pending.d3d11), pending.last_use)) {
+      // No query: the private queue's progress alone, as before 1.1.6.
+      released_ = true;
+    }
   }
   *shared = {};
+}
+
+bool D3D11Bridge::HandOverFinished() {
+  // GetData without DONOTFLUSH submits the query if it is still in the command buffer (the D3D10 relay has no Present to do it).
+  // A failure is a removed device, which runs nothing either. The side decides from one read of its progress whether it kept the
+  // pair or dropped it at once, and the answer is returned as is: a second read could pass `last_use` in between and lose the Flush
+  // the D3D10 relay needs.
+  bool released = false;
+  std::erase_if(pending_, [&](Pending& pending) {
+    if (context11_->GetData(pending.done.Get(), nullptr, 0u, 0u) == S_FALSE) return false;
+    released = side_->Retire(std::move(pending.d3d12), std::move(pending.d3d11), pending.last_use) || released;
+    return true;
+  });
+  return released;
 }
 
 void D3D11Bridge::CheckWatchdog(std::chrono::steady_clock::time_point now) {
@@ -115,6 +148,9 @@ void D3D11Bridge::CheckWatchdog(std::chrono::steady_clock::time_point now) {
 BridgeFrame D3D11Bridge::BeginFrame(ID3D11Resource* back_buffer, bool enabled, bool running,
                                     std::chrono::steady_clock::time_point now, bool present_copy) {
   ++presents_;  // Plan 18: the frame being rendered from here is presents_ + 1 (the ring's slots)
+  if (HandOverFinished()) {
+    released_ = true;
+  }
   if (side_->FreeFinished()) {
     released_ = true;
   }

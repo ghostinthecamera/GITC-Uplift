@@ -243,7 +243,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
     // A described target (the D3D11 bridge before its shared copy exists) has nothing to record on yet.
     frame_ready_ = (session_->State() == nr::SessionState::ACTIVE && target.resource != nullptr);
   }
-  return trigger_.OnPresent(marker_expected);
+  return trigger_.OnPresent(marker_expected, config.effects_on);
 }
 
 sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES entry_state, TriggerPoint point,

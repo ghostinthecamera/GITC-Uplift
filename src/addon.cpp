@@ -1973,6 +1973,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     // Plan 18 Task 12: the game released its DLSS on this device (or on Direct3D 11 shut NGX down): once that holds, its DLSS stages fall back to Present.
     // Fix round 1 (M-5): the registry is asked once the context saw DLSS.
     frame_config.dlss_released = addon::DlssReleased(state.bridge.Registry(), device, DlssApiOf(entry), entry.context->DlssSeen());
+    frame_config.effects_on = (entry.runtime != nullptr && entry.runtime->get_effects_state());  // 1.1.6: NR before effects at their begin event
     addon::TargetInfo target = {
         .resource = reinterpret_cast<ID3D12Resource*>(entry.back_buffer.handle),
         .color_space = static_cast<color::ColorSpace>(swapchain->get_color_space()),
@@ -2068,6 +2069,27 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
                           && state.dlss_unavailable_reason.empty());
   }
   UPLIFT_CATCH("present", )
+}
+
+// 1.1.6: NR before effects, when FrameTrigger waits for it here: after every add-on's present event (RenoDX's swap chain proxy draws over the back buffer in
+// its own), before the first effect.
+void OnBeginEffects(api::effect_runtime* runtime, api::command_list* cmd_list, api::resource_view rtv, api::resource_view /*rtv_srgb*/) {
+  try {
+    const std::unique_lock lock(g_state->mutex);
+    DeviceEntry* const entry = FindFrameEntry(g_state, runtime, cmd_list);
+    if (entry == nullptr || entry->helper.HasClient()) return;  // Plan 10: a Direct3D 9 device keeps NR in the present event
+    // ReShade renders into the back buffer, or into its own copy written back after the effects (an X8 or multisampled back buffer), which would paint over
+    // NR's result: such a frame keeps NR in the present event. OpenGL's copy is the frame NR runs on, as at the technique (Plan 12).
+    const api::resource target = runtime->get_device()->get_resource_from_view(rtv);
+    const addon::TriggerPoint point = entry->context->OnBeginEffects(entry->opengl || target == entry->back_buffer);
+    if (Bridged(*entry)) {
+      RunBridged(*entry, runtime->get_device(), point, 0u, vk::Usage::RENDER_TARGET, (entry->opengl ? target : api::resource{0u}));
+      return;
+    }
+    ReshadeFrameHost host(entry->queue, entry->back_buffer);
+    RunOrWarnOnce(g_state, entry->context.get(), &host, D3D12_RESOURCE_STATE_RENDER_TARGET, point);
+  }
+  UPLIFT_CATCH("begin_effects", )
 }
 
 void OnRenderTechnique(api::effect_runtime* runtime, api::effect_technique technique, api::command_list* cmd_list,
@@ -2697,6 +2719,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
   reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(OnSetCurrentPresetPath);
   reshade::register_event<reshade::addon_event::present>(OnPresent);
+  reshade::register_event<reshade::addon_event::reshade_begin_effects>(OnBeginEffects);  // 1.1.6
   reshade::register_event<reshade::addon_event::reshade_render_technique>(OnRenderTechnique);
   reshade::register_event<reshade::addon_event::reshade_finish_effects>(OnFinishEffects);
   reshade::register_event<reshade::addon_event::reshade_open_overlay>(OnOpenOverlay);

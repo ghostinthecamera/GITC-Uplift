@@ -229,8 +229,11 @@ class D3D11Bridge {
   // untouched, on failure; `result` gets the failing call's HRESULT (S_OK on success), for the caller's diagnostic.
   bool CreateShared(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, uint32_t bytes_per_pixel,
                     const wchar_t* name, Shared* shared, HRESULT* result);
-  // Frees `shared` once the private queue has passed its last use (now, when it already has), and empties it.
+  // Frees `shared` once the game's D3D11 context and then the private queue have passed its last use, and empties it.
   void Retire(Shared* shared);
+  // Hands each retired pair whose event query has completed to the side, which frees it now or after the private queue's last use.
+  // True when one was released at once.
+  bool HandOverFinished();
   // Plan 18 (design §6): the watchdog of BeginFrame, also run at every hand-off: a removed private device, or no progress for 2 s while NR's work is
   // outstanding, stops the bridge (Stop signals both fences from the CPU, so the game's queue goes on).
   void CheckWatchdog(std::chrono::steady_clock::time_point now);
@@ -280,6 +283,15 @@ class D3D11Bridge {
   };
   std::array<RingSlot, RING_SLOTS> ring_;
   std::optional<ShareFailure> ring_failure_;
+  // Retire's pairs until the game's D3D11 context has passed them. The context copies into and out of the shares (the Present ring,
+  // the DLSS hand-off, the Present path's copies), and the private queue's progress says nothing about that work.
+  struct Pending {
+    Microsoft::WRL::ComPtr<ID3D12Resource> d3d12;
+    Microsoft::WRL::ComPtr<ID3D11Resource> d3d11;
+    Microsoft::WRL::ComPtr<ID3D11Query> done;  // an event query ended on context11_ when the pair was retired
+    uint64_t last_use = 0u;
+  };
+  std::vector<Pending> pending_;
   uint64_t presents_ = 0u;  // BeginFrame calls: the frame being rendered is presents_ + 1
   bool released_ = false;  // an object on the D3D11 device was released since TakeReleased last said so
   BridgeWatchdog watchdog_;

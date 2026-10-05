@@ -508,8 +508,9 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
     entry.nr_returned_logged = false;
     entry.ReleaseAll(hosts.Pointers());
   }
-  // The first event of the frame; at PRESENT NR runs now, otherwise at the marker or after the effects.
-  RunClient(entry, device, frame.queue, entry.trigger.OnPresent(frame.marker.handle != 0u), frame.back_buffer.handle, 0u, /*at_present=*/true);
+  // The first event of the frame; at PRESENT NR runs now, otherwise at the marker or after the effects. Direct3D 9 keeps NR before effects in the present
+  // event (the helper replays this point; 1.1.6's begin-effects wait is not passed to it).
+  RunClient(entry, device, frame.queue, entry.trigger.OnPresent(frame.marker.handle != 0u, /*effects_on=*/false), frame.back_buffer.handle, 0u, /*at_present=*/true);
 }
 
 void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, bool is_marker, uint64_t rtv, const ui::Settings& settings) {

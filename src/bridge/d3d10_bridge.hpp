@@ -25,7 +25,7 @@ namespace uplift::bridge {
 // D3D11 bridge's fences. Plan 10 (design §3.1): the relay and its hand-offs are KeyedRelay's, which the 32-bit D3D10 client shares.
 // - ReShade-free, with D3D11Bridge's public face over the game's D3D10 resources.
 // - The CPU never waits for the GPU: a keyed-mutex acquire only waits for a release this same thread made just before
-//   (capped all the same), and only the D3D11 bridge's destructor waits (2 s cap).
+//   (capped all the same), and only the D3D11 bridge's destructor waits (2 s cap per queue).
 // - One latch: the D3D11 bridge's. A key that did not come (KeyedRelay's latch) is passed into it before the call that saw it
 //   returns, and a stopped D3D11 bridge stops the relay's operations too. Not thread-safe: the add-on's lock.
 class D3D10Bridge {
