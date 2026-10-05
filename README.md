@@ -98,7 +98,8 @@ The card at the top of the Uplift tab tells you what's wrong. The usual ones:
 | "NR failed", with an NVIDIA error code | Your `nvngx_dlssnr.dll` doesn't work with your card (see "What you need"), or your driver is out of date. |
 | "Uplift's 64-bit helper stopped" | Copy `gitc-uplift-helper64.exe` from the same release next to the add-ons, then press **Retry now**. |
 | "The GPU device was removed" | Press **Retry now** if the card has it; otherwise restart the game. After a stop, some video memory (1 GB or more at 4K) stays in use until you restart the game. If it happens twice, restart the game, and please report it with `ReShade.log`. |
-| "NR needs at least 1280x720" | Raise the game's resolution or window size. |
+| "NR needs at least 640x360" | Raise the game's resolution or window size. |
+| NR costs a lot at a very low resolution | Set **Pass count** to 1. Below about 720p, NR's cost hardly shrinks with the image, so **Resolution** helps little there. |
 | "Another NR tool is running" | Remove the other DLSS5 add-on (see "Other DLSS5 add-ons") and restart the game. |
 | "The Vulkan swap chain cannot take NR's result" | Update ReShade to 6.8 (choose **Update ReShade only** in the installer). If it mentions exclusive fullscreen, use borderless or windowed mode. |
 | "Not enough address space in this 32-bit game" | Apply a 4 GB (large-address-aware) patch to the game. |
@@ -166,7 +167,7 @@ Settings live in the game's `ReShade.ini`, under `[Uplift]`. Most are in the Upl
 | Key | Default | What it does |
 |---|---|---|
 | `SnippetPath` | empty | **Runtime path** (Advanced): the full path of `nvngx_dlssnr.dll`. Empty looks in the `GITC-Uplift` folder next to the add-on, then next to the add-on, then next to the game. |
-| `UseD3D9Ex` | `0` | **Use Direct3D 9Ex** (Advanced): `1` makes DX9 games much faster (see above). Restart the game. |
+| `UseD3D9Ex` | `0` | **Use Direct3D 9Ex** (Advanced): `1` makes DX9 games much faster (see above). A game in exclusive fullscreen then runs as a borderless window. Restart the game. |
 | `NgxHooks` | `0` | **NGX hooks** (Advanced): `1` is safe mode: nothing is hooked, and NR runs at Present only. Restart the game. |
 | `AdjustVulkanDevices` | `1` | Hidden. `0` leaves a Vulkan game's device alone (see above). Uplift sets it to `0` by itself if a game crashed while starting with it. Restart the game. |
 | `GraceSeconds` | `5` | **Grace (seconds)** (Advanced): how long NR keeps its memory after you switch it off, so a quick toggle doesn't reload it. |

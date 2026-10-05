@@ -1,4 +1,5 @@
 #include "ui/settings_schema.hpp"
+#include "nr/types.hpp"
 
 #include <algorithm>
 #include <array>
@@ -87,7 +88,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Resolution",
         .tooltip = "The size NR works at. Lower sizes cost less GPU time and video memory, and NR's change is upsampled. "
-                   "Match game follows the game's DLSS render size. NR never works below 1280x720. A change applies "
+                   "Match game follows the game's DLSS render size. NR never works below " UPLIFT_NR_FLOOR_TEXT ". A change applies "
                    "after half a second and restarts NR's history.",
         .choices = RESOLUTION_MODES,
         .flags = RESTARTS_HISTORY,
@@ -412,7 +413,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Before upscaling (pre-SR)",
         .tooltip = "NR enhances the game's render-resolution image, and the game's DLSS-SR upscales the result. Ray "
-                   "Reconstruction keeps NR after DLSS. A render below 1280x720 is padded, so NR never runs below that size.",
+                   "Reconstruction keeps NR after DLSS. A render below " UPLIFT_NR_FLOOR_TEXT " is padded, so NR never runs below that size.",
         .get = [](const Settings& s) { return Flag(s.pre_upscale); },
         .set = [](Settings& s, double v) { s.pre_upscale = (v != 0.0); },
     },

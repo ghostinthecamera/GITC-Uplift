@@ -1,4 +1,5 @@
 #include "ui/status_text.hpp"
+#include "nr/types.hpp"
 
 #include <cctype>
 #include <format>
@@ -466,7 +467,7 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
                   {"Lower Resolution or Pass count, or close other GPU programs."}, CardButton::NONE);
     }
     if (facts.skip_reason == "frame too small" || facts.skip_reason == "resizing") {
-      return card(CardStage::FRAME, "Waiting for a usable frame", reason, {"NR needs at least 1280x720."}, CardButton::NONE);
+      return card(CardStage::FRAME, "Waiting for a usable frame", reason, {"NR needs at least " UPLIFT_NR_FLOOR_TEXT "."}, CardButton::NONE);
     }
     if (facts.skip_reason == "evaluate failed" || facts.skip_reason == "create failed") {
       return card(CardStage::EVALUATE, "NR's evaluate failed", reason, {}, CardButton::NONE);

@@ -23,6 +23,11 @@ inline constexpr uint32_t CREATE_SWAPCHAIN_EVENT = 97u;
 // (MIN_RESHADE_VULKAN_EVENTS); with an older one nothing is read and today's behaviour stays.
 void RegisterCreateSwapchainEvent(bool desc_has_fullscreen_state);
 
+// 1.1.5 (MudRunner): Uplift asked ReShade for a Direct3D 9Ex device (UseD3D9Ex). ReShade's upgrade calls CreateDeviceEx without a fullscreen display
+// mode (d3d9.cpp:306), which Windows refuses for a game in exclusive fullscreen (D3DERR_INVALIDCALL), so from now on the handler turns a Direct3D 9
+// swap chain's exclusive fullscreen into a window of the same size (borderless), with ReShade 6.8 or later; creation and every Reset.
+void NoteD3D9ExRequested();
+
 // A Vulkan swap chain went through the handler since the process started.
 [[nodiscard]] bool CreateSwapchainEventSeen();
 

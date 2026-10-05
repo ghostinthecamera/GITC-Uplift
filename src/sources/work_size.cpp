@@ -18,7 +18,7 @@ nr::Size WorkSize(double target_width, double target_height, nr::Size output) {
   nr::Size work = {round_even(target_width), round_even(target_height)};
   if (work.width >= output.width && work.height >= output.height) return output;
   if (!nr::MeetsNrFloor(work)) {
-    // f = max(720 / shorter, 1280 / longer) as the exact fraction numerator / denominator, chosen by
+    // f = max(MIN_NR_SHORT_SIDE / shorter, MIN_NR_LONG_SIDE / longer) as the exact fraction numerator / denominator, chosen by
     // cross-multiplying, so the scaled sides carry no floating-point error before rounding up to even.
     const uint64_t shorter = std::min(work.width, work.height);
     const uint64_t longer = std::max(work.width, work.height);

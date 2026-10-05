@@ -15,10 +15,23 @@ struct Size {
   friend constexpr bool operator==(Size, Size) = default;
 };
 
-// The NR floor (spec §6.2): no NR network runs on a frame whose shorter side is below 720 or whose
-// longer side is below 1280. A 64x64 frame hung the GPU in Plan 2.
-inline constexpr uint32_t MIN_NR_SHORT_SIDE = 720u;
-inline constexpr uint32_t MIN_NR_LONG_SIDE = 1280u;
+// The NR floor (spec §6.2): no NR network runs on a frame whose shorter side is below 360 or whose
+// longer side is below 640. A 64x64 frame hung the GPU in Plan 2; 1.1.5's probes (RTX 4090, NR 310.8, 1000 frames of
+// two chained passes with motion vectors each) ran clean at 640x360, 640x480 and 854x480. It was 1280x720 until then.
+// Set at build time (CMake: UPLIFT_NR_MIN_SHORT_SIDE, UPLIFT_NR_MIN_LONG_SIDE); the defaults below are for a translation unit built without them.
+#ifndef UPLIFT_NR_MIN_SHORT_SIDE
+#define UPLIFT_NR_MIN_SHORT_SIDE 360
+#endif
+#ifndef UPLIFT_NR_MIN_LONG_SIDE
+#define UPLIFT_NR_MIN_LONG_SIDE 640
+#endif
+#define UPLIFT_NR_FLOOR_STRING_(value) #value
+#define UPLIFT_NR_FLOOR_STRING(value) UPLIFT_NR_FLOOR_STRING_(value)
+// "640x360" (landscape: longer side first), a string literal for user-facing texts that name the floor.
+#define UPLIFT_NR_FLOOR_TEXT UPLIFT_NR_FLOOR_STRING(UPLIFT_NR_MIN_LONG_SIDE) "x" UPLIFT_NR_FLOOR_STRING(UPLIFT_NR_MIN_SHORT_SIDE)
+inline constexpr uint32_t MIN_NR_SHORT_SIDE = UPLIFT_NR_MIN_SHORT_SIDE;
+inline constexpr uint32_t MIN_NR_LONG_SIDE = UPLIFT_NR_MIN_LONG_SIDE;
+static_assert(MIN_NR_SHORT_SIDE > 0u && MIN_NR_SHORT_SIDE <= MIN_NR_LONG_SIDE, "the NR floor's shorter side must be positive and at most its longer side");
 
 [[nodiscard]] constexpr bool MeetsNrFloor(Size size) {
   const uint32_t shorter = (size.width < size.height ? size.width : size.height);

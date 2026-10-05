@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(uplift VERSION 1.1.4 LANGUAGES C CXX)
+project(uplift VERSION 1.1.5 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +37,11 @@ if(NOT UPLIFT_VULKAN_INCLUDE)
 endif()
 
 add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+# 1.1.5: the NR floor (nr/types.hpp): no NR network runs on a frame whose shorter side is below the first or whose longer side is below the
+# second. One setting for every target, so the add-ons, the helper and the tests always agree. 640x360 is the smallest size probed on hardware.
+set(UPLIFT_NR_MIN_SHORT_SIDE 360 CACHE STRING "NR floor: the smallest shorter side NR runs on")
+set(UPLIFT_NR_MIN_LONG_SIDE 640 CACHE STRING "NR floor: the smallest longer side NR runs on")
+add_compile_definitions(UPLIFT_NR_MIN_SHORT_SIDE=${UPLIFT_NR_MIN_SHORT_SIDE} UPLIFT_NR_MIN_LONG_SIDE=${UPLIFT_NR_MIN_LONG_SIDE})
 # The C++ warning and conformance set; MinHook's C sources below keep their own warning level.
 add_compile_options(/utf-8 "$<$<COMPILE_LANGUAGE:CXX>:/W4;/permissive-;/Zc:__cplusplus;/EHsc;/external:W0>")
 

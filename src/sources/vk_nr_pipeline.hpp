@@ -72,7 +72,7 @@ class VkNrPipeline final : private nr::PassResolver {
   // The caller has checked the placement (the main handle, a tracked list), ticked the Session and issued its completion token before this call (the
   // token's event is set at the end of the hooked evaluate, whatever the result). `recorded` says whether anything went onto `buffer`. Nothing is recorded
   // for: Intensity 0 ("intensity 0": exact pass-through), an output format without a variant ("unsupported format"), a variant whose pipelines cannot be
-  // built ("pipeline failed"), a region or a canvas below the 1280x720 floor ("frame too small").
+  // built ("pipeline failed"), a region or a canvas below the NR floor (640x360) ("frame too small").
   PipelineResult RecordAfterDlss(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
                                  const WorkLayout& layout = {});
   // Task 10, Before upscaling (design §4.1, v2 design §3.9): NR on the region of the game's Color (`color.resource`: a sampled image view in

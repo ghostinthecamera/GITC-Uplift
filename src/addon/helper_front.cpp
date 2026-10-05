@@ -16,6 +16,7 @@
 #include "addon/launchpad_link.hpp"
 #include "addon/live_facts.hpp"
 #include "addon/removal_latch.hpp"
+#include "addon/swapchain_usage.hpp"
 #include "addon/reshade_d3d12_host.hpp"
 #include "addon/reshade_gl_host.hpp"
 #include "addon/reshade_vk_host.hpp"
@@ -809,6 +810,7 @@ bool HelperFront::CreateDevice(api::device_api device_api, uint32_t& api_version
   // refused CreateDeviceEx or a start that dies before that leaves it, and turns the toggle off at the next start.
   WriteLatchMarker(ex_marker_path_, "Direct3D 9Ex requested; waiting for the first frame");
   api_version = D3D9EX_API_VERSION;
+  NoteD3D9ExRequested();  // 1.1.5: exclusive fullscreen becomes a window of the same size (swapchain_usage.hpp)
   nr::Log(nr::LogLevel::INFO, "Direct3D 9: asking ReShade for a Direct3D 9Ex device (UseD3D9Ex)");
   return true;
 }
