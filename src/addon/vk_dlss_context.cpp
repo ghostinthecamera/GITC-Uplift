@@ -375,7 +375,8 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
     const bool opened_here = OpenToken(list);
     const bool copied = pipeline_->RecordPresentMotion(buffer, {.view = vectors.ImageView, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, motion_region,
                                                        frame.mv_scale_x * config_.motion_scale_x, frame.mv_scale_y * config_.motion_scale_y,
-                                                       completion_->Timeline().CurrentFrame() + 1u);  // a throw leaves the token open
+                                                       completion_->Timeline().CurrentFrame() + 1u,
+                                                       config_.dlss_motion_upside_down);  // a throw leaves the token open
     if (opened_here && !copied) {
       DropOpenToken(list);
     }

@@ -310,7 +310,7 @@ bool ColorPipeline::RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot,
   const std::array<uint32_t, PASS_CONSTANTS> constants = {
       pass.region.x, pass.region.y, pass.region.width, pass.region.height, pass.image.width, pass.image.height,
       pass.canvas.width, pass.canvas.height, Bits(pass.scale_x), Bits(pass.scale_y),
-      0u, 0u, 0u, 0u, 0u, 0u,
+      (pass.flip_y ? 1u : 0u), 0u, 0u, 0u, 0u, 0u,
   };
   DispatchCompute(list, motion_pipeline_.Get(), constants, base, pass.canvas.width, pass.canvas.height);
   return true;

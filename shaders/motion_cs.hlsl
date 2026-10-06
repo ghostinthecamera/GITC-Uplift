@@ -12,7 +12,7 @@ cbuffer MotionConstants : register(b0) {
   uint canvas_height;
   float scale_x;       // MV.Scale × MotionScale × image / region: vectors land in destination pixels
   float scale_y;
-  uint reserved0;
+  uint flip_y;         // 1.1.6: 1 when the source is upside down against the destination (DLSS's vectors at Present in some engines, Unity's for one)
   uint reserved1;
   uint reserved2;
   uint reserved3;
@@ -40,8 +40,14 @@ void main(uint3 id : SV_DispatchThreadID) {
   const bool2 mirrored = ((id.xy % (2u * image)) >= image);
   const uint2 pixel = uint2(Mirror(id.x, image_width), Mirror(id.y, image_height));
   const uint2 region = uint2(region_width, region_height);
-  const uint2 read = min(uint2((float2(pixel) + 0.5f) * float2(region) / float2(image)), region - 1u);
+  uint2 read = min(uint2((float2(pixel) + 0.5f) * float2(region) / float2(image)), region - 1u);
+  if (flip_y != 0u) {
+    read.y = region.y - 1u - read.y;  // the source's rows run the other way
+  }
   float2 motion = motion_source.Load(int3(uint2(region_x, region_y) + read, 0)).xy * float2(scale_x, scale_y);
+  if (flip_y != 0u) {
+    motion.y = -motion.y;  // and so does its vertical motion
+  }
   motion = select(mirrored, -motion, motion);
   // Non-finite first: clamp's result for a NaN is the hardware's choice.
   motion = (all(isfinite(motion)) ? motion : float2(0.f, 0.f));

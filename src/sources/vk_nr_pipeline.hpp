@@ -113,7 +113,9 @@ class VkNrPipeline final : private nr::PassResolver {
   // pixels times (scale_x, scale_y). The slot ends in SHADER_READ_ONLY_OPTIMAL, the state the bridge's copy-in assumes. The Session is never involved: nothing
   // here loads NR. False (nothing recorded) when the slot or the constants ring is still in use, or an image cannot be made. The caller issued its
   // completion token before this call.
-  bool RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x, float scale_y, uint64_t frame);
+  // 1.1.6: `flip_y` when DLSS's images are upside down against the back buffer (ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN).
+  bool RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x, float scale_y, uint64_t frame,
+                           bool flip_y = false);
   // The slot written for `frame`, or an empty one; stamps its last use with the current mark (the bridge reads it in this frame).
   [[nodiscard]] vk::NrImage PresentMotion(uint64_t frame);
   [[nodiscard]] bool HasPresentMotion(uint64_t frame) const;  // PresentMotion without the stamp

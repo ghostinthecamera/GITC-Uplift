@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <memory>
@@ -98,6 +99,9 @@ constexpr char LAUNCHPAD_TECHNIQUE[] = "MartysMods_Launchpad";
 constexpr char UPLIFT_FX_EFFECT_NAME[] = "Uplift.fx";
 // User-approved addition: Uplift sets this itself (OnPresent), so no preprocessor edit is needed.
 constexpr char UPLIFT_USE_LAUNCHPAD_DEFINE[] = "UPLIFT_USE_LAUNCHPAD";
+// 1.1.6: ReShade's own definition for games whose depth is upside down (ReShade.fxh). DLSS works on the same camera images as that depth, so its motion
+// vectors are upside down against the back buffer too: the Present path flips them while it is set.
+constexpr char DEPTH_UPSIDE_DOWN_DEFINE[] = "RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN";
 
 static_assert(static_cast<uint32_t>(api::color_space::unknown) == static_cast<uint32_t>(color::ColorSpace::UNKNOWN));
 static_assert(static_cast<uint32_t>(api::color_space::srgb_nonlinear) == static_cast<uint32_t>(color::ColorSpace::SRGB_NONLINEAR));
@@ -185,6 +189,7 @@ struct DeviceEntry {
   bool d3d11_watch_counted = false;
   bool foreign_dlss = false;
   bool present_motion_logged = false;
+  std::optional<bool> depth_upside_down;  // 1.1.6: RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN as last read (logged when it changes)
   // 1.0.1 (F2): the once-a-minute "NR running" line and the "NR stopped after" one, with this process's private bytes and VRAM on `vram`'s adapter.
   addon::NrHeartbeat heartbeat;
   addon::ProcessVram vram;
@@ -237,6 +242,13 @@ void StopBridge(DeviceEntry& entry, std::string reason) {
 
 // Plan 17: the device's private-device NR has stopped: its bridge latched (a removed or hung private device, the CPU-ordered timeouts, a failed cross-API
 // step), or its context found the private device removed.
+// 1.1.6: ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN, the preset's or the global one, as ReShade.fxh reads it (any non-zero number is set).
+bool DepthUpsideDown(api::effect_runtime* runtime) {
+  char value[32] = {};
+  if (runtime == nullptr || !runtime->get_preprocessor_definition(DEPTH_UPSIDE_DOWN_DEFINE, value)) return false;
+  return std::strtol(value, nullptr, 0) != 0;
+}
+
 bool PrivateDeviceStopped(const DeviceEntry& entry) {
   const bool latched = ((entry.d3d11_bridge && entry.d3d11_bridge->Stopped()) || (entry.d3d10_bridge && entry.d3d10_bridge->Stopped())
                         || (entry.vk_bridge && entry.vk_bridge->Stopped()) || (entry.gl_bridge && entry.gl_bridge->Stopped()));
@@ -1360,6 +1372,13 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         break;
       }
     }
+    if (const bool upside_down = DepthUpsideDown(entry.runtime); entry.depth_upside_down != upside_down) {
+      if (entry.depth_upside_down.has_value() || upside_down) {
+        nr::Logf(nr::LogLevel::INFO, "{} is {}: DLSS's motion vectors are {} at Present", DEPTH_UPSIDE_DOWN_DEFINE, (upside_down ? 1 : 0),
+                 (upside_down ? "flipped vertically" : "used as they are"));
+      }
+      entry.depth_upside_down = upside_down;
+    }
     if (vulkan || opengl) {
       // Key decision g: Uplift runs on the effect runtime's queue, whose immediate command list the technique and finish-effects events hand out,
       // whatever queue presents. Without a runtime (effects not up yet) there is none, and nothing runs this frame. On OpenGL (key decision a) the queue is
@@ -1655,6 +1674,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
             },
             &state.coalescer, now);
         native_config.present_motion_copy = present_motion_wanted;
+        native_config.dlss_motion_upside_down = entry.depth_upside_down.value_or(false);  // 1.1.6
         // Plan 18 Task 12: the game released its Vulkan DLSS here (asked of the registry once the context saw DLSS: fix round 1, M-5).
         native_config.dlss_released = addon::DlssReleased(state.bridge.Registry(), device, ngx_hooks::NgxApi::VULKAN, native.DlssSeen());
         // Key decision g: the effect runtime's queue (none until the runtime is up: the frame is then not signalled).
@@ -1974,6 +1994,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     // Fix round 1 (M-5): the registry is asked once the context saw DLSS.
     frame_config.dlss_released = addon::DlssReleased(state.bridge.Registry(), device, DlssApiOf(entry), entry.context->DlssSeen());
     frame_config.effects_on = (entry.runtime != nullptr && entry.runtime->get_effects_state());  // 1.1.6: NR before effects at their begin event
+    frame_config.dlss_motion_upside_down = entry.depth_upside_down.value_or(false);                // 1.1.6: DLSS's vectors flipped at Present
     addon::TargetInfo target = {
         .resource = reinterpret_cast<ID3D12Resource*>(entry.back_buffer.handle),
         .color_space = static_cast<color::ColorSpace>(swapchain->get_color_space()),

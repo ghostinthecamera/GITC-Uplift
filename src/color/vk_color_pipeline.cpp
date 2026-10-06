@@ -534,7 +534,7 @@ bool VkColorPipeline::RecordMotion(VkCommandBuffer buffer, uint32_t slot, const 
       pass.canvas.height,
       Bits(pass.scale_x),
       Bits(pass.scale_y),
-      0u,
+      (pass.flip_y ? 1u : 0u),
       0u,
       0u,
       0u,

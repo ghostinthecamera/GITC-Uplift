@@ -657,7 +657,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
     // Plan 18 (fix round 1, M-1): Direct3D 11's ring slot holds DLSS's raw vectors (its rect the evaluate's region, at (0, 0)). They go through the motion
     // copy here, at the region's size with MV.Scale x MotionScale applied, as the Direct3D 12 copy above was made, so every Present source is filtered.
     if (const nr::BoundResource converted =
-            ConvertDlssMotion(list, slot, target.dlss_motion, target.dlss_motion_scale_x, target.dlss_motion_scale_y);
+            ConvertDlssMotion(list, slot, target.dlss_motion, target.dlss_motion_scale_x, target.dlss_motion_scale_y, target.dlss_motion_flip);
         converted.resource != nullptr) {
       inputs.motion = converted;  // full subrect, scale (1, 1)
       motion_source = MotionSource::PRESENT_COPY;
@@ -1006,7 +1006,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
           .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
 }
 
-bool NrPipeline::RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y) {
+bool NrPipeline::RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y, bool flip_y) {
   if (session_.State() != nr::SessionState::ACTIVE || list == nullptr || motion.resource == nullptr) return false;
   const D3D12_RESOURCE_DESC description = motion.resource->GetDesc();
   const std::optional<DXGI_FORMAT> view_format = MotionViewFormat(description.Format);
@@ -1049,6 +1049,7 @@ bool NrPipeline::RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::Bou
                           .canvas = size,
                           .scale_x = scale_x,
                           .scale_y = scale_y,
+                          .flip_y = flip_y,
                       });
   Transition(list, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   motion_copies_.frames[index] = frame;
@@ -1057,7 +1058,7 @@ bool NrPipeline::RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::Bou
 }
 
 nr::BoundResource NrPipeline::ConvertDlssMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::BoundResource& motion, float scale_x,
-                                                float scale_y) {
+                                                float scale_y, bool flip_y) {
   const D3D12_RESOURCE_DESC description = motion.resource->GetDesc();
   const std::optional<DXGI_FORMAT> view_format = MotionViewFormat(description.Format);
   nr::Rect region = motion.rect;
@@ -1088,6 +1089,7 @@ nr::BoundResource NrPipeline::ConvertDlssMotion(ID3D12GraphicsCommandList* list,
                                                 .canvas = size,
                                                 .scale_x = scale_x,
                                                 .scale_y = scale_y,
+                                                .flip_y = flip_y,
                                             });
   Transition(list, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   dlss_present_motion_.last_use = slot_marks_[slot];

@@ -82,6 +82,9 @@ struct FrameConfig {
   // released it, or on Direct3D 11 shut NGX down. The context's DlssOffLatch decides from it when the game switched its DLSS off.
   bool dlss_released = false;
   bool effects_on = false;  // 1.1.6: ReShade's effects are on, so NR before effects may wait for their begin-effects event (set by the add-on only)
+  // 1.1.6: ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN is set: the game's camera images, DLSS's among them, are upside down against the back buffer
+  // (Unity, for one), so DLSS's motion vectors are flipped for the Present path (set by the add-on only).
+  bool dlss_motion_upside_down = false;
   uint32_t pass_view_limit = 0u;      // Plan 6 (D6): the Defaults view's passes on the live features; 0 = all
   uint64_t settings_generation = 0u;  // Plan 6 (D11): changes with every saved settings change; restarts the retry backoff
 };

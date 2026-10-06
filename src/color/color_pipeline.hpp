@@ -107,6 +107,7 @@ struct MotionPass {
   nr::Size canvas;                   // the target's size: the image plus mirrored padding
   float scale_x = 1.f;               // multiplies the vectors into target pixels
   float scale_y = 1.f;
+  bool flip_y = false;               // 1.1.6: `source` is upside down against `target` (motion_cs.hlsl)
 };
 
 // Plan 5 (v2 design §3.14): the exposure meter and governor, one thread group, before the encode.

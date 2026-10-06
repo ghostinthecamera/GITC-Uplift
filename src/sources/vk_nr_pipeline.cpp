@@ -1029,7 +1029,7 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
 }
 
 bool VkNrPipeline::RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x, float scale_y,
-                                       uint64_t frame) {
+                                       uint64_t frame, bool flip_y) {
   const nr::Size size = {region.width, region.height};
   if (buffer == VK_NULL_HANDLE || motion.view == VK_NULL_HANDLE || size.Empty() || frame == 0u || !color_.PrepareMotion()) return false;
   const uint32_t ring_slot = next_slot_;
@@ -1062,7 +1062,8 @@ bool VkNrPipeline::RecordPresentMotion(VkCommandBuffer buffer, const color::VkSa
   const std::array<const vk::NrImage*, 1> opened = {&copy.image};
   OpenRecording(buffer, opened, false);
   color_.RecordMotion(buffer, ring_slot,
-                      {.source = motion, .region = region, .target = copy.image.view, .image = size, .canvas = size, .scale_x = scale_x, .scale_y = scale_y});
+                      {.source = motion, .region = region, .target = copy.image.view, .image = size, .canvas = size, .scale_x = scale_x, .scale_y = scale_y,
+                       .flip_y = flip_y});
   HandToNgx(buffer, copy.image);
   copy.frame = frame;
   copy.last_use = slot_marks_[ring_slot];

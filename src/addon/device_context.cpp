@@ -269,6 +269,7 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   frame_target_.dlss_motion_scale_x = (motion_is_dlss ? dlss_scale_x : 1.f);
   frame_target_.dlss_motion_scale_y = (motion_is_dlss ? dlss_scale_y : 1.f);
   frame_target_.dlss_motion_raw = (motion_is_dlss && dlss_stages_);  // fix round 1 (M-1): the motion copy filters them, as every other Present source
+  frame_target_.dlss_motion_flip = (frame_target_.dlss_motion_raw && config_.dlss_motion_upside_down);  // 1.1.6 (Vulkan's copies are flipped by theirs)
   const sources::PresentResult result =
       present_source_->Record(host->NativeList(), frame_target_, controls_, false, present_layout_);
   host->TargetBarrier(D3D12_RESOURCE_STATE_COPY_SOURCE, entry_state);
@@ -375,7 +376,7 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
       return sources::PipelineResult{
           .recorded = present_source_->Pipeline().RecordMotionCopy(list, {.resource = frame.motion_vectors, .rect = frame.motion_region},
                                                                    frame.mv_scale_x * config_.motion_scale_x,
-                                                                   frame.mv_scale_y * config_.motion_scale_y),
+                                                                   frame.mv_scale_y * config_.motion_scale_y, config_.dlss_motion_upside_down),
       };
     });
     if (copied.recorded) {

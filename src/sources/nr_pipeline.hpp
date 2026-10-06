@@ -35,6 +35,7 @@ struct PresentTarget {
   // (motion_cs.hlsl: non-finite vectors dropped, the rest clamped, the scale applied) at the region's size and binds the result at (1, 1), as
   // RecordMotionCopy's copies; false for Vulkan's copies, which their own copy filtered.
   bool dlss_motion_raw = false;
+  bool dlss_motion_flip = false;  // 1.1.6: `dlss_motion` (raw) is upside down against the back buffer: the conversion flips it
   nr::BoundResource launchpad_motion;  // Plan 6: this frame's UPLIFT_MV (back-buffer pixels), or none; converted before NR (F1)
   float motion_scale_x = 1.f;          // MotionScaleX/Y for it
   float motion_scale_y = 1.f;
@@ -113,7 +114,8 @@ class NrPipeline final : private nr::PassResolver {
   // Amendment 7: at an evaluate of the game's DLSS, copies its motion vectors (`motion`, scaled into the
   // region's own pixels by `scale_x/y`) on the game's list, for the present that closes the current
   // frame. False when nothing was recorded.
-  bool RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y);
+  // 1.1.6: `flip_y` when DLSS's images are upside down against the back buffer (ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN).
+  bool RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y, bool flip_y = false);
   // Frees the intermediates now when the GPU has passed the newest recording that used them (a drain to OFF
   // normally has); otherwise hands them to the timeline, which frees them once it does. Also the look set,
   // the mask copy and the exposure state too.
@@ -294,7 +296,8 @@ class NrPipeline final : private nr::PassResolver {
   // Plan 18 (fix round 1, M-1): records the motion copy of `motion` (DLSS's raw vectors in the ring slot, the region its rect) into dlss_present_motion_ at
   // the region's size with `scale_x/y` applied, on the committed `slot`. The texture to bind whole at a scale of (1, 1), or none (an unreadable format, a
   // region outside the texture, or no memory): NR then runs with the zero motion, never with the raw vectors.
-  nr::BoundResource ConvertDlssMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::BoundResource& motion, float scale_x, float scale_y);
+  nr::BoundResource ConvertDlssMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::BoundResource& motion, float scale_x, float scale_y,
+                                      bool flip_y);
   // F1: records the conversion of `motion` (UPLIFT_MV, back-buffer pixels times MotionScale) into launchpad_motion_ at `work`'s canvas, on the committed
   // `slot`. The texture to bind whole at a scale of (1, 1), or none (an unreadable format, a region outside the texture, or no memory): NR then runs with
   // the zero motion, never with the raw vectors.

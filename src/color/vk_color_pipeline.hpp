@@ -79,6 +79,7 @@ struct VkMotionPass {
   nr::Size canvas;                      // the target's size: the image plus mirrored padding
   float scale_x = 1.f;                  // multiplies the vectors into target pixels
   float scale_y = 1.f;
+  bool flip_y = false;                  // 1.1.6: `source` is upside down against `target` (motion_cs.hlsl)
 };
 
 // Plan 14 (v2 design §3.7): NR's change field at the work image size, from the model input recomputed exactly as `encode` computed it (a later pass may

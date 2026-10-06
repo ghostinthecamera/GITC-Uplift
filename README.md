@@ -100,6 +100,7 @@ The card at the top of the Uplift tab tells you what's wrong. The usual ones:
 | "The GPU device was removed" | Press **Retry now** if the card has it; otherwise restart the game. After a stop, some video memory (1 GB or more at 4K) stays in use until you restart the game. If it happens twice, restart the game, and please report it with `ReShade.log`. |
 | "NR needs at least 640x360" | Raise the game's resolution or window size. |
 | NR costs a lot at a very low resolution | Set **Pass count** to 1. Below about 720p, NR's cost hardly shrinks with the image, so **Resolution** helps little there. |
+| At **Present** with **Motion vectors** on DLSS, the image shimmers when the camera moves | The game keeps its images upside down (many Unity games do). Set `RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN` to 1 in ReShade's global preprocessor definitions, as for depth effects: Uplift then turns DLSS's motion vectors the right way up. |
 | "Another NR tool is running" | Remove the other DLSS5 add-on (see "Other DLSS5 add-ons") and restart the game. |
 | "The Vulkan swap chain cannot take NR's result" | Update ReShade to 6.8 (choose **Update ReShade only** in the installer). If it mentions exclusive fullscreen, use borderless or windowed mode. |
 | "Not enough address space in this 32-bit game" | Apply a 4 GB (large-address-aware) patch to the game. |
