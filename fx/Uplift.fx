@@ -101,19 +101,30 @@ static const float2 UPLIFT_FLOW_CELLS = float2(BUFFER_WIDTH / 8, BUFFER_HEIGHT /
 // edge and an HDR image weigh alike. At EDGE the weight is exp(-0.5); SPREAD is the spatial reach, in cells.
 #define UPLIFT_LUMENITE_EDGE 0.12
 #define UPLIFT_LUMENITE_SPREAD 0.75
+// 1.2.1: a thin feature (a 1-3 px outline, hair or wire over a brighter area) differs from all nine cell centres, so every edge weight is near zero and the
+// edge-aware result would be near zero motion: it smeared under NR in a pan. When the cells alike to this pixel carry less than TRUST of the distance
+// weight, the result blends toward the distance-only one (the surroundings' motion), linearly down to it at zero. A pixel with any cell alike to it keeps
+// the edge-aware result untouched, so edges stay sharp. A floor on each edge weight was the alternative; it leaks the far side's motion into a pixel whose
+// only alike cell is a distant one, wherever the floor outweighs that cell, so the blend's switch on how much of the neighbourhood agrees is the safer one.
+#define UPLIFT_LUMENITE_EDGE_TRUST 0.05
+// 1.2.1: luma is clamped both ways, so an infinite scRGB pixel cannot turn the weights, and so the vector, into NaN (Inf - Inf).
+#define UPLIFT_LUMENITE_LUMA_MAX 1e4
 
-float UpliftLuma(float3 color) { return dot(color, float3(0.2126, 0.7152, 0.0722)); }
+float UpliftLuma(float3 color) { return clamp(dot(color, float3(0.2126, 0.7152, 0.0722)), -UPLIFT_LUMENITE_LUMA_MAX, UPLIFT_LUMENITE_LUMA_MAX); }
 
 // Kernel's flow is a UV offset from this frame to the previous one, as LaunchPad's (Lumenite's own effects fetch the previous frame at uv + flow). It
 // comes to full size through a joint bilateral upsample over the 3x3 cells around this pixel: each cell's flow, weighted by its distance and by how alike
-// its colour is to this pixel's, so a pixel takes the motion of the side of an edge it is on instead of an 8-pixel block. Each cell's confidence scales
-// its flow but not its weight, so unsure cells pull the result toward zero motion. Then to pixels, as LaunchPad's.
+// its colour is to this pixel's, so a pixel takes the motion of the side of an edge it is on instead of an 8-pixel block, and (1.2.1) a pixel alike to none
+// of them takes its surroundings' motion (EDGE_TRUST). Each cell's confidence scales its flow but not its weight, so unsure cells pull the result toward
+// zero motion. Then to pixels, as LaunchPad's.
 float2 UpliftLumeniteMotionPS(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target {
   float luma = UpliftLuma(tex2Dlod(UpliftBackBuffer, float4(texcoord, 0.0, 0.0)).rgb);
   float2 cell = texcoord * UPLIFT_FLOW_CELLS - 0.5;  // this pixel in cell-centre coordinates
   float2 nearest = floor(cell + 0.5);
-  float2 flow = 0.0;
+  float2 flow = 0.0;      // edge-aware: distance x likeness
   float weights = 0.0;
+  float2 near_flow = 0.0;  // distance only (1.2.1: the thin-feature fallback)
+  float near_weights = 0.0;
   [unroll] for (int y = -1; y <= 1; ++y) {
     [unroll] for (int x = -1; x <= 1; ++x) {
       float2 index = clamp(nearest + float2(x, y), 0.0, UPLIFT_FLOW_CELLS - 1.0);
@@ -125,11 +136,16 @@ float2 UpliftLumeniteMotionPS(float4 position : SV_Position, float2 texcoord : T
       float range = exp(-(difference * difference) / (2.0 * UPLIFT_LUMENITE_EDGE * UPLIFT_LUMENITE_EDGE));
       float weight = spatial * range;
       float confidence = smoothstep(UPLIFT_LUMENITE_CONFIDENCE_LOW, UPLIFT_LUMENITE_CONFIDENCE_HIGH, tex2Dlod(UpliftKernelConfidence, float4(uv, 0.0, 0.0)).x);
-      flow += (weight * confidence) * tex2Dlod(UpliftKernelFlow, float4(uv, 0.0, 0.0)).xy;
+      float2 cell_flow = confidence * tex2Dlod(UpliftKernelFlow, float4(uv, 0.0, 0.0)).xy;
+      flow += weight * cell_flow;
       weights += weight;
+      near_flow += spatial * cell_flow;
+      near_weights += spatial;
     }
   }
-  return (flow / max(weights, 1e-6)) * float2(BUFFER_WIDTH, BUFFER_HEIGHT);
+  float trust = saturate(weights / (UPLIFT_LUMENITE_EDGE_TRUST * near_weights));
+  float2 edge_aware = flow / max(weights, 1e-30);  // bounded: a weighted mean of the cells' flows (0 when every weight underflowed, where trust is 0)
+  return lerp(near_flow / near_weights, edge_aware, trust) * float2(BUFFER_WIDTH, BUFFER_HEIGHT);
 }
 #endif
 

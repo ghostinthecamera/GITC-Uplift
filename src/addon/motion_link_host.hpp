@@ -37,6 +37,8 @@ struct MotionLinkStep {
   bool launchpad_ready = false;     // MartysMods_Launchpad and the Uplift technique are enabled (held through a reload)
   bool lumenite_ready = false;      // Lumenite_Kernel and the Uplift technique are enabled (held through a reload)
   bool uplift_mv_lumenite = false;  // Uplift.fx is (or is about to be) compiled with Lumenite's pass: UPLIFT_MV holds Lumenite's vectors
+  // 1.2.1: the source Uplift.fx is (or is about to be) compiled with; the readers take UPLIFT_MV only while its technique is on (UpliftMvValid).
+  UpliftMvSource compiled = UpliftMvSource::NONE;
 };
 
 namespace motion_link_detail {
@@ -108,7 +110,8 @@ inline MotionLinkStep UpdateMotionLinks(MotionLinks* links, reshade::api::effect
     }
   }
   // Uplift.fx compiles Launchpad's pass when both are set (its #if order), so UPLIFT_MV is Lumenite's only without Launchpad's.
-  step.uplift_mv_lumenite = (lumenite_here && lumenite_now && !launchpad_now);
+  step.compiled = CompiledUpliftMv(launchpad_here, launchpad_now, lumenite_here, lumenite_now);
+  step.uplift_mv_lumenite = (step.compiled == UpliftMvSource::LUMENITE);
   return step;
 }
 

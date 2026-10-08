@@ -21,6 +21,7 @@
 
 #include "addon/bridge_strikes.hpp"
 #include "addon/frame_trigger.hpp"
+#include "addon/launchpad_link.hpp"
 #include "addon/reshade_api.hpp"
 #include "client/d3d10_client.hpp"
 #include "client/d3d11_client.hpp"
@@ -91,6 +92,7 @@ struct HelperDevice {
   bool launchpad_ready = false;
   bool lumenite_ready = false;      // 2026-10-08: the same for Lumenite's Kernel (Setup's Lumenite option)
   bool uplift_mv_lumenite = false;  // 2026-10-08: Uplift.fx writes Lumenite's vectors into UPLIFT_MV; the FRAME tells the helper, for its readouts
+  UpliftMvSource uplift_mv_source = UpliftMvSource::NONE;  // 1.2.1: the source Uplift.fx is compiled with; Technique takes UPLIFT_MV only while it is on
   // T5: why a 64-bit Vulkan device's NR at Present runs in the helper (addon::VkRouteChoice's reason; gitc-uplift.addon64 sets it at each present). The
   // Details line and the footer name the route with it. Empty in gitc-uplift.addon32 and for every other API.
   std::string route_reason;

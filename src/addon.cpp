@@ -153,6 +153,7 @@ struct DeviceEntry {
   bool launchpad_ready = false;
   bool lumenite_ready = false;      // 2026-10-08: the same for Lumenite's Kernel (Setup's Lumenite option)
   bool uplift_mv_lumenite = false;  // 2026-10-08: Uplift.fx writes Lumenite's vectors into UPLIFT_MV (the links' state; the readouts name it)
+  addon::UpliftMvSource uplift_mv_source = addon::UpliftMvSource::NONE;  // 1.2.1: the source Uplift.fx is compiled with (MotionLinkStep::compiled)
   std::string mask_note;  // Plan 5: the overlay's "NR mask" line
   bool d3d11 = false;     // Plan 7: a D3D11 device; its NR runs through d3d11_bridge
   // Final review I-1: the automatic UPLIFT_USE_LAUNCHPAD link and (2026-10-08) UPLIFT_USE_LUMENITE's, with Setup's "ready" for each, for `link_runtime`.
@@ -1667,6 +1668,8 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         entry.launchpad_ready = step.launchpad_ready;
         entry.lumenite_ready = step.lumenite_ready;
         entry.uplift_mv_lumenite = step.uplift_mv_lumenite;
+        entry.uplift_mv_source = step.compiled;
+        entry.helper.uplift_mv_source = step.compiled;
         entry.helper.launchpad_ready = entry.launchpad_ready;
         entry.helper.lumenite_ready = entry.lumenite_ready;
         entry.helper.uplift_mv_lumenite = entry.uplift_mv_lumenite;
@@ -2629,10 +2632,13 @@ void OnRenderTechnique(api::effect_runtime* runtime, api::effect_technique techn
     api::resource launchpad = {0u};
     api::resource_view launchpad_view = {0u};  // Plan 19: native NR at Present samples UPLIFT_MV through ReShade's own view
     if (is_marker) {
+      // 1.2.1: only while the technique of the source Uplift.fx is compiled with is on; the other one's being on says nothing about UPLIFT_MV, which
+      // then holds the compiled source's last vectors, frozen (a reload that re-applied a preset).
       const api::effect_technique launchpad_technique = runtime->find_technique(nullptr, LAUNCHPAD_TECHNIQUE);
       const api::effect_technique lumenite_technique = runtime->find_technique(nullptr, addon::LUMENITE_TECHNIQUE);
-      const bool source_on = ((launchpad_technique.handle != 0u && runtime->get_technique_state(launchpad_technique))
-                              || (lumenite_technique.handle != 0u && runtime->get_technique_state(lumenite_technique)));
+      const bool source_on = addon::UpliftMvValid(entry->uplift_mv_source,
+                                                  (launchpad_technique.handle != 0u && runtime->get_technique_state(launchpad_technique)),
+                                                  (lumenite_technique.handle != 0u && runtime->get_technique_state(lumenite_technique)));
       const api::effect_texture_variable motion = runtime->find_texture_variable(nullptr, MOTION_TEXTURE);
       if (source_on && motion.handle != 0u) {
         api::resource_view view_srgb = {0u};

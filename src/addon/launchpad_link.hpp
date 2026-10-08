@@ -37,6 +37,20 @@ struct UpliftMvSources {
 // MotionVectors can use UPLIFT_MV at all (Auto, Launchpad, Lumenite): only then is it copied for NR (a 32 MiB copy at 4K otherwise). Pure.
 [[nodiscard]] bool MotionUsesUpliftMv(ui::MotionVectorSource setting);
 
+// 1.2.1: the source Uplift.fx is compiled with, which may not be the one wanted. A link never answers its own reload, so after a reload that re-applies a
+// preset (auto-save off) a define can stay set while its technique is off: UPLIFT_MV then holds that source's last vectors, frozen.
+enum class UpliftMvSource : uint8_t {
+  NONE,
+  LAUNCHPAD,
+  LUMENITE,
+};
+// From the two defines as they stand (`*_now`: the value a link set this frame, else the definition read, false where unknown) and whether the device can
+// use each source; Uplift.fx's own #if order: LaunchPad's pass wins when both are set. Pure.
+[[nodiscard]] UpliftMvSource CompiledUpliftMv(bool launchpad_here, bool launchpad_now, bool lumenite_here, bool lumenite_now);
+// UPLIFT_MV holds this frame's vectors only while the technique of the source Uplift.fx is compiled with is on; otherwise the readers treat it as no
+// UPLIFT_MV this frame. `launchpad_on` / `lumenite_on`: MartysMods_Launchpad / Lumenite_Kernel is enabled. Pure.
+[[nodiscard]] bool UpliftMvValid(UpliftMvSource compiled, bool launchpad_on, bool lumenite_on);
+
 // What the link reads at a present.
 struct LaunchPadLinkFrame {
   // ReShade is not (re)loading effects, and Uplift.fx is among them: only then may UPLIFT_USE_LAUNCHPAD be set.

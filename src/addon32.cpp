@@ -319,6 +319,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         entry.helper.launchpad_ready = step.launchpad_ready;
         entry.helper.lumenite_ready = step.lumenite_ready;
         entry.helper.uplift_mv_lumenite = step.uplift_mv_lumenite;
+        entry.helper.uplift_mv_source = step.compiled;
       }
     }
     if (entry.helper.rejected) return;

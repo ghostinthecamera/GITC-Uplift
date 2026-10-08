@@ -529,10 +529,12 @@ void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, 
   const bool launchpad_here = (!device.d3d9 || LAUNCHPAD_ON_D3D9);
   const bool lumenite_here = (!device.d3d9 || LUMENITE_ON_D3D9);
   if (device.SharesImages() && (launchpad_here || lumenite_here) && MotionUsesUpliftMv(settings.motion_vectors)) {
+    // 1.2.1: only while the technique of the source Uplift.fx is compiled with is on (UpliftMvValid); otherwise UPLIFT_MV holds that source's last
+    // vectors, frozen, and this frame goes without.
     const api::effect_technique launchpad_technique = (launchpad_here ? runtime->find_technique(nullptr, LAUNCHPAD_TECHNIQUE) : api::effect_technique{0u});
     const api::effect_technique lumenite_technique = (lumenite_here ? runtime->find_technique(nullptr, LUMENITE_TECHNIQUE) : api::effect_technique{0u});
-    const bool source_on = ((launchpad_technique.handle != 0u && runtime->get_technique_state(launchpad_technique))
-                            || (lumenite_technique.handle != 0u && runtime->get_technique_state(lumenite_technique)));
+    const bool source_on = UpliftMvValid(device.uplift_mv_source, (launchpad_technique.handle != 0u && runtime->get_technique_state(launchpad_technique)),
+                                         (lumenite_technique.handle != 0u && runtime->get_technique_state(lumenite_technique)));
     const api::effect_texture_variable motion = runtime->find_texture_variable(nullptr, MOTION_TEXTURE);
     if (source_on && motion.handle != 0u) {
       api::resource_view view = {0u};
