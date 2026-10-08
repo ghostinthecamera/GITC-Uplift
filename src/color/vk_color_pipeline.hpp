@@ -170,9 +170,22 @@ struct VkResolvePass {
   float color_strength = 1.f;
 };
 
+// Keep faces (2026-10-08): ColorPipeline's FacesPass on Vulkan (shaders/faces_cs.hlsl). Every image RGBA16F in GENERAL, at the canvas (the atlas:
+// look::MakeAtlas of it).
+struct VkFacesPass {
+  VkImageView changed = VK_NULL_HANDLE;    // pass 1's raw output, or a later pass's: sampled by the pyramid, rewritten (storage) by the combine
+  VkImageView reference = VK_NULL_HANDLE;  // the twin's output (pass 1: rewritten by the combine with the face mask), or a later pass's input
+  VkImageView mask = VK_NULL_HANDLE;       // a later pass: pass 1's face mask (the twin's image); null: pass 1
+  VkImageView atlas = VK_NULL_HANDLE;      // the pyramid: storage for RecordFacesPyramid, sampled by RecordFacesCombine
+  VkImageView detail = VK_NULL_HANDLE;     // fix round 4: the despiked difference: storage for RecordFacesDespike, sampled by RecordFacesCombine
+  VkImageView fill = VK_NULL_HANDLE;       // round 5: the fill's atlas (pass 1 with parameters.fill): storage for the pyramid, sampled by the combine
+  look::Atlas layout;
+  look::FacesParameters parameters;
+};
+
 // The SPIR-V twin of ColorPipeline's compute side (design §4.2): one push-descriptor set layout (sampled images 0-4, storage images 16-18, a uniform
-// buffer 32), one pipeline layout, compute pipelines made per variant on first use, a host-visible coherent constants ring (RING_SLOTS recordings x 42
-// slots x 256 B: Plan 14's look, meter and resolve passes, one slot per dispatch), and two 1x1 placeholders (RGBA16F sampled + storage, RG16F storage) for the bindings a
+// buffer 32), one pipeline layout, compute pipelines made per variant on first use, a host-visible coherent constants ring (RING_SLOTS recordings x 94
+// slots x 256 B: Plan 14's look, meter and resolve passes, one slot per dispatch, and Keep faces' 52), and two 1x1 placeholders (RGBA16F sampled + storage, RG16F storage) for the bindings a
 // pass leaves empty. ReShade-free: raw Vulkan through vk::NrFunctions. Never blocks. Not thread-safe: the caller's lock.
 class VkColorPipeline {
  public:
@@ -221,6 +234,14 @@ class VkColorPipeline {
   // Plan 14 Task 10: the meter before the encode; and pass `index`'s (1..RESOLVE_PASSES: passes 2..10) own strengths between NR's passes.
   bool RecordMeter(VkCommandBuffer buffer, uint32_t slot, const VkMeterPass& pass);
   bool RecordResolve(VkCommandBuffer buffer, uint32_t slot, uint32_t index, const VkResolvePass& pass);
+  // Keep faces: the pyramid of a pass's weighted change (one dispatch per level, a barrier between them), the combine, and Show the face mask's tint of
+  // `mask` into `target` at `size`. The later passes of one recording share their constants' ring slots: theirs are the same.
+  [[nodiscard]] bool FacesReady() const;  // the Keep faces pipeline exists (Prepare, PreparePreSr build it); never builds
+  [[nodiscard]] bool FacesFailed() const;  // fix round 1 (M2): building it was tried and failed: Keep faces is unavailable on this device
+  bool RecordFacesPyramid(VkCommandBuffer buffer, uint32_t slot, const VkFacesPass& pass);
+  bool RecordFacesCombine(VkCommandBuffer buffer, uint32_t slot, const VkFacesPass& pass);
+  bool RecordFacesDespike(VkCommandBuffer buffer, uint32_t slot, const VkFacesPass& pass);  // fix round 4: `changed` - `reference` into `detail`
+  bool RecordFacesShow(VkCommandBuffer buffer, uint32_t slot, VkImageView target, VkImageView mask, nr::Size size);
   // The variant for a DLSS Output view format; nullopt: "unsupported format".
   [[nodiscard]] static std::optional<uint32_t> OutputVariantOf(VkFormat format);
 
@@ -249,8 +270,8 @@ class VkColorPipeline {
   VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
   // The sampled encode, the in-place encodes, the private-colour decode, the in-place decodes, the motion copy, the look's three, the resolve, the sampled
-  // meter and the in-place meters.
-  static constexpr size_t PIPELINES = 1u + OUTPUT_VARIANTS + 1u + OUTPUT_VARIANTS + 1u + 3u + 1u + 1u + OUTPUT_VARIANTS;
+  // meter, the in-place meters, and Keep faces'.
+  static constexpr size_t PIPELINES = 1u + OUTPUT_VARIANTS + 1u + OUTPUT_VARIANTS + 1u + 3u + 1u + 1u + OUTPUT_VARIANTS + 1u;
   std::array<VkPipeline, PIPELINES> pipelines_ = {};
   std::array<bool, PIPELINES> failed_ = {};  // a variant that could not be built is not retried every frame
   VkBuffer ring_buffer_ = VK_NULL_HANDLE;

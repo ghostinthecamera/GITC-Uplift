@@ -25,8 +25,9 @@ struct OverlayView {
   std::string api_line;  // the Direct3D 11/10 bridge's or the helper front's line; empty on native Direct3D 12
   std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
   bool frame_generation_active = false;  // the working card shows frame_generation_line only when this is set
-  bool dlss_latched = false;              // DlssPlacementBlocked: the device-removal latch is set
+  bool dlss_latched = false;              // DlssPlacementBlocked: the device-removal latch is set (Plan 19 fix round: or, in a Vulkan game, VulkanNativeNr = 0)
   std::string ui_correction_note;  // Plan 5 (D7): why UI correction does nothing on this placement
+  std::string keep_faces_unavailable;  // Keep faces (2026-10-08): non-empty greys its rows, and says why (ui::KeepFacesUnavailable)
   StatusCard card;  // Plan 6 (D1): replaces the message line at the top
   // The engine's own lines, which Details lists under the status line (Plan 14: the rows no longer repeat them as "Now: ..." readouts).
   std::string placement_line;  // FormatPlacementLine; "Placement: NR is off" before a device exists
@@ -46,6 +47,18 @@ struct OverlayView {
   // `d3d9ex_readout` ("Now: ...") does.
   std::string d3d9ex_readout;
   std::string d3d9ex_unavailable;
+  // Plan 19 (the owner's UI rules): the VulkanNr row. `vulkan_nr_unavailable` non-empty greys the whole row (not a 64-bit Vulkan game);
+  // `vulkan_native_unavailable` greys Native alone, with why native NR cannot run on this device; `vulkan_nr_running` highlights the route that runs (the
+  // stored choice stays as it is and returns by itself), and `vulkan_nr_note` says why it differs from the choice ("Now: ..."). T5:
+  // `vulkan_d3d12_unavailable` greys Direct3D 12 alone the same way (Helper is never greyed: it is the chain's end).
+  std::string vulkan_nr_unavailable;
+  std::string vulkan_native_unavailable;
+  std::string vulkan_d3d12_unavailable;
+  std::optional<VulkanNrMode> vulkan_nr_running;
+  std::string vulkan_nr_note;
+  // In-game round 2, fix round 1 (M5): on a 64-bit Vulkan device's helper view, why After DLSS and Before upscaling are greyed (the helper front's Setup
+  // greys only them with it); empty elsewhere.
+  std::string vulkan_stages_off;
   // Plan 14 (design §1): Setup (every option's state, the three highlights, the Why) and the working card's rows, from FinishSetup. `setup`'s views point
   // into this view's own strings (and static text).
   SetupView setup;

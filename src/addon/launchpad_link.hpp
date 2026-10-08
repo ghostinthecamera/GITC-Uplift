@@ -5,6 +5,8 @@
 #include <string>
 #include <string_view>
 
+#include "ui/settings.hpp"
+
 namespace uplift::addon {
 
 // Plan 10 (design §4.4, verdict M: Task 1 showed LaunchPad compiles on ReShade's D3D9 backend, so the gate stays on): the ONE switch for
@@ -14,6 +16,26 @@ namespace uplift::addon {
 // D3D9 setup. fx/Uplift.fx's own `>= 0x9000` gate only matters to a user who sets UPLIFT_USE_LAUNCHPAD by hand; set that gate back to
 // `>= 0xa000` together with this switch.
 inline constexpr bool LAUNCHPAD_ON_D3D9 = true;
+
+// Lumenite (owner, 2026-10-08): LumeniteFX's Kernel computes a 1/8-resolution optical flow (Kernel::tFlow, current -> previous in UV) and a confidence
+// (Kernel::tConfidence) once per frame for every effect that redeclares them. Uplift.fx, compiled with UPLIFT_USE_LUMENITE, upsamples them into UPLIFT_MV
+// exactly where it writes Launchpad's, so every path that reads UPLIFT_MV takes them as they are. Only Lumenite's own technique, Kernel, makes them: an
+// effect that merely imports its textures does not count. Off on Direct3D 9: Uplift.fx's Lumenite pass is compiled from Direct3D 10 on only (its nine-cell
+// edge-aware upsample is not checked on shader model 3), so the Lumenite choice is greyed there with LUMENITE_D3D9_REASON.
+inline constexpr bool LUMENITE_ON_D3D9 = false;
+inline constexpr char LUMENITE_TECHNIQUE[] = "Lumenite_Kernel";
+inline constexpr std::string_view LUMENITE_D3D9_REASON = "Lumenite's vectors are not used on Direct3D 9";
+
+// Which source Uplift.fx compiles into UPLIFT_MV (UPLIFT_USE_LAUNCHPAD or UPLIFT_USE_LUMENITE, one LaunchPadLink each): never both. `launchpad_on` and
+// `lumenite_on`: the technique that makes them is enabled (MartysMods_Launchpad, Lumenite_Kernel) where Uplift can use it. Auto takes Launchpad when both
+// are on (the owner's default), else Lumenite; an explicit choice takes only its own; DLSS and None take neither. Pure.
+struct UpliftMvSources {
+  bool launchpad = false;
+  bool lumenite = false;
+};
+[[nodiscard]] UpliftMvSources ChooseUpliftMvSources(ui::MotionVectorSource setting, bool launchpad_on, bool lumenite_on);
+// MotionVectors can use UPLIFT_MV at all (Auto, Launchpad, Lumenite): only then is it copied for NR (a 32 MiB copy at 4K otherwise). Pure.
+[[nodiscard]] bool MotionUsesUpliftMv(ui::MotionVectorSource setting);
 
 // What the link reads at a present.
 struct LaunchPadLinkFrame {
@@ -51,6 +73,8 @@ class LaunchPadLink {
 // reshade_reloaded_effects is left holding freed memory. Uplift keeps none (it looks every handle up again each frame); the line says so in the log, in
 // both halves, at the moment it happens.
 [[nodiscard]] std::string LaunchPadLinkLine(bool value);
+// The same for UPLIFT_USE_LUMENITE: "Lumenite link: UPLIFT_USE_LUMENITE = 1; ...".
+[[nodiscard]] std::string LumeniteLinkLine(bool value);
 
 // 1.0.1 (test phase, review I-4): the UPLIFT_USE_LAUNCHPAD that Uplift.fx compiles with. ReShade takes the effect scope's definition first, then the
 // preset's, then the global one. `effect_value` is the effect scope's (get_preprocessor_definition_for_effect on "Uplift.fx", which reads that scope only),

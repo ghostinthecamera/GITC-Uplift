@@ -159,6 +159,21 @@ Bands MakeBands(float detail_radius, uint32_t height, uint32_t levels) {
   };
 }
 
+FacesParameters MakeFacesParameters(float lighting_scale, const FacesTuning& tuning, uint32_t height, uint32_t levels) {
+  return {.low_level = MakeBands(lighting_scale, height, levels).low_level,
+          .mask_level = MakeBands(tuning.softness, height, levels).low_level,
+          // Fix round 2 (3): unlike the other bands, down to level 0 (the combine's own per-pixel weights), so the row's low end is finer, not a floor.
+          .edge_level = std::clamp(std::log2(2.f * std::max(tuning.edge_falloff / 100.f * static_cast<float>(height), 0.5f)), 0.f, static_cast<float>(levels)),
+          .dead_zone = tuning.threshold * FACES_PERCENT,
+          .full_weight = std::max(tuning.full, tuning.threshold + FACES_MIN_SPAN) * FACES_PERCENT,
+          .coverage_gain = tuning.strength,
+          .density = std::max(tuning.density, FACES_MIN_DENSITY),
+          .speck_radius = std::min(tuning.speck_size, FACES_MAX_SPECK_RADIUS),
+          .fill = tuning.fill_skin,
+          .fill_level = MakeBands(tuning.fill_radius, height, levels).low_level,
+          .fill_tolerance = std::max(tuning.fill_tolerance, FACES_MIN_FILL_TOLERANCE)};
+}
+
 float StabilizeRate(float frame_seconds, float stabilize_ms) {
   const float seconds = std::clamp(frame_seconds, 0.001f, 0.1f);
   return 1.f - std::exp(-seconds / (stabilize_ms / 1000.f));

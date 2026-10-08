@@ -9,6 +9,7 @@ namespace uplift::vk {
 // Plan 13 (key decision e): the device functions native NR work needs (VkHost's barrier, NrCompletion's semaphore and events, and, in later
 // batches, the colour pipeline's images, buffers, shaders and pipelines), resolved through the loader's vkGetDeviceProcAddr: the game's own chain,
 // so ReShade's layer sits in front of the ones it intercepts and the rest go straight to the driver. The same list serves the add-on and the smokes.
+// Plan 19: and native NR at Present's own command buffers (vk::CommandRing), its copies and blits, and its submissions to the effect queue.
 #define UPLIFT_VK_NR_FUNCTIONS(X)  \
   X(vkCreateImage)                 \
   X(vkDestroyImage)                \
@@ -42,7 +43,22 @@ namespace uplift::vk {
   X(vkGetEventStatus)              \
   X(vkResetEvent)                  \
   X(vkCreateSemaphore)             \
-  X(vkDestroySemaphore)
+  X(vkDestroySemaphore)            \
+  X(vkCreateCommandPool)           \
+  X(vkDestroyCommandPool)          \
+  X(vkResetCommandPool)            \
+  X(vkAllocateCommandBuffers)      \
+  X(vkBeginCommandBuffer)          \
+  X(vkEndCommandBuffer)            \
+  X(vkCmdCopyImage)                \
+  X(vkCmdBlitImage)                \
+  X(vkCmdClearColorImage)          \
+  X(vkCreateFence)                 \
+  X(vkDestroyFence)                \
+  X(vkGetFenceStatus)              \
+  X(vkResetFences)                 \
+  X(vkWaitForFences)               \
+  X(vkQueueSubmit)
 
 // Core 1.2 functions whose KHR alias is the fallback (a device that enabled the extension, not 1.2), and the one extension function: NGX's own
 // requirement (VK_KHR_push_descriptor), so a device without it cannot run native NR at all.

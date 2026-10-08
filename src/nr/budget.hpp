@@ -58,6 +58,7 @@ class Budget {
   // capacity buffer that create-time stats omit (spike E6).
   void Calibrate(Size size, uint64_t measured_feature_bytes);
   [[nodiscard]] uint64_t StatsOvercountBytes() const { return config_.stats_overcount_bytes; }
+  [[nodiscard]] uint64_t FirstUseBytes() const { return config_.first_use_bytes; }  // what Fit charges while the first use is pending
   // Call at 1 Hz while NR is active.
   [[nodiscard]] YieldAction Sample(const MemoryInfo& info, uint32_t active_passes);
   // Clears the yield streak and the resume hold. Session::Load calls this on

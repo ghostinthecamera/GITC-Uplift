@@ -19,6 +19,7 @@
 #include "bridge/bridge_sequence.hpp"
 #include "bridge/d3d12_side.hpp"
 #include "nr/types.hpp"
+#include "sources/present_motion_ring.hpp"
 
 namespace uplift::bridge {
 
@@ -272,8 +273,11 @@ class D3D11Bridge {
   std::optional<ShareFailure> dlss_motion_failure_;
   std::optional<ShareFailure> dlss_exposure_failure_;
   std::optional<ShareFailure> dlss_swap_failure_;
-  // Plan 18 (design §4): DLSS's vectors for the Present path, four shared slots by the frame they were copied for (as Plan 14's Vulkan copies).
-  static constexpr size_t RING_SLOTS = 4u;
+  // Plan 18 (design §4): DLSS's vectors for the Present path, shared slots by the frame they were copied for (as Plan 14's Vulkan copies). Flicker fix
+  // (2026-10-08): four slots, grown to eight once a copy is skipped for a slot the private queue still reads (fix round 1, M6: each new slot is made at its
+  // first copy), and a present without its own binds the newest at most PRESENT_MOTION_MAX_AGE frames older (present_motion_ring.hpp).
+  static constexpr size_t RING_SLOTS = sources::PRESENT_MOTION_SLOTS;  // room for the grown ring
+  size_t ring_slots_ = sources::PRESENT_MOTION_MIN_SLOTS;              // the slots in use
   struct RingSlot {
     Shared shared;        // fix round 1 (M-4): the vectors' whole size, so a dynamic render size never remakes it inside the evaluate
     nr::Rect region;      // the copied region, at (0, 0)

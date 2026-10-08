@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "nr/log.hpp"
+#include "sources/look_plan.hpp"
 
 namespace uplift::sources {
 namespace {
@@ -94,12 +95,12 @@ bool NrPipeline::Initialize(std::string* error) {
 uint64_t NrPipeline::HeldBytes() const {
   const uint64_t copies =
       (motion_copies_.textures[0]
-           ? static_cast<uint64_t>(MOTION_COPY_SLOTS) * motion_copies_.size.Pixels() * MOTION_BYTES_PER_PIXEL
+           ? static_cast<uint64_t>(motion_copies_.slots) * motion_copies_.size.Pixels() * MOTION_BYTES_PER_PIXEL
            : 0u);
   const uint64_t launchpad = (launchpad_motion_.texture ? launchpad_motion_.size.Pixels() * MOTION_BYTES_PER_PIXEL : 0u);
   const uint64_t ring = (dlss_present_motion_.texture ? dlss_present_motion_.size.Pixels() * MOTION_BYTES_PER_PIXEL : 0u);  // Plan 18 (fix round 1)
   return (intermediates_.model_a ? intermediates_.bytes : 0u) + copies + launchpad + ring + look_.bytes + mask_.bytes
-         + (exposure_.state ? STATE_BYTES : 0u);
+         + (exposure_.state ? STATE_BYTES : 0u) + faces_.bytes;
 }
 
 bool NrPipeline::SupportsUavTarget(DXGI_FORMAT format) const {
@@ -110,6 +111,7 @@ bool NrPipeline::SupportsUavTarget(DXGI_FORMAT format) const {
 void NrPipeline::ReleaseIntermediates() {
   RetireSet();
   RetireLook();
+  RetireFaces();
   RetireMotionCopies();
   RetireLaunchpadMotion();
   RetireDlssPresentMotion();
@@ -125,6 +127,21 @@ void NrPipeline::RetireSet() {
     timeline_.ReleaseAfter(intermediates_.last_use, [retired = intermediates_] {});
   }
   intermediates_ = {};
+}
+
+bool NrPipeline::MakeMotionCopies(size_t first, size_t end, nr::Size size) {
+  bool made = true;
+  for (size_t index = first; index < end; ++index) {
+    motion_copies_.textures[index] = CreateTexture(size, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, COMPUTE_READ,
+                                                   L"Uplift DLSS motion copy");
+    made = made && static_cast<bool>(motion_copies_.textures[index]);
+  }
+  if (!made) {
+    for (size_t index = first; index < end; ++index) {
+      motion_copies_.textures[index].Reset();  // never used: none was recorded into yet
+    }
+  }
+  return made;
 }
 
 void NrPipeline::RetireMotionCopies() {
@@ -156,6 +173,80 @@ void NrPipeline::RetireLook() {
     timeline_.ReleaseAfter(look_.last_use, [retired = look_] {});
   }
   look_ = {};
+}
+
+void NrPipeline::RetireFaces() {
+  if (!faces_.twin) return;
+  if (!timeline_.IsComplete(faces_.last_use)) {
+    timeline_.ReleaseAfter(faces_.last_use, [retired = faces_] {});
+  }
+  faces_ = {};
+}
+
+bool NrPipeline::EnsureFaces(nr::Size canvas) {
+  if (faces_.twin && faces_.size == canvas) return true;
+  RetireFaces();
+  const look::Atlas layout = look::MakeAtlas(canvas);
+  constexpr D3D12_RESOURCE_FLAGS UAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  FaceSurfaces created = {
+      .twin = CreateTexture(canvas, DXGI_FORMAT_R16G16B16A16_FLOAT, UAV, COMPUTE_READ, L"Uplift Keep faces twin"),
+      .detail = CreateTexture(canvas, DXGI_FORMAT_R16G16B16A16_FLOAT, UAV, COMPUTE_READ, L"Uplift Keep faces detail"),
+      .atlas = CreateTexture(layout.size, DXGI_FORMAT_R16G16B16A16_FLOAT, UAV, COMPUTE_READ, L"Uplift Keep faces pyramid"),
+      .fill = CreateTexture(layout.size, DXGI_FORMAT_R16G16B16A16_FLOAT, UAV, COMPUTE_READ, L"Uplift Keep faces fill pyramid"),
+      .layout = layout,
+      .size = canvas,
+      .bytes = FaceSurfaceBytes(canvas),
+  };
+  if (!created.twin || !created.detail || !created.atlas || !created.fill) {
+    if (!allocation_failure_logged_) {
+      nr::Logf(nr::LogLevel::ERR, "could not allocate the {}x{} Keep faces surfaces", canvas.width, canvas.height);
+      allocation_failure_logged_ = true;
+    }
+    return false;  // `created` was never used by the GPU: freed here
+  }
+  allocation_failure_logged_ = false;
+  faces_ = std::move(created);
+  return true;
+}
+
+void NrPipeline::RecordFaces(ID3D12GraphicsCommandList* list, color::FacesPass pass) {
+  ID3D12Resource* const atlas = faces_.atlas.Get();
+  pass.atlas = atlas;
+  pass.detail = faces_.detail.Get();
+  pass.fill = faces_.fill.Get();
+  pass.layout = faces_.layout;
+  pass.parameters = look::MakeFacesParameters(config_.keep_faces.lighting_scale, config_.keep_faces.tuning, intermediates_.plan.image.height, faces_.layout.levels);
+  faces_.last_use = slot_marks_[resolve_slot_];
+  const bool fill = (pass.mask == nullptr && pass.parameters.fill);  // round 5: pass 1's pyramid writes the fill's too
+  Transition(list, atlas, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  if (fill) {
+    Transition(list, pass.fill, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  }
+  color_.RecordFacesPyramid(list, resolve_slot_, pass);
+  Transition(list, atlas, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  if (fill) {
+    Transition(list, pass.fill, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  }
+  if (pass.parameters.speck_radius != 0u) {
+    // Fix round 4: the difference despiked before the combine rewrites `changed` (and pass 1's twin) in place.
+    Transition(list, pass.detail, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    color_.RecordFacesDespike(list, resolve_slot_, pass);
+    Transition(list, pass.detail, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  }
+  Transition(list, pass.changed, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  if (pass.mask == nullptr) {
+    Transition(list, pass.reference, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);  // pass 1: the twin's output becomes the face mask
+  }
+  color_.RecordFacesCombine(list, resolve_slot_, pass);
+  Transition(list, pass.changed, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  if (pass.mask == nullptr) {
+    Transition(list, pass.reference, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  }
+}
+
+void NrPipeline::CombineFaces(ID3D12GraphicsCommandList* list, ID3D12Resource* lighting, ID3D12Resource* faces) {
+  RecordFaces(list, {.changed = lighting, .reference = faces});
+  faces_ran_ = true;
 }
 
 void NrPipeline::RetireMask() {
@@ -462,14 +553,19 @@ ID3D12Resource* NrPipeline::PrepareMaskCopy(const D3D12_RESOURCE_DESC* mask) {
 
 void NrPipeline::ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) {
   if (index == 0u || index > LATER_PASSES || !color_.SupportsUavLoads()) return;
-  const PassStrengths& strengths = config_.later_strengths[index - 1u];
-  if (strengths == PassStrengths{}) return;
-  Transition(list, returned, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  color_.RecordResolve(list, resolve_slot_,
-                       {.given = given, .returned = returned, .size = intermediates_.plan.canvas,
-                        .transfer_strength = strengths.transfer, .color_strength = strengths.color,
-                        .swapped = (given != intermediates_.model_a.Get())});
-  Transition(list, returned, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  const bool swapped = (given != intermediates_.model_a.Get());
+  if (const PassStrengths& strengths = config_.later_strengths[index - 1u]; strengths != PassStrengths{}) {
+    Transition(list, returned, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    color_.RecordResolve(list, resolve_slot_,
+                         {.given = given, .returned = returned, .size = intermediates_.plan.canvas,
+                          .transfer_strength = strengths.transfer, .color_strength = strengths.color,
+                          .swapped = swapped});
+    Transition(list, returned, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  }
+  if (faces_ran_) {
+    // Keep faces (design "Passes"): inside pass 1's face mask only this pass's broad change is kept.
+    RecordFaces(list, {.changed = returned, .reference = given, .mask = faces_.twin.Get(), .swapped = swapped});
+  }
 }
 
 NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
@@ -558,6 +654,21 @@ nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_
   inputs.later_passes = config_.later_controls;
   inputs.resolver = this;
   resolve_slot_ = slot;
+  // Keep faces (2026-10-08): pass 1's twin, with its surfaces made before the fit like the set's. Off, unsupported, or paused by the Session (fix round 1,
+  // I3), they go; a frame whose surfaces cannot be made only goes without the twin (M4).
+  faces_ran_ = false;
+  if (config_.keep_faces.enabled && KeepFacesSupported()) {
+    inputs.faces = {.wanted = true, .controls = FaceTwinControls(controls, config_.keep_faces.protection),
+                    .surface_bytes = FaceSurfaceBytes(intermediates_.plan.canvas)};
+    if (session_.FacesPaused()) {
+      RetireFaces();
+    } else if (EnsureFaces(intermediates_.plan.canvas)) {
+      inputs.faces.output = faces_.twin.Get();
+      faces_.last_use = slot_marks_[slot];  // fix round 1 (C1): the Session may evaluate the twin into it even when no recombination follows
+    }
+  } else {
+    RetireFaces();
+  }
   const uint64_t held = HeldBytes();  // allocated before the fit: charged as the chain's surfaces and credited as held
   const nr::EvaluateResult evaluated = session_.Evaluate(
       list,
@@ -566,6 +677,12 @@ nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_
       inputs, controls);
   if (evaluated.output != nullptr) {
     intermediates_.reset_pending = false;  // Plan 3: only a frame that ran NR pays off the owed reset
+  }
+  if (evaluated.output != nullptr && faces_ran_ && config_.keep_faces.show_mask) {
+    // Show the face mask: the mask tinted into NR's result, which the change field and the decode then carry to the image.
+    Transition(list, evaluated.output, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    color_.RecordFacesShow(list, slot, evaluated.output, faces_.twin.Get(), intermediates_.plan.canvas);
+    Transition(list, evaluated.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   }
   return evaluated;
 }
@@ -645,11 +762,16 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   const ExposureChoice exposure = ChooseExposure(target.encoding, nullptr, 1.f);
   ID3D12Resource* const source_copy = intermediates_.source_copy.Get();
   // Amendment 7, deepened by I-2: the copy of the game's motion vectors made for this very frame, when
-  // there is one, from one of four slots the frame it was made for selects, modulo four.
+  // there is one, from the slot the frame it was made for selects (PresentMotionSlotOf).
   nr::FrameInputs inputs = {.ui_correction = config_.present_ui_correction, .reset_hint = reset_hint};
   MotionSource motion_source = MotionSource::NONE;
-  const size_t copy = frame % MOTION_COPY_SLOTS;
-  if (motion_copies_.textures[copy] && motion_copies_.frames[copy] == frame) {
+  std::array<uint64_t, MOTION_COPY_SLOTS> copy_frames = {};
+  for (size_t index = 0u; index < MOTION_COPY_SLOTS; ++index) {
+    copy_frames[index] = (motion_copies_.textures[index] ? motion_copies_.frames[index] : 0u);
+  }
+  if (const PresentMotionPick pick = PickPresentMotion(copy_frames, frame); pick.slot) {
+    // This frame's copy, else (flicker fix) the newest at most PRESENT_MOTION_MAX_AGE frames older: still DLSS's vectors, so no provider switch.
+    const size_t copy = *pick.slot;
     inputs.motion = {.resource = motion_copies_.textures[copy].Get()};  // full subrect, scale (1, 1)
     motion_copies_.last_use[copy] = slot_marks_[slot];
     motion_source = MotionSource::PRESENT_COPY;
@@ -1020,21 +1142,27 @@ bool NrPipeline::RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::Bou
   }
   // The present that closes the current frame binds the copy made for it (RecordPresent).
   const uint64_t frame = timeline_.CurrentFrame() + 1u;
-  const size_t index = frame % MOTION_COPY_SLOTS;
   const uint32_t slot = next_slot_;
-  if (!timeline_.IsComplete(slot_marks_[slot]) || !timeline_.IsComplete(motion_copies_.last_use[index])) return false;
+  if (!timeline_.IsComplete(slot_marks_[slot])) return false;
   const nr::Size size = {region.width, region.height};
   if (motion_copies_.size != size || !motion_copies_.textures[0]) {
     RetireMotionCopies();
-    for (Texture& texture : motion_copies_.textures) {
-      texture = CreateTexture(size, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, COMPUTE_READ,
-                              L"Uplift DLSS motion copy");
-    }
-    if (!std::ranges::all_of(motion_copies_.textures, [](const Texture& texture) { return static_cast<bool>(texture); })) {
+    if (!MakeMotionCopies(0u, PRESENT_MOTION_MIN_SLOTS, size)) {
       motion_copies_ = {};
       return false;
     }
     motion_copies_.size = size;
+  }
+  const size_t index = PresentMotionSlotOf(frame, motion_copies_.slots);
+  if (!timeline_.IsComplete(motion_copies_.last_use[index])) {
+    // Fix round 1 (M6): the GPU runs too far behind for four slots (a lag past 3): the ring grows once, its new copies made beside the first ones (none of those is freed or
+    // moved). This frame goes without its copy; its present binds an older one.
+    if (PresentMotionGrows(motion_copies_.slots, PresentMotionWrite::SLOT_BUSY) && MakeMotionCopies(motion_copies_.slots, MOTION_COPY_SLOTS, size)) {
+      nr::Logf(nr::LogLevel::INFO, "Direct3D 12: the GPU runs too far behind for four slots: DLSS's motion copies for Present grow from {} to {} slots",
+               motion_copies_.slots, MOTION_COPY_SLOTS);
+      motion_copies_.slots = MOTION_COPY_SLOTS;
+    }
+    return false;
   }
   CommitSlot(slot);
   ID3D12Resource* const target = motion_copies_.textures[index].Get();

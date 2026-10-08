@@ -25,6 +25,7 @@
 #include "addon/helper_front.hpp"
 #include "addon/launchpad_link.hpp"
 #include "addon/live_facts.hpp"
+#include "addon/motion_link_host.hpp"
 #include "addon/log_bridge.hpp"
 #include "addon/nr_claim.hpp"
 #include "addon/removal_latch.hpp"
@@ -60,9 +61,6 @@ namespace api = reshade::api;
 
 constexpr std::string_view UPLIFT_VERSION = UPLIFT_VERSION_TEXT;  // project(VERSION) in CMakeLists.txt
 constexpr char MARKER_TECHNIQUE[] = "Uplift";
-constexpr char LAUNCHPAD_TECHNIQUE[] = "MartysMods_Launchpad";
-constexpr char UPLIFT_FX_EFFECT_NAME[] = "Uplift.fx";
-constexpr char UPLIFT_USE_LAUNCHPAD_DEFINE[] = "UPLIFT_USE_LAUNCHPAD";
 constexpr char ADDON_FILE[] = "gitc-uplift.addon32";
 
 struct DeviceEntry32 {
@@ -72,9 +70,9 @@ struct DeviceEntry32 {
   api::effect_runtime* runtime = nullptr;
   api::resource back_buffer = {0u};
   api::effect_technique marker = {0u};
-  // Final review I-1 of Plan 6: the automatic UPLIFT_USE_LAUNCHPAD link (Direct3D 11 only), for `link_runtime`.
-  addon::LaunchPadLink launchpad_link;
-  addon::LaunchpadReadiness launchpad_readiness;  // Plan 14: Setup's "ready", held through the effect reload the link itself causes
+  // Final review I-1 of Plan 6: the automatic UPLIFT_USE_LAUNCHPAD link and (2026-10-08) UPLIFT_USE_LUMENITE's, with Setup's "ready" for each, for
+  // `link_runtime`.
+  addon::MotionLinks motion_links;
   api::effect_runtime* link_runtime = nullptr;
   std::string link_preset_path;
   addon::HelperDevice helper;  // Plan 10: the clients and everything else about NR in the helper
@@ -161,8 +159,7 @@ void OnDestroyEffectRuntime(api::effect_runtime* runtime) {
       }
       // ReShade reinitialises a runtime in place (a resize), under the same pointer: its link starts afresh.
       if (entry.link_runtime == runtime) {
-        entry.launchpad_link.Reset();
-        entry.launchpad_readiness.Reset();
+        entry.motion_links.Reset();
         entry.link_runtime = nullptr;
         entry.link_preset_path.clear();
       }
@@ -179,7 +176,7 @@ void OnSetCurrentPresetPath(api::effect_runtime* runtime, const char* path) {
     for ([[maybe_unused]] auto& [device, entry] : g_state->devices) {
       if (entry.link_runtime == runtime && path != nullptr && entry.link_preset_path != path) {
         entry.link_preset_path = path;
-        entry.launchpad_link.Reset();
+        entry.motion_links.ResetLinks();
       }
     }
   }
@@ -300,58 +297,28 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     entry.back_buffer = swapchain->get_current_back_buffer();
     entry.marker = {0u};
     entry.helper.launchpad_ready = false;  // Plan 14: Setup's Launchpad option, set below while the effects are loaded
+    entry.helper.lumenite_ready = false;   // 2026-10-08: and its Lumenite option
     if (entry.runtime != nullptr && entry.runtime->get_effects_state()) {
       // find_technique returns 0 while effects are still loading: NR then runs before effects.
       const api::effect_technique technique = entry.runtime->find_technique(nullptr, MARKER_TECHNIQUE);
       if (technique.handle != 0u && entry.runtime->get_technique_state(technique)) {
         entry.marker = technique;
       }
-      if (!d3d9 || addon::LAUNCHPAD_ON_D3D9) {
-        // Uplift links itself to LaunchPad (Direct3D 10 and newer; Plan 10: Direct3D 9 too, while addon::LAUNCHPAD_ON_D3D9 holds, the one
-        // switch in launchpad_link.hpp), so the user never edits a preprocessor definition by hand.
-        // LaunchPadLink decides when (final review I-1 of Plan 6); see addon.cpp for the reasoning.
+      const bool launchpad_here = (!d3d9 || addon::LAUNCHPAD_ON_D3D9);
+      const bool lumenite_here = (!d3d9 || addon::LUMENITE_ON_D3D9);
+      if (launchpad_here || lumenite_here) {
+        // Uplift links itself to LaunchPad (Direct3D 10 and newer; Plan 10: Direct3D 9 too, while addon::LAUNCHPAD_ON_D3D9 holds) and (2026-10-08) to
+        // Lumenite's Kernel (Direct3D 10 and newer), so the user never edits a preprocessor definition by hand. See addon.cpp and motion_link_host.hpp.
         if (entry.link_runtime != entry.runtime) {
-          entry.launchpad_link.Reset();
-          entry.launchpad_readiness.Reset();
+          entry.motion_links.Reset();
           entry.link_runtime = entry.runtime;
           entry.link_preset_path.clear();
         }
-        bool link_ready = false;
-        if (technique.handle != 0u) {
-          char effect_name[MAX_PATH] = {};
-          entry.runtime->get_technique_effect_name(technique, effect_name);
-          link_ready = (std::string_view(effect_name) == UPLIFT_FX_EFFECT_NAME);
-        }
-        char link_value[32] = {};
-        const bool link_defined =
-            entry.runtime->get_preprocessor_definition_for_effect(UPLIFT_FX_EFFECT_NAME, UPLIFT_USE_LAUNCHPAD_DEFINE, link_value);
-        // 1.0.1 (review I-4): without one at the effect scope Uplift.fx compiles with the preset's or the global definition (a null effect name reads those).
-        char outer_value[32] = {};
-        const bool outer_defined = (!link_defined && entry.runtime->get_preprocessor_definition(UPLIFT_USE_LAUNCHPAD_DEFINE, outer_value));
-        if (!link_ready && link_defined) {
-          entry.runtime->enumerate_techniques(nullptr, [&link_ready](api::effect_runtime*, api::effect_technique) {
-            link_ready = true;  // not loading
-          });
-        }
-        const api::effect_technique launchpad_technique = entry.runtime->find_technique(nullptr, LAUNCHPAD_TECHNIQUE);
-        // ReShade lists no technique while it reloads Uplift.fx, which choosing Launchpad does: the last ready value holds through that (LaunchpadReadiness).
-        entry.helper.launchpad_ready = entry.launchpad_readiness.Update(
-            (technique.handle != 0u && launchpad_technique.handle != 0u),
-            (entry.marker.handle != 0u && launchpad_technique.handle != 0u && entry.runtime->get_technique_state(launchpad_technique)), now);
-        const std::optional<bool> link = entry.launchpad_link.Update({
-            .ready = link_ready,
-            .wanted = (launchpad_technique.handle != 0u && entry.runtime->get_technique_state(launchpad_technique)
-                       && (settings.motion_vectors == ui::MotionVectorSource::AUTO
-                           || settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD)),
-            // 1.0.1: a set that changes nothing is skipped.
-            .current = addon::LaunchPadDefinition((link_defined ? std::optional<std::string_view>(link_value) : std::nullopt),
-                                                  (outer_defined ? std::optional<std::string_view>(outer_value) : std::nullopt)),
-        });
-        if (link) {
-          nr::Log(nr::LogLevel::INFO, addon::LaunchPadLinkLine(*link));
-          entry.runtime->set_preprocessor_definition_for_effect(UPLIFT_FX_EFFECT_NAME, UPLIFT_USE_LAUNCHPAD_DEFINE,
-                                                                (*link ? "1" : "0"));
-        }
+        const addon::MotionLinkStep step = addon::UpdateMotionLinks(&entry.motion_links, entry.runtime, technique, (entry.marker.handle != 0u),
+                                                                    settings.motion_vectors, launchpad_here, lumenite_here, now);
+        entry.helper.launchpad_ready = step.launchpad_ready;
+        entry.helper.lumenite_ready = step.lumenite_ready;
+        entry.helper.uplift_mv_lumenite = step.uplift_mv_lumenite;
       }
     }
     if (entry.helper.rejected) return;
@@ -441,12 +408,15 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     if (overlay_api != api::device_api::d3d9) {
       view.d3d9ex_unavailable = "Only for 32-bit Direct3D 9 games";
     }
+    // Plan 19: NR on a 32-bit Vulkan game always runs in Uplift's helper process (NGX's native Vulkan NR is 64-bit only; T5 names the route).
+    view.vulkan_nr_unavailable = (overlay_api == api::device_api::vulkan ? "A 32-bit game: NR always runs in Uplift's helper process" : "Only for Vulkan games");
     const bool supported = (overlay_api == api::device_api::d3d9 || overlay_api == api::device_api::d3d10 || overlay_api == api::device_api::d3d11
                             || overlay_api == api::device_api::d3d12 || overlay_api == api::device_api::vulkan || overlay_api == api::device_api::opengl);
     if (supported) {
       state.front->Overlay(runtime->get_device(), helper_device, overlay_api, state.settings, &view, &state.overlay, now);  // finishes Setup too
     } else {
       view.card = ui::BuildStatusCard({.device_problem = "Uplift supports 32-bit Direct3D 9, 10, 11 and 12, Vulkan and OpenGL games only"});
+      view.keep_faces_unavailable = std::string(ui::KeepFacesUnavailable({.nr_runs = false}));
       ui::SetupFacts facts;
       addon::FillPreference(&facts, state.settings, false);
       facts.dlss_unavailable = view.dlss_unavailable;
@@ -532,14 +502,14 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   // as the 9Ex marker does; CPU-ordered NR is the fallback then.
   const std::optional<addon::ModuleVersion> reshade_version = addon::ReadModuleVersion(reshade_module);
   const std::filesystem::path vk_marker = addon::LatchMarkerPath(addon::UpliftStateDirectory(), game_exe_path).replace_extension(L".vkdevice-pending");
-  if (!vk::DeviceHook::CheckMarker(vk_marker)) {
+  if (vk::DeviceHook::CheckMarker(vk_marker) != vk::DeviceHook::MarkerVerdict::NONE) {  // the 32-bit half never adds NGX's: one tier
     g_state->settings.adjust_vulkan_devices = false;
     ui::SaveSettings(g_state->settings, &g_state->config);
     g_state->front->SettingsChanged(g_state->settings);
     warnings.push_back("Vulkan device adjustment turned off (AdjustVulkanDevices = 0): the last start with it did not reach its first frame");
   }
   const bool reshade_vulkan_events = (reshade_version && *reshade_version >= addon::MIN_RESHADE_VULKAN_EVENTS);
-  vk::DeviceHook::Configure(g_state->settings.adjust_vulkan_devices, reshade_vulkan_events, vk_marker);
+  vk::DeviceHook::Configure(g_state->settings.adjust_vulkan_devices, false, false, false, reshade_vulkan_events, vk_marker);  // NGX's additions are 64-bit only
   // Final review, minor 2: only for a ReShade older than 6.8. 6.8 raises create_device(vulkan) first in every vkCreateInstance, so OnCreateDevice's
   // install is always in time, and installing here too would only bring the detour, the pins and MinHook (new in this add-on) into plain 32-bit
   // Direct3D 9, 10 and 11 games that happen to have vulkan-1.dll loaded.

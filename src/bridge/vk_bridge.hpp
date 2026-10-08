@@ -86,7 +86,8 @@ class VkBridge {
   void NoteSecondQueue() { second_queue_ = true; }
   [[nodiscard]] bool GpuOrdered() const { return gpu_ordered_; }
   [[nodiscard]] uint64_t SharedBytes() const;
-  [[nodiscard]] std::string StatusLine() const;
+  // Plan 19: `route_reason`, why NR at Present runs here rather than natively on the game's device, follows "a private Direct3D 12 device: ".
+  [[nodiscard]] std::string StatusLine(std::string_view route_reason = {}) const;
   [[nodiscard]] bool Stopped() const { return !latch_.empty(); }
   [[nodiscard]] std::string_view Latch() const { return latch_; }  // Plan 17: the card's reason; empty while it runs
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
@@ -147,6 +148,10 @@ class VkBridge {
   Shared color_;
   Shared mask_;
   Shared motion_;
+  // Flicker fix: recordings in a row that came without motion. The share is kept through a short gap (MOTION_KEEP_PRESENTS) instead of being retired and
+  // made again at every missed frame; it goes once the motion stops for longer, as before.
+  uint32_t motion_gap_presents_ = 0u;
+  static constexpr uint32_t MOTION_KEEP_PRESENTS = 30u;
   bool mask_fresh_ = false;  // CopyMask wrote mask_ since the last recording
   std::optional<ShareFailure> color_failure_;
   std::optional<ShareFailure> mask_failure_;

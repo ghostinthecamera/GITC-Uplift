@@ -59,7 +59,7 @@ struct FrameConfig {
   bool present_with_frame_gen = false;  // spec §11: the Present path runs with frame generation only when set
   bool motion_vectors = true;           // MotionVectors is not None, or must act like it is (ui-review.md Q1(a):
                                          // MotionVectors == Launchpad while placement is inside the game's frame)
-  bool motion_vectors_want_launchpad = false;  // ui-review.md Q1(a): MotionVectors == Launchpad, for the motion
+  bool motion_vectors_want_launchpad = false;  // ui-review.md Q1(a): MotionVectors == Launchpad (or Lumenite), for the motion
                                                 // readout's "Launchpad feeds the presented image only" reason
   float motion_scale_x = 1.f;           // MotionScaleX/Y
   float motion_scale_y = 1.f;
@@ -74,7 +74,8 @@ struct FrameConfig {
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
   bool pre_upscale = false;  // v2 design §3.9: NR before DLSS-SR upscales
   sources::LookConfig look;  // Plan 5: the look stage, the colour fixes, Mask, UI correction, passes 2..10
-  bool launchpad_motion = true;       // Plan 6: MotionVectors Auto or LaunchPad: the Present path may bind UPLIFT_MV
+  bool launchpad_motion = true;       // Plan 6: MotionVectors Auto, Launchpad or (2026-10-08) Lumenite: the Present path may bind UPLIFT_MV
+  bool uplift_mv_lumenite = false;    // 2026-10-08: UPLIFT_MV holds Lumenite's vectors (Uplift.fx compiled with UPLIFT_USE_LUMENITE): the readouts name it
   bool present_motion_copy = false;   // Plan 14 (design §2.2): a native Vulkan context copies DLSS's motion vectors for the Present path (set by the add-on only)
   bool vulkan = false;                // Plan 14 (batch 2 review, minor 2): a Vulkan device's bridged context, whose motion line must not name Direct3D 12 or Launchpad (set by the add-on only)
   uint64_t upscaler_creates = 0u;     // Plan 15: the game's DLSS creates on this device so far (FeatureRegistry::UpscalerCreates; set by the add-on only)
@@ -85,9 +86,20 @@ struct FrameConfig {
   // 1.1.6: ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN is set: the game's camera images, DLSS's among them, are upside down against the back buffer
   // (Unity, for one), so DLSS's motion vectors are flipped for the Present path (set by the add-on only).
   bool dlss_motion_upside_down = false;
+  // Plan 19: NR at Present runs natively on this Vulkan device, in the native context (the route the add-on chose; set by the add-on only).
+  bool vk_native_present = false;
+  // Plan 19: the game created no DLSS on this Vulkan device, so the native context's NR load initialises an NGX core already loaded in the process for the
+  // device too (SnippetConfig::initialize_core_for_device; set by the add-on only).
+  bool vk_initialize_core = false;
   uint32_t pass_view_limit = 0u;      // Plan 6 (D6): the Defaults view's passes on the live features; 0 = all
   uint64_t settings_generation = 0u;  // Plan 6 (D11): changes with every saved settings change; restarts the retry backoff
 };
+
+// 2026-10-08: the name of what UPLIFT_MV holds, and why none arrived, for the motion readouts.
+inline std::string_view UpliftMvName(const FrameConfig& config) { return (config.uplift_mv_lumenite ? "Lumenite" : "Launchpad"); }
+inline std::string_view NoUpliftMvReason(const FrameConfig& config) {
+  return (config.uplift_mv_lumenite ? "no UPLIFT_MV this frame (Uplift.fx below Lumenite's Kernel)" : "no UPLIFT_MV this frame (Uplift.fx below Launchpad)");
+}
 
 struct TargetInfo {
   ID3D12Resource* resource = nullptr;  // the primary swap chain's current back buffer
@@ -122,6 +134,7 @@ struct ContextStatus {
   sources::MotionSource motion_source = sources::MotionSource::NONE;  // the latest recording's
   std::string motion_line;  // "Motion vectors: DLSS (the game's own, scale 1 x 1)"; never empty
   std::string ui_correction_note;  // Plan 5 (D7): why UI correction does nothing on this placement
+  bool keep_faces_supported = true;  // Keep faces (2026-10-08): the pipeline can recombine the extra run (ui::KeepFacesFacts::gpu_ready)
   // Plan 6 (D1): the pieces of `message`, for the status card.
   std::string blocked;
   bool claimed_elsewhere = false;
@@ -303,6 +316,10 @@ class DeviceContext {
   }
 
   [[nodiscard]] ContextStatus Status() const;
+  // T5: NGX could not create NR's feature on this context's device (the Session's message, with NGX's result), until a load works again; empty otherwise.
+  // A Vulkan bridge's context: the Vulkan route chain goes on to the helper. T6 (M-4): never for an out-of-memory result, which the Session's own retry
+  // and budget handle (another device would most likely be short of memory too).
+  [[nodiscard]] std::string CreateFailure() const;
   [[nodiscard]] ID3D12CommandQueue* PresentQueue() const { return present_queue_; }
   // Minor (fix round 2): the one bool NoteLatchIfTripped needs on every present, evaluate and
   // teardown, without building a full Status() (string formatting included) just to read it.

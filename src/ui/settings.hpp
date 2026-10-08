@@ -41,10 +41,11 @@ enum class ResolutionMode : uint32_t {
 };
 
 enum class MotionVectorSource : uint32_t {
-  AUTO = 0u,
+  AUTO = 0u,  // DLSS's vectors, else Launchpad's, else Lumenite's (the last two at Present only), else none
   DLSS = 1u,
-  LAUNCHPAD = 2u,  // Plan 6; treated as NONE until then
+  LAUNCHPAD = 2u,  // Plan 6
   NONE = 3u,
+  LUMENITE = 4u,  // 2026-10-08: LumeniteFX's Kernel flow, through Uplift.fx's UPLIFT_MV as Launchpad's (stored last, shown after Launchpad)
 };
 
 // ui-review.md §4.1: the Source toggle the overlay draws, in pipeline order. `SourcePickOf`/`SetSourcePick`
@@ -61,6 +62,7 @@ enum class MotionPick : uint32_t {
   OFF,
   DLSS,
   LAUNCHPAD,
+  LUMENITE,  // 2026-10-08
 };
 
 // The stored index is NVSDK_NGX_PerfQuality_Value + 1; GAME keeps the game's own mode.
@@ -123,6 +125,15 @@ enum class ForeignNrMode : uint32_t {
   OBSERVE = 1u,  // keep running, and log it
 };
 
+// Plan 19 (the owner's decision): where NR at Present runs on a 64-bit Vulkan game. Native runs on the game's own VkDevice when it can (else Direct3D 12,
+// and the card says why); Direct3D 12 always uses the private Direct3D 12 device (the bridge). T5 (2026-10-08): the chain goes on to Uplift's helper
+// process when Direct3D 12 cannot run either; Helper starts there. NGX's device additions are made only when this is Native at AddonInit.
+enum class VulkanNrMode : uint32_t {
+  NATIVE = 0u,
+  DIRECT3D_12 = 1u,
+  HELPER = 2u,
+};
+
 // Plan 5 (v2 design §5, key decision 8): Auto binds an effect's UPLIFT_MASK, when one runs.
 enum class MaskMode : uint32_t {
   AUTO = 0u,
@@ -176,6 +187,13 @@ struct Settings {
   float local_tone = 1.f;
   bool auto_mask = true;
   float skin_structure = 1.f;  // SKIN_SAME_AS_STRUCTURE or 0-1
+  // Keep faces (2026-10-08): pass 1 runs a second time with the Character mask on and Skin structure at `face_protection`; on characters only the part
+  // of NR's change broader than `lighting_scale` (% of the image height) is kept from the user's own run.
+  bool keep_faces = false;
+  float face_protection = 0.f;
+  float lighting_scale = 2.5f;
+  bool show_face_mask = false;  // Advanced: tints what Keep faces protects, for tuning
+  look::FacesTuning face_tuning;  // fix round 1 addendum: the mask's Advanced rows (FaceMaskThreshold ... FaceEdgeFalloff)
   uint32_t pass_count = 1u;
   color::Encoding encoding = color::Encoding::AUTO;
   float diffuse_white_nits = 0.f;  // 0 = automatic for the encoding, else 48-500
@@ -203,6 +221,7 @@ struct Settings {
   StateRestore state_restore = StateRestore::FULL;
   NgxHooksMode ngx_hooks = NgxHooksMode::AUTO;
   ForeignNrMode foreign_nr = ForeignNrMode::YIELD;
+  VulkanNrMode vulkan_nr = VulkanNrMode::NATIVE;  // Plan 19
   ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
   float resolution_scale = 100.f;                         // Custom: % of the output, 25-100
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
@@ -226,6 +245,8 @@ struct Settings {
   bool auto_retry = true;                    // Plan 6 (D11): retry a failed session on the backoff
   bool use_d3d9ex = false;                   // Plan 9 (design §2.9): ask ReShade for a Direct3D 9Ex device (Direct3D 9 games, 32- and 64-bit)
   bool adjust_vulkan_devices = true;         // Plan 11 (Vulkan design §2.3): hidden; 0 keeps the vkCreateDevice hook recording devices but adding nothing
+  bool adjust_vulkan_devices_for_ngx = true;  // Plan 19 T1b: hidden; 0 keeps NGX's extensions and bufferDeviceAddress off the game's device (64-bit)
+  bool vulkan_native_nr = true;  // Plan 19 T6 (I-4): hidden; 0 keeps NR at Present off the native route (Uplift's latch after a crash or a device loss)
   uint32_t diagnostic_remove_device = 0u;    // Plan 17: hidden, diagnostic only (DiagnosticRemoveDevice); 0 = off
 
   friend bool operator==(const Settings&, const Settings&) = default;

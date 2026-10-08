@@ -14,7 +14,7 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // 5 (Plan 12): Api::OPENGL, Api::D3D12, Handles::color_bytes (and FENCED's mask_bytes and motion_bytes), Reply::to12_completed and to11_completed;
 // 6 (Plan 14): Status::placement, motion_source, dlss_motion_gap, launchpad_gap, resolution_applied, upsampling and the work, canvas and frame sizes
 // (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read; 7 (Plan 17): Status::exposure_line (+256 bytes).
-inline constexpr uint32_t PROTOCOL_VERSION = 7u;
+inline constexpr uint32_t PROTOCOL_VERSION = 8u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t PATH_BYTES = 1024u;
 inline constexpr size_t BUILD_ID_BYTES = 64u;
@@ -85,6 +85,8 @@ struct Frame {
   uint32_t unreported_point = 0u;  // addon::TriggerPoint the add-on reached last frame without a RUN
   uint32_t retry_now = 0u;
   uint32_t mask_running = 0u;  // an enabled technique writes UPLIFT_MASK (helper_front.hpp's MaskEffectRunning); Plan 10: every transport
+  uint32_t drain_now = 0u;     // transitions (2026-10-08): NR's owner moved away from the helper: with nr_allowed 0, it drains with no grace (was reserved)
+  uint32_t uplift_mv_lumenite = 0u;  // 2026-10-08 (protocol 8): UPLIFT_MV holds Lumenite's vectors, not Launchpad's (the readouts name it)
   uint32_t reserved = 0u;
   Target target;
 };
@@ -230,7 +232,7 @@ struct ControlBlock {
   LogRing log;
 };
 
-inline constexpr size_t CONTROL_BLOCK_BYTES = 56136u;  // protocol 6's 55880 + 256 (Status::exposure_line); the x64 and x86 builds both assert it
+inline constexpr size_t CONTROL_BLOCK_BYTES = 56144u;  // protocol 6's 55880 + 256 (Status::exposure_line), + 8 in protocol 8 (Frame::uplift_mv_lumenite); both builds assert it
 static_assert(sizeof(ControlBlock) == CONTROL_BLOCK_BYTES, "the add-on and the helper disagree on the control block");
 static_assert(offsetof(ControlBlock, request) % 8u == 0u && offsetof(ControlBlock, reply) % 8u == 0u);
 // Both processes use the Interlocked*64 functions on it, which need 8 alignment on x86 too.

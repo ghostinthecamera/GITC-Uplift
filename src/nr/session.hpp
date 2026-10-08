@@ -41,6 +41,21 @@ class PassResolver {
  public:
   virtual ~PassResolver() = default;
   virtual void ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) = 0;
+  // Keep faces (2026-10-08): after pass 1 and its twin, records their recombination: `lighting` (pass 1's raw output, the user's settings) is rewritten
+  // with pass 1's result, and `faces` (the twin's output) with the face mask the later passes' ResolvePass reads. Both RGBA16F in NON_PIXEL_SHADER_RESOURCE
+  // on entry and on return.
+  virtual void CombineFaces(ID3D12GraphicsCommandList* list, ID3D12Resource* lighting, ID3D12Resource* faces) = 0;
+};
+
+// Keep faces (2026-10-08): pass 1's twin, a second NR feature evaluated on pass 1's input with its own temporal history. `wanted` false: Keep faces is
+// off, and no twin feature lives (one that did is released). Fix round 1: while Session::FacesPaused() the caller frees its surfaces and passes no `output`.
+struct FaceTwin {
+  bool wanted = false;
+  // RGBA16F at the canvas, NON_PIXEL_SHADER_RESOURCE on entry and on return. Null while `wanted`: no twin this frame (paused, or its surfaces could not be
+  // made), and a live twin feature stays.
+  ID3D12Resource* output = nullptr;
+  Controls controls;            // pass 1's, with the Character mask on and Skin structure at Face protection
+  uint64_t surface_bytes = 0u;  // the caller's surfaces for the twin, made or not: part of what its resume after a pause needs
 };
 
 // Optional per-frame inputs forwarded to every pass.
@@ -59,6 +74,7 @@ struct FrameInputs {
   // Plan 5 (v2 design §3.10): pass n ≥ 2's own controls at [n - 2]; nullopt, or a pass past the end, follows `controls`.
   std::span<const std::optional<Controls>> later_passes;
   PassResolver* resolver = nullptr;  // records each later pass's own strengths; null: none
+  FaceTwin faces;                    // Keep faces; needs `resolver`, which recombines the twin's output with pass 1's
 };
 
 struct EvaluateResult {
@@ -112,12 +128,26 @@ class Session {
   void Abandon();
 
   [[nodiscard]] SessionState State() const { return state_; }
+  // Keep faces fix round 1 (I3): the twin is paused (the budget yielded it, a fit had no room for it, or it failed): its caller frees the twin's surfaces.
+  [[nodiscard]] bool FacesPaused() const { return faces_pause_ != FacesPause::NONE; }
+  // Keep faces fix round 2 (4): whether Keep faces is on, every frame, before any Evaluate (which a skipped frame never reaches). Off ends a pause and the
+  // failure latch at once, so a quick off and on while NR skips frames starts the twin afresh.
+  void NoteFacesWanted(bool wanted);
   [[nodiscard]] SessionStatus Status() const;
 
  private:
   struct Retired {
     Mark mark;
     std::unique_ptr<FeatureInterface> feature;
+  };
+  // Keep faces: why the twin does not run although it is wanted. BUDGET and UNFIT come back after the resume hold; the failures stay until Keep faces is
+  // turned off and on again, or NR loads again from OFF.
+  enum class FacesPause : uint8_t {
+    NONE,
+    BUDGET,           // the game needed VRAM: the twin yielded before any pass
+    UNFIT,            // a fit had no room for the twin beside the passes
+    FAILED_CREATE,    // its creation failed
+    FAILED_EVALUATE,  // its evaluate failed
   };
 
   // Shared by SetEnabled's OFF->LOADING path, the FinishTeardown retry and
@@ -135,8 +165,10 @@ class Session {
   void Drop(std::string_view message);
   void SampleBudget(std::chrono::steady_clock::time_point now);
   void TryResume(std::chrono::steady_clock::time_point now);
-  bool EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& chain, std::string_view* reason);
+  // `faces_wanted`: Keep faces asks for pass 1's twin this frame; `faces_ready`: its surfaces exist this frame.
+  bool EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& chain, bool faces_wanted, bool faces_ready, std::string_view* reason);
   void RetireFeature(size_t index);
+  void RetireFaceFeature();
   void RetireAllFeatures();
   void ReleaseDueRetired();
   [[nodiscard]] uint64_t LiveFeatureBytes() const;
@@ -154,6 +186,8 @@ class Session {
   bool device_lost_ = false;  // OnDeviceLost (or Plan 15's Abandon) ran: permanently inert, never loads again
   bool reset_pending_ = true;
   bool first_use_paid_ = false;  // the one-time per-device NR cost has been paid
+  bool create_failed_ = false;  // Plan 19: SessionStatus::create_failed
+  uint32_t create_result_ = 0u;  // Plan 19 T6: SessionStatus::create_result
   uint32_t pass_count_ = 1u;
   uint32_t passes_limit_ = 10u;
   uint32_t preset_ = 1u;
@@ -170,11 +204,19 @@ class Session {
   Size last_size_;
   Size resume_size_;  // latest non-empty frame size passed to Evaluate in any state
   uint64_t resume_surface_bytes_ = 0u;  // the latest chain's surfaces, for TryResume
-  std::chrono::milliseconds grace_elapsed_{0};
+  // Grace-regression round: summed at the clock's own resolution. Whole milliseconds per tick lost every sub-millisecond frame, so a game running faster
+  // than 1000 fps (a native Vulkan game with NR off) never left GRACE.
+  std::chrono::steady_clock::duration grace_elapsed_{0};
   std::optional<std::chrono::steady_clock::time_point> last_tick_;
   std::optional<std::chrono::steady_clock::time_point> last_sample_;
   std::optional<std::chrono::steady_clock::time_point> small_since_;
   std::vector<std::unique_ptr<FeatureInterface>> features_;
+  // Keep faces (2026-10-08): pass 1's twin, live only while Keep faces asks for it. Under the budget it yields before any pass drops.
+  std::unique_ptr<FeatureInterface> face_feature_;
+  FacesPause faces_pause_ = FacesPause::NONE;
+  bool faces_requested_ = false;       // the latest Evaluate wanted the twin (Status's faces_note)
+  uint64_t faces_surface_bytes_ = 0u;  // the latest FaceTwin::surface_bytes
+  bool faces_evaluated_ = false;       // the latest successful Evaluate ran the twin
   std::vector<Retired> retired_;
   std::optional<uint64_t> runtime_bytes_;
   std::string message_;

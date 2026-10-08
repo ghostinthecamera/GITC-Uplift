@@ -185,6 +185,27 @@ struct ResolveStrengthsPass {
   bool swapped = false;                // B -> A rather than A -> B: its own descriptor table
 };
 
+// Keep faces (2026-10-08): shaders/faces_cs.hlsl's passes, which recombine pass 1 and its twin, then keep only the broad part of each later pass's change
+// inside the face mask (the shader's header has the maths). Every resource RGBA16F at the canvas (the atlas: look::MakeAtlas of it).
+struct FacesPass {
+  // Pass 1's raw output (the user's settings), or a later pass's: read by RecordFacesPyramid (NON_PIXEL_SHADER_RESOURCE), rewritten in place by
+  // RecordFacesCombine (UNORDERED_ACCESS).
+  ID3D12Resource* changed = nullptr;
+  // The twin's output (pass 1: NON_PIXEL_SHADER_RESOURCE for the pyramid, UNORDERED_ACCESS for the combine, which rewrites it with the face mask), or a later
+  // pass's input (NON_PIXEL_SHADER_RESOURCE).
+  ID3D12Resource* reference = nullptr;
+  ID3D12Resource* mask = nullptr;   // a later pass: pass 1's face mask (the twin's image), NON_PIXEL_SHADER_RESOURCE; null: pass 1
+  ID3D12Resource* atlas = nullptr;  // UNORDERED_ACCESS for RecordFacesPyramid, NON_PIXEL_SHADER_RESOURCE for RecordFacesCombine
+  // Fix round 4: the despiked difference: UNORDERED_ACCESS for RecordFacesDespike, NON_PIXEL_SHADER_RESOURCE for RecordFacesCombine (with a
+  // parameters.speck_radius).
+  ID3D12Resource* detail = nullptr;
+  // Round 5: the fill's atlas (pass 1 with parameters.fill): UNORDERED_ACCESS for RecordFacesPyramid, NON_PIXEL_SHADER_RESOURCE for RecordFacesCombine.
+  ID3D12Resource* fill = nullptr;
+  look::Atlas layout;
+  look::FacesParameters parameters;
+  bool swapped = false;  // a later pass from B into A: its own descriptor tables (RecordResolve's rule)
+};
+
 // The D3D12 side of spec §7: one root signature, the encode and compute-decode pipelines, one
 // decode graphics pipeline per render-target format (back buffers have no UAV), and a
 // shader-visible descriptor ring. The caller uses one slot per recording and reuses it only after
@@ -193,7 +214,7 @@ class ColorPipeline {
  public:
   // Fix round 2, Important 1: sized for Timeline's own AGED_SUBMISSION_TIME (250 ms) at up to 240 fps
   // on a submit-only thread (a common engine shape, e.g. Unreal Engine 5's D3D12 RHI), so the ring
-  // never starves NR into "descriptors busy" there: 128 slots of 11 tables of 7 descriptors, about 350 KB.
+  // never starves NR into "descriptors busy" there: 128 slots of 21 tables of 7 descriptors (Keep faces' ten included), about 600 KB.
   static constexpr uint32_t RING_SLOTS = 128u;
 
   ColorPipeline() = default;
@@ -219,12 +240,22 @@ class ColorPipeline {
   bool RecordDetail(ID3D12GraphicsCommandList* list, uint32_t slot, const StabilizePass& pass);
   bool RecordShape(ID3D12GraphicsCommandList* list, uint32_t slot, const ShapePass& pass);
   bool RecordResolve(ID3D12GraphicsCommandList* list, uint32_t slot, const ResolveStrengthsPass& pass);
+  // Keep faces: the pyramid of the pass's weighted change (one dispatch per level, a UAV barrier on the atlas between them), the combine, and Show the face
+  // mask's tint of the mask (NON_PIXEL_SHADER_RESOURCE) into the target (UNORDERED_ACCESS) at `size`. Each: false (logged, nothing recorded) when slot is out
+  // of range. They need typed UAV loads (SupportsUavLoads).
+  bool RecordFacesPyramid(ID3D12GraphicsCommandList* list, uint32_t slot, const FacesPass& pass);
+  bool RecordFacesCombine(ID3D12GraphicsCommandList* list, uint32_t slot, const FacesPass& pass);
+  // Fix round 4: the pass's difference (`changed` and `reference` both NON_PIXEL_SHADER_RESOURCE) despiked into `detail` (UNORDERED_ACCESS).
+  bool RecordFacesDespike(ID3D12GraphicsCommandList* list, uint32_t slot, const FacesPass& pass);
+  bool RecordFacesShow(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D12Resource* target, ID3D12Resource* mask, nr::Size size);
   // Plan 2 final review M5: whether RecordDecode can write `target_view_format`.
   [[nodiscard]] bool HasDecodePipeline(DXGI_FORMAT target_view_format) const;
   // Whether the device can store to `format` through a typed UAV (cached per format).
   [[nodiscard]] bool SupportsTypedUavStore(DXGI_FORMAT format) const;
   // Key decision 12: typed UAV loads of RGBA16F, R16F and RGBA32F, which the Plan 5 passes need.
   [[nodiscard]] bool SupportsUavLoads() const { return uav_loads_; }
+  // Keep faces fix round 1 (C3): its pipeline was built (Initialize does not fail without it).
+  [[nodiscard]] bool FacesReady() const { return faces_pipeline_ != nullptr; }
 
  private:
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE CpuDescriptor(uint32_t index) const;
@@ -255,6 +286,7 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12PipelineState> stabilize_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> shape_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> resolve_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> faces_pipeline_;  // Keep faces
   // A null entry records a format whose pipeline could not be built, so it is not retried every frame.
   std::unordered_map<DXGI_FORMAT, Microsoft::WRL::ComPtr<ID3D12PipelineState>> decode_pipelines_;
   mutable std::unordered_map<DXGI_FORMAT, bool> typed_uav_store_;

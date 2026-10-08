@@ -302,7 +302,7 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
     log_figures("NR running:", *figures);
   }
   const addon::TargetInfo target = transport_->Describe(frame.target, settings_.enabled, running, &reply->handles);
-  const addon::FrameConfig config = addon::BuildFrameConfig(
+  addon::FrameConfig config = addon::BuildFrameConfig(
       {
           .settings = &settings_,
           .drag = ipc::DragFrom(frame.drag_bits),
@@ -310,8 +310,12 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
           .ngx_frame_generation = 0u,
           .nr_allowed = (frame.nr_allowed != 0u),
           .settings_generation = settings_generation_,
+          .uplift_mv_lumenite = (frame.uplift_mv_lumenite != 0u),  // 2026-10-08: the readouts name UPLIFT_MV's source
       },
       &coalescer_, now);
+  if (frame.drain_now != 0u) {
+    config.session.grace = std::chrono::milliseconds(0);  // transitions: NR's owner moved away from the helper: it drains at once, never after the grace
+  }
   context_->BeginFrame(side_->Queue(), config, target, frame.marker_expected != 0u, now);
   if (context_->DeviceLost()) {
     if (const std::optional<addon::NrHeartbeat::Figures> figures = nr_heartbeat_.Stop(now)) {

@@ -44,6 +44,38 @@ constexpr std::array<VkFormat, 4> READABLE_MOTION_FORMATS = {VK_FORMAT_R16G16_SF
                                                              VK_FORMAT_R32G32B32A32_SFLOAT};
 // The Present motion copies (Plan 14): RG16F, written by the motion copy, handed over sampled, and read by the bridge's copy-in.
 constexpr VkImageUsageFlags PRESENT_MOTION_USAGE = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+// Plan 19: native Present's staging image is only copied and blitted; SAMPLED is there because an image view (CreateNrImage makes one) needs a view usage.
+constexpr VkImageUsageFlags PRESENT_STAGING_USAGE = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+constexpr VkImageSubresourceRange COLOR_RANGE = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+constexpr VkImageSubresourceLayers COLOR_LAYERS = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+
+// Plan 19: the bytes per pixel of a swap-chain copy format (vk::VkFormatOf(vk::SharedFormatOf(...))'s display formats); 0 for any other.
+uint64_t PresentBytesPerPixel(VkFormat format) {
+  switch (format) {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return 4u;
+    case VK_FORMAT_R16G16B16A16_SFLOAT:      return 8u;
+    case VK_FORMAT_R32G32B32A32_SFLOAT:      return 16u;
+    default:                                 return 0u;
+  }
+}
+
+// Plan 19: one layout transition of a whole single-mip, single-layer colour image.
+VkImageMemoryBarrier ImageTransition(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout, VkAccessFlags source_access,
+                                     VkAccessFlags destination_access) {
+  return {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = source_access,
+      .dstAccessMask = destination_access,
+      .oldLayout = old_layout,
+      .newLayout = new_layout,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = image,
+      .subresourceRange = COLOR_RANGE,
+  };
+}
 
 // Plan 14: the formats the mask copy takes (color::DescribeMaskFormat's view formats, as Vulkan names them: the decode samples them raw), and their bytes.
 struct MaskFormat {
@@ -93,7 +125,8 @@ VkNrPipeline::VkNrPipeline(const vk::NrFunctions& functions, VkDevice device, co
 VkNrPipeline::~VkNrPipeline() {
   for (vk::NrImage* image : {&intermediates_.a, &intermediates_.b, &intermediates_.zero_motion, &intermediates_.canvas_motion, &intermediates_.private_color,
                              &intermediates_.change, &look_.change, &look_.basis, &look_.gauss, &look_.peaks, &look_.history[0], &look_.history[1],
-                             &look_.detail_history[0], &look_.detail_history[1], &look_.state, &mask_.image, &exposure_.state}) {
+                             &look_.detail_history[0], &look_.detail_history[1], &look_.state, &mask_.image, &exposure_.state, &present_.staging,
+                             &present_.color, &present_.launchpad, &present_.stand_in, &faces_.twin, &faces_.detail, &faces_.atlas, &faces_.fill}) {
     vk::DestroyNrImage(functions_, device_, image);
   }
   for (PresentMotionSlot& slot : present_motion_) {
@@ -163,6 +196,86 @@ void VkNrPipeline::RetireLook() {
     timeline_.ReleaseAfter(look_.last_use, std::move(destroy));
   }
   look_ = {};
+}
+
+void VkNrPipeline::RetireFaces() {
+  if (faces_.twin.image == VK_NULL_HANDLE) return;
+  auto destroy = [functions = functions_, device = device_, images = std::array<vk::NrImage, 4>{faces_.twin, faces_.detail, faces_.atlas, faces_.fill}]() mutable {
+    for (vk::NrImage& image : images) {
+      vk::DestroyNrImage(functions, device, &image);
+    }
+  };
+  if (timeline_.IsComplete(faces_.last_use)) {
+    destroy();
+  } else {
+    timeline_.ReleaseAfter(faces_.last_use, std::move(destroy));
+  }
+  faces_ = {};
+}
+
+bool VkNrPipeline::EnsureFaces(nr::Size canvas) {
+  if (faces_.twin.image != VK_NULL_HANDLE && faces_.size == canvas) return true;
+  RetireFaces();
+  FaceSurfaces created = {.layout = look::MakeAtlas(canvas), .size = canvas};
+  created.bytes = FaceSurfaceBytes(canvas);
+  // The twin is an NGX output like A and B (read_write); the atlas is the faces pass's own, like the look's.
+  const bool made =
+      vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, canvas.width, canvas.height, MODEL_USAGE, true, &created.twin)
+      && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, canvas.width, canvas.height, LOOK_USAGE, false, &created.detail)
+      && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, created.layout.size.width, created.layout.size.height, LOOK_USAGE,
+                           false, &created.atlas)
+      && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, created.layout.size.width, created.layout.size.height, LOOK_USAGE,
+                           false, &created.fill);
+  if (!made) {
+    for (vk::NrImage* image : {&created.twin, &created.detail, &created.atlas, &created.fill}) {  // never used by the GPU: freed here
+      vk::DestroyNrImage(functions_, device_, image);
+    }
+    if (!allocation_failure_logged_) {
+      nr::Logf(nr::LogLevel::ERR, "could not allocate the {}x{} Keep faces surfaces (Vulkan)", canvas.width, canvas.height);
+      allocation_failure_logged_ = true;
+    }
+    return false;
+  }
+  allocation_failure_logged_ = false;
+  faces_ = std::move(created);
+  return true;
+}
+
+void VkNrPipeline::PrepareFaces(nr::Size canvas, const nr::Controls& controls, nr::FrameInputs* frame_inputs) {
+  faces_ran_ = false;
+  // Fix round 1: paused by the Session, its surfaces go (I3); a frame whose surfaces cannot be made only goes without the twin (M4).
+  if (config_.keep_faces.enabled && look_storage_ && color_.FacesReady()) {
+    frame_inputs->faces = {.wanted = true, .controls = FaceTwinControls(controls, config_.keep_faces.protection), .surface_bytes = FaceSurfaceBytes(canvas)};
+    if (session_.FacesPaused()) {
+      RetireFaces();
+    } else if (EnsureFaces(canvas)) {
+      frame_inputs->faces.output = nr::AsResource(&faces_.twin.ngx);
+    }
+  } else {
+    RetireFaces();
+  }
+}
+
+void VkNrPipeline::RecordFaces(VkCommandBuffer buffer, color::VkFacesPass pass) {
+  pass.atlas = faces_.atlas.view;
+  pass.detail = faces_.detail.view;
+  pass.fill = faces_.fill.view;
+  pass.layout = faces_.layout;
+  pass.parameters = look::MakeFacesParameters(config_.keep_faces.lighting_scale, config_.keep_faces.tuning, intermediates_.image.height, faces_.layout.levels);
+  faces_.last_use = slot_marks_[resolve_slot_];
+  Barrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);  // what wrote the pass's images (NGX, or the pass's own strengths) is visible to the pyramid
+  color_.RecordFacesPyramid(buffer, resolve_slot_, pass);
+  if (pass.parameters.speck_radius != 0u) {
+    color_.RecordFacesDespike(buffer, resolve_slot_, pass);  // fix round 4: before the combine rewrites `changed` (and pass 1's twin) in place
+  }
+  Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  color_.RecordFacesCombine(buffer, resolve_slot_, pass);  // the Session's next transition, or the barrier after NR, makes its writes visible
+}
+
+void VkNrPipeline::CombineFaces(ID3D12GraphicsCommandList* list, ID3D12Resource* lighting, ID3D12Resource* faces) {
+  RecordFaces(nr::VkListOf(list), {.changed = nr::VkResourceOf(lighting)->Resource.ImageViewInfo.ImageView,
+                                   .reference = nr::VkResourceOf(faces)->Resource.ImageViewInfo.ImageView});
+  faces_ran_ = true;
 }
 
 void VkNrPipeline::RetireMask() {
@@ -275,11 +388,29 @@ void VkNrPipeline::PollExposureChecks() {
 void VkNrPipeline::ReleaseIntermediates() {
   ReleaseNrSurfaces();
   RetireMask();
+  RetirePresent();
+}
+
+void VkNrPipeline::RetirePresent() {
+  // Plan 19: used in Uplift's own command buffers on ReShade's queue alone, which no completion token covers (final review C-1's rule).
+  RetireReshadeImage(present_.staging, present_.last_use);
+  RetireReshadeImage(present_.color, present_.last_use);
+  RetireReshadeImage(present_.stand_in, present_.last_use);
+  RetirePresentLaunchpad();
+  present_ = {};
+}
+
+void VkNrPipeline::RetirePresentLaunchpad() {
+  RetireReshadeImage(present_.launchpad, present_.launchpad_last_use);
+  present_.launchpad = {};
+  present_.launchpad_size = {};
+  present_.launchpad_bytes = 0u;
 }
 
 void VkNrPipeline::ReleaseNrSurfaces() {
   RetireSet();
   RetireLook();
+  RetireFaces();
   RetireExposure();
 }
 
@@ -521,16 +652,22 @@ bool VkNrPipeline::RecordMeter(VkCommandBuffer buffer, uint32_t slot, color::VkM
 
 void VkNrPipeline::ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) {
   if (index == 0u || index > LATER_PASSES || !look_storage_) return;
-  const PassStrengths& strengths = config_.later_strengths[index - 1u];
-  if (strengths == PassStrengths{}) return;
-  // The Session's transition after NR's pass made its writes visible to this dispatch (VkHost::Transition is a global barrier), and the one before the next
-  // pass, or RecordAfterNr's barrier, makes this one's visible to what reads it.
-  color_.RecordResolve(nr::VkListOf(list), resolve_slot_, index,
-                       {.given = nr::VkResourceOf(given)->Resource.ImageViewInfo.ImageView,
-                        .returned = nr::VkResourceOf(returned)->Resource.ImageViewInfo.ImageView,
-                        .size = intermediates_.size,
-                        .transfer_strength = strengths.transfer,
-                        .color_strength = strengths.color});
+  const VkImageView given_view = nr::VkResourceOf(given)->Resource.ImageViewInfo.ImageView;
+  const VkImageView returned_view = nr::VkResourceOf(returned)->Resource.ImageViewInfo.ImageView;
+  if (const PassStrengths& strengths = config_.later_strengths[index - 1u]; strengths != PassStrengths{}) {
+    // The Session's transition after NR's pass made its writes visible to this dispatch (VkHost::Transition is a global barrier), and the one before the next
+    // pass, or RecordAfterNr's barrier, makes this one's visible to what reads it.
+    color_.RecordResolve(nr::VkListOf(list), resolve_slot_, index,
+                         {.given = given_view,
+                          .returned = returned_view,
+                          .size = intermediates_.size,
+                          .transfer_strength = strengths.transfer,
+                          .color_strength = strengths.color});
+  }
+  if (faces_ran_) {
+    // Keep faces (design "Passes"): inside pass 1's face mask only this pass's broad change is kept.
+    RecordFaces(nr::VkListOf(list), {.changed = returned_view, .reference = given_view, .mask = faces_.twin.view});
+  }
 }
 
 color::VkStabilizeMotion VkNrPipeline::StabilizeMotionOf(const nr::FrameInputs& inputs) {
@@ -697,10 +834,20 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
     return {.reason = "out of memory"};
   }
   const bool look_ready = EnsureLook(LookPlanFor(work.image, reduced));  // before the fit, like the set
+  nr::FrameInputs frame_inputs = inputs;
+  PrepareFaces(work.canvas, controls, &frame_inputs);  // Keep faces: its surfaces before the fit and the opening, like the look's
   // The GPU reads this slot's constants, and the intermediates, until this recording completes: the current frame, and the token the caller issued before
   // recording (Plan 3's rule: every mark taken from here on includes it).
   slot_marks_[slot] = timeline_.MarkNow();
   intermediates_.last_use = slot_marks_[slot];
+  // Fix round 1 (C1): OpenRecording below transitions the look's and Keep faces' images whenever they exist, whether or not NR then runs and uses them, so
+  // this recording is their last use too.
+  if (look_.plan != LookPlan{}) {
+    look_.last_use = slot_marks_[slot];
+  }
+  if (faces_.twin.image != VK_NULL_HANDLE) {
+    faces_.last_use = slot_marks_[slot];
+  }
   next_slot_ = (slot + 1u) % color::VkColorPipeline::RING_SLOTS;
 
   const float input_scale = NoteEncoding(target);
@@ -709,7 +856,8 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
 
   // 1. The opening barrier: DLSS's write of the Output (and whatever else the game recorded before) is visible to Uplift's reads and writes, and A, B, the
   // change field, the zero motion and the look's surfaces move UNDEFINED -> GENERAL (their contents are rewritten in full every recording).
-  const std::array<const vk::NrImage*, 4> opened = {&intermediates_.a, &intermediates_.b, &intermediates_.zero_motion, &intermediates_.change};
+  const std::array<const vk::NrImage*, 8> opened = {&intermediates_.a, &intermediates_.b, &intermediates_.zero_motion, &intermediates_.change, &faces_.twin,
+                                                    &faces_.detail, &faces_.atlas, &faces_.fill};
   OpenRecording(buffer, opened, true);
 
   // 2. Encode the output region, in place, into A at the work image with the game's (or the meter's) exposure; MotionVectors = None clears the zero motion in
@@ -756,7 +904,6 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
     // motion vectors are (R79); the next recording starts it from UNDEFINED again.
     HandToNgx(buffer, intermediates_.zero_motion);
   }
-  nr::FrameInputs frame_inputs = inputs;
   if (!game_motion) {
     frame_inputs.motion = {.resource = nr::AsResource(&intermediates_.zero_motion.ngx)};
     frame_inputs.motion_scale_x = 1.f;
@@ -780,6 +927,11 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
   // 4. Plan 14: the change field and the look stage (Direct3D 12's RecordAfterNr), or NR's own output for the full-size restore. NR's writes are visible first.
   Barrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
   const VkImageView nr_output = (evaluated.output == nr::AsResource(&intermediates_.a.ngx) ? intermediates_.a.view : intermediates_.b.view);
+  if (faces_ran_ && config_.keep_faces.show_mask) {
+    // Show the face mask: the mask tinted into NR's result, which the change field and the decode then carry to the image.
+    color_.RecordFacesShow(buffer, slot, nr_output, faces_.twin.view, work.canvas);
+    Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  }
   const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, reduced, look_ready, work.upsampling, StabilizeMotionOf(inputs), frame_inputs.reset_hint);
   if (!after.ok) {
     return {.recorded = true, .reason = "encode failed", .motion_source = motion_source, .motion_scale_x = frame_inputs.motion_scale_x, .motion_scale_y = frame_inputs.motion_scale_y};
@@ -902,8 +1054,18 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
   }
   const bool reduced = (image != size);
   const bool look_ready = EnsureLook(LookPlanFor(image, reduced));  // before the fit, like the set; I-1: C stays the main set's
+  nr::FrameInputs frame_inputs = inputs;
+  PrepareFaces(canvas, controls, &frame_inputs);  // Keep faces: its surfaces before the fit and the opening, like the look's
   slot_marks_[slot] = timeline_.MarkNow();
   intermediates_.last_use = slot_marks_[slot];
+  // Fix round 1 (C1): OpenRecording below transitions the look's and Keep faces' images whenever they exist, whether or not NR then runs and uses them, so
+  // this recording is their last use too.
+  if (look_.plan != LookPlan{}) {
+    look_.last_use = slot_marks_[slot];
+  }
+  if (faces_.twin.image != VK_NULL_HANDLE) {
+    faces_.last_use = slot_marks_[slot];
+  }
   next_slot_ = (slot + 1u) % color::VkColorPipeline::RING_SLOTS;
 
   const float input_scale = NoteEncoding(color);
@@ -912,8 +1074,9 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
   const color::VkSampledView game_color = {.view = game.ImageView, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};  // the game's: only read (R79)
 
   // 1. The opening barrier; A, B, the private colour, the change field, the motion images and the look's surfaces move UNDEFINED -> GENERAL.
-  const std::array<const vk::NrImage*, 6> opened = {&intermediates_.a, &intermediates_.b, &intermediates_.private_color,
-                                                    &intermediates_.change, &intermediates_.zero_motion, &intermediates_.canvas_motion};
+  const std::array<const vk::NrImage*, 10> opened = {&intermediates_.a, &intermediates_.b, &intermediates_.private_color, &intermediates_.change,
+                                                     &intermediates_.zero_motion, &intermediates_.canvas_motion, &faces_.twin, &faces_.detail,
+                                                     &faces_.atlas, &faces_.fill};
   OpenRecording(buffer, opened, true);
 
   // 2. Encode the region straight from the game's Color, resampled to the work image and mirror-padded into the canvas; no Uplift copy of it, and no
@@ -952,7 +1115,6 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
 
   // 3. In a canvas the game's motion vectors move into canvas pixels, mirrored like the image (negating the mirrored axis), bound with the canvas as their
   // subrect and a scale of (1, 1). The motion image NGX reads is handed over in SHADER_READ_ONLY_OPTIMAL, as a game's own vectors are (R79).
-  nr::FrameInputs frame_inputs = inputs;
   if (copy_motion) {
     color_.RecordMotion(buffer, slot,
                         {.source = {.view = nr::VkResourceOf(inputs.motion.resource)->Resource.ImageViewInfo.ImageView,
@@ -995,6 +1157,10 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
   // the canvas copy), since it acts on the image, as on Direct3D 12.
   Barrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
   const VkImageView nr_output = (evaluated.output == nr::AsResource(&intermediates_.a.ngx) ? intermediates_.a.view : intermediates_.b.view);
+  if (faces_ran_ && config_.keep_faces.show_mask) {
+    color_.RecordFacesShow(buffer, slot, nr_output, faces_.twin.view, canvas);  // Show the face mask, as after DLSS
+    Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  }
   const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, reduced, look_ready, work.upsampling, StabilizeMotionOf(inputs), frame_inputs.reset_hint);
   if (!after.ok) {
     return {.recorded = true, .reason = "encode failed", .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
@@ -1028,32 +1194,35 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
   return {.recorded = true, .nr_applied = true, .passes_run = evaluated.passes_run, .reason = evaluated.reason, .from_session = from_session, .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
 }
 
-bool VkNrPipeline::RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x, float scale_y,
-                                       uint64_t frame, bool flip_y) {
+PresentMotionWrite VkNrPipeline::RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x,
+                                                     float scale_y, uint64_t frame, bool flip_y) {
   const nr::Size size = {region.width, region.height};
-  if (buffer == VK_NULL_HANDLE || motion.view == VK_NULL_HANDLE || size.Empty() || frame == 0u || !color_.PrepareMotion()) return false;
+  if (buffer == VK_NULL_HANDLE || motion.view == VK_NULL_HANDLE || size.Empty() || frame == 0u || !color_.PrepareMotion()) return PresentMotionWrite::NO_INPUT;
   const uint32_t ring_slot = next_slot_;
-  if (!timeline_.IsComplete(slot_marks_[ring_slot])) return false;
-  // A new size: all four are made again (the old ones retire at their marks). A copy that is still in use is never overwritten: the frame goes without one.
+  if (!timeline_.IsComplete(slot_marks_[ring_slot])) return PresentMotionWrite::RING_BUSY;
+  // A new size: the ring is made again at its smallest (the old slots retire at their marks). A copy that is still in use is never overwritten: the frame goes
+  // without one (its present binds an older copy: PresentMotion).
   if (present_motion_size_ != size || present_motion_[0].image.image == VK_NULL_HANDLE) {
     ReleasePresentMotion();
-    bool made = true;
-    for (PresentMotionSlot& slot : present_motion_) {
-      made = made && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16_SFLOAT, size.width, size.height, PRESENT_MOTION_USAGE, false, &slot.image);
-    }
-    if (!made) {
-      for (PresentMotionSlot& slot : present_motion_) {
-        vk::DestroyNrImage(functions_, device_, &slot.image);
-      }
-      LogAllocationFailure(size);
-      return false;
-    }
-    allocation_failure_logged_ = false;
+    if (!MakePresentMotionSlots(0u, PRESENT_MOTION_MIN_SLOTS, size)) return PresentMotionWrite::NO_INPUT;
+    present_motion_slots_ = PRESENT_MOTION_MIN_SLOTS;
     present_motion_size_ = size;
-    present_motion_bytes_ = PRESENT_MOTION_SLOTS * size.Pixels() * MOTION_BYTES_PER_PIXEL;
+    present_motion_bytes_ = present_motion_slots_ * size.Pixels() * MOTION_BYTES_PER_PIXEL;
   }
-  PresentMotionSlot& copy = present_motion_[frame % PRESENT_MOTION_SLOTS];
-  if (!timeline_.IsComplete(copy.last_use)) return false;
+  PresentMotionSlot& copy = present_motion_[PresentMotionSlotOf(frame, present_motion_slots_)];
+  if (!timeline_.IsComplete(copy.last_use)) {
+    // Fix round 1 (M6): the GPU runs too far behind for four slots (a lag past 3): the ring grows once, its new slots made beside the first ones (none of those is freed or
+    // moved, and the frame mapping change only picks other slots, each still behind its own last use). This frame goes without its copy.
+    if (PresentMotionGrows(present_motion_slots_, PresentMotionWrite::SLOT_BUSY)
+        && MakePresentMotionSlots(present_motion_slots_, PRESENT_MOTION_SLOTS, size)) {
+      nr::Logf(nr::LogLevel::INFO, "Vulkan: the GPU runs too far behind for four slots: DLSS's motion copies for Present grow from {} to {} slots ({:.1f} MiB)",
+               present_motion_slots_, PRESENT_MOTION_SLOTS,
+               static_cast<double>(PRESENT_MOTION_SLOTS * size.Pixels() * MOTION_BYTES_PER_PIXEL) / (1024.0 * 1024.0));
+      present_motion_slots_ = PRESENT_MOTION_SLOTS;
+      present_motion_bytes_ = present_motion_slots_ * size.Pixels() * MOTION_BYTES_PER_PIXEL;
+    }
+    return PresentMotionWrite::SLOT_BUSY;
+  }
   // The GPU reads this ring slot's constants until this recording completes: the current frame, and the token the caller issued before recording.
   slot_marks_[ring_slot] = timeline_.MarkNow();
   next_slot_ = (ring_slot + 1u) % color::VkColorPipeline::RING_SLOTS;
@@ -1067,19 +1236,50 @@ bool VkNrPipeline::RecordPresentMotion(VkCommandBuffer buffer, const color::VkSa
   HandToNgx(buffer, copy.image);
   copy.frame = frame;
   copy.last_use = slot_marks_[ring_slot];
-  return true;
+  return PresentMotionWrite::WRITTEN;
 }
 
-vk::NrImage VkNrPipeline::PresentMotion(uint64_t frame) {
-  PresentMotionSlot& copy = present_motion_[frame % PRESENT_MOTION_SLOTS];
-  if (frame == 0u || copy.image.image == VK_NULL_HANDLE || copy.frame != frame) return {};
-  copy.last_use = timeline_.MarkNow();  // the bridge's copy-in reads it in this frame
+std::array<uint64_t, VkNrPipeline::PRESENT_MOTION_SLOTS> VkNrPipeline::PresentMotionFrames() const {
+  std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = {};
+  for (size_t index = 0u; index < PRESENT_MOTION_SLOTS; ++index) {
+    frames[index] = (present_motion_[index].image.image != VK_NULL_HANDLE ? present_motion_[index].frame : 0u);
+  }
+  return frames;
+}
+
+vk::NrImage VkNrPipeline::PresentMotion(uint64_t frame, uint64_t* age) {
+  const std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = PresentMotionFrames();
+  const PresentMotionPick pick = PickPresentMotion(frames, frame);
+  if (!pick.slot) return {};
+  PresentMotionSlot& copy = present_motion_[*pick.slot];
+  copy.last_use = timeline_.MarkNow();  // NR or the bridge's copy-in reads it in this frame
+  if (age != nullptr) {
+    *age = pick.age;
+  }
   return copy.image;
 }
 
 bool VkNrPipeline::HasPresentMotion(uint64_t frame) const {
-  const PresentMotionSlot& copy = present_motion_[frame % PRESENT_MOTION_SLOTS];
-  return frame != 0u && copy.image.image != VK_NULL_HANDLE && copy.frame == frame;
+  const std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = PresentMotionFrames();
+  return PickPresentMotion(frames, frame).slot.has_value();
+}
+
+bool VkNrPipeline::MakePresentMotionSlots(size_t first, size_t end, nr::Size size) {
+  bool made = true;
+  for (size_t index = first; index < end; ++index) {
+    made = made && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16_SFLOAT, size.width, size.height, PRESENT_MOTION_USAGE, false,
+                                     &present_motion_[index].image);
+  }
+  if (!made) {
+    for (size_t index = first; index < end; ++index) {
+      vk::DestroyNrImage(functions_, device_, &present_motion_[index].image);  // never used: none was handed to a recording
+      present_motion_[index] = {};
+    }
+    LogAllocationFailure(size);
+    return false;
+  }
+  allocation_failure_logged_ = false;
+  return true;
 }
 
 void VkNrPipeline::ReleasePresentMotion() {
@@ -1087,8 +1287,218 @@ void VkNrPipeline::ReleasePresentMotion() {
     RetireReshadeImage(slot.image, slot.last_use);  // the bridge's copy-in reads it on ReShade's queue
   }
   present_motion_ = {};
+  present_motion_slots_ = PRESENT_MOTION_MIN_SLOTS;  // fix round 1 (M6): the next copies start small again
   present_motion_size_ = {};
   present_motion_bytes_ = 0u;
+}
+
+bool VkNrPipeline::ConvertLaunchpadMotion(VkCommandBuffer buffer, const VkPresentTarget& target, const WorkLayout& work) {
+  const nr::Rect region = {.x = 0u, .y = 0u, .width = target.launchpad_size.width, .height = target.launchpad_size.height};
+  if (target.launchpad_motion.view == VK_NULL_HANDLE || !MotionFormatReadable(target.launchpad_format) || region.width == 0u || region.height == 0u
+      || work.image.Empty() || work.canvas.Empty() || !color_.PrepareMotion()) {
+    return false;
+  }
+  const uint32_t slot = next_slot_;
+  if (!timeline_.IsComplete(slot_marks_[slot])) return false;
+  if (present_.launchpad.image == VK_NULL_HANDLE || present_.launchpad_size != work.canvas) {
+    RetirePresentLaunchpad();
+    if (!vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16_SFLOAT, work.canvas.width, work.canvas.height, MOTION_USAGE, false,
+                           &present_.launchpad)) {
+      present_.launchpad = {};
+      LogAllocationFailure(work.canvas);
+      return false;
+    }
+    present_.launchpad_size = work.canvas;
+    present_.launchpad_bytes = work.canvas.Pixels() * MOTION_BYTES_PER_PIXEL;
+  }
+  slot_marks_[slot] = timeline_.MarkNow();
+  present_.launchpad_last_use = slot_marks_[slot];
+  next_slot_ = (slot + 1u) % color::VkColorPipeline::RING_SLOTS;
+  // Its contents are rewritten in full: UNDEFINED -> GENERAL, the copy, then handed to NGX in SHADER_READ_ONLY_OPTIMAL as a game's own vectors are (R79).
+  // UPLIFT_MV holds back-buffer pixels: times MotionScale, and times image / region into the work image's pixels (Resolution below Full), as Direct3D 12's.
+  const std::array<const vk::NrImage*, 1> opened = {&present_.launchpad};
+  OpenRecording(buffer, opened, false);
+  const bool recorded = color_.RecordMotion(buffer, slot,
+                                            {.source = target.launchpad_motion,
+                                             .region = region,
+                                             .target = present_.launchpad.view,
+                                             .image = work.image,
+                                             .canvas = work.canvas,
+                                             .scale_x = target.motion_scale_x * static_cast<float>(work.image.width) / static_cast<float>(region.width),
+                                             .scale_y = target.motion_scale_y * static_cast<float>(work.image.height) / static_cast<float>(region.height)});
+  HandToNgx(buffer, present_.launchpad);
+  return recorded;
+}
+
+const NVSDK_NGX_Resource_VK* VkNrPipeline::ZeroStandIn(VkCommandBuffer buffer, nr::Size size) {
+  if (size.Empty()) return nullptr;
+  if (present_.stand_in.image == VK_NULL_HANDLE || present_.stand_in_size != size) {
+    RetireReshadeImage(present_.stand_in, present_.last_use);
+    present_.stand_in = {};
+    if (!vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16_SFLOAT, size.width, size.height,
+                           VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, false, &present_.stand_in)) {
+      present_.stand_in = {};
+      LogAllocationFailure(size);
+      return nullptr;
+    }
+    present_.stand_in_size = size;
+  }
+  // Rewritten in full at each use: UNDEFINED -> TRANSFER_DST, zeros, then SHADER_READ_ONLY_OPTIMAL as a game's own vectors are handed over (R79).
+  const VkImageMemoryBarrier to_clear =
+      ImageTransition(present_.stand_in.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0u, VK_ACCESS_TRANSFER_WRITE_BIT);
+  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &to_clear);
+  const VkClearColorValue zero = {};
+  functions_.vkCmdClearColorImage(buffer, present_.stand_in.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1u, &COLOR_RANGE);
+  const VkImageMemoryBarrier to_read = ImageTransition(present_.stand_in.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                                       VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT);
+  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &to_read);
+  return &present_.stand_in.ngx;
+}
+
+PipelineResult VkNrPipeline::RecordPresent(VkCommandBuffer buffer, const VkPresentTarget& target, const nr::Controls& controls, bool reset_hint,
+                                           const WorkLayout& layout) {
+  if (session_.State() != nr::SessionState::ACTIVE) return {.reason = "inactive"};
+  const uint64_t bytes_per_pixel = PresentBytesPerPixel(target.copy_format);
+  if (buffer == VK_NULL_HANDLE || target.image == VK_NULL_HANDLE || target.size.Empty() || bytes_per_pixel == 0u) return {.reason = "invalid input"};
+  const WorkLayout work = Resolve(layout, target.size);
+  // RecordAfterDlss's own checks, made before anything is recorded, so a frame it would skip copies nothing either.
+  if (!nr::MeetsNrFloor(target.size) || !nr::MeetsNrFloor(work.canvas)) return {.reason = "frame too small"};
+  if (controls.intensity <= 0.f) return {.reason = "intensity 0"};  // exact pass-through: the image is never touched
+  if (!color_.Prepare(VK_FORMAT_R16G16B16A16_SFLOAT)) return {.reason = "pipeline failed"};
+  const uint32_t following = (next_slot_ + 1u) % color::VkColorPipeline::RING_SLOTS;  // Launchpad's conversion may take the first
+  if (!timeline_.IsComplete(slot_marks_[next_slot_]) || !timeline_.IsComplete(slot_marks_[following])) return {.reason = "descriptors busy"};
+  if (present_.color.image == VK_NULL_HANDLE || present_.size != target.size || present_.format != target.copy_format) {
+    RetirePresent();
+    PresentSurfaces created = {.size = target.size, .format = target.copy_format,
+                               .bytes = target.size.Pixels() * (bytes_per_pixel + MODEL_BYTES_PER_PIXEL)};
+    const bool made = vk::CreateNrImage(functions_, device_, memory_, target.copy_format, target.size.width, target.size.height, PRESENT_STAGING_USAGE,
+                                        false, &created.staging)
+                      && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, target.size.width, target.size.height,
+                                           MODEL_USAGE, true, &created.color);
+    if (!made) {
+      for (vk::NrImage* image : {&created.staging, &created.color}) {
+        vk::DestroyNrImage(functions_, device_, image);
+      }
+      LogAllocationFailure(target.size);
+      return {.reason = "out of memory"};
+    }
+    allocation_failure_logged_ = false;
+    present_ = std::move(created);
+  }
+  // Both are rewritten in full every frame and used on ReShade's queue alone: the frame's signal there follows this buffer's submission.
+  present_.last_use = timeline_.MarkNow();
+  const VkImage staging = present_.staging.image;
+  const VkImage color = present_.color.image;
+  const VkExtent3D extent = {target.size.width, target.size.height, 1u};
+  const VkImageCopy copy = {.srcSubresource = COLOR_LAYERS, .dstSubresource = COLOR_LAYERS, .extent = extent};
+  const VkImageBlit blit = {
+      .srcSubresource = COLOR_LAYERS,
+      .srcOffsets = {{0, 0, 0}, {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1}},
+      .dstSubresource = COLOR_LAYERS,
+      .dstOffsets = {{0, 0, 0}, {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1}},
+  };
+
+  // 1. The copy in. A real execution and memory dependency on everything submitted earlier on this queue (the game's frame, and ReShade's effects so far,
+  // which the caller flushed): a transition from the present layout alone orders nothing. The image's bits go raw into the staging image (size-compatible
+  // formats), whose blit converts them into the RGBA16F intermediate (an sRGB-created image's stored values, never linearised: the staging format is UNORM).
+  const VkMemoryBarrier earlier_writes = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+                                          .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT};
+  const std::array<VkImageMemoryBarrier, 2> into_copy = {
+      ImageTransition(target.image, target.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+      ImageTransition(staging, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0u, VK_ACCESS_TRANSFER_WRITE_BIT),
+  };
+  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &earlier_writes, 0u, nullptr,
+                                  static_cast<uint32_t>(into_copy.size()), into_copy.data());
+  functions_.vkCmdCopyImage(buffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
+  const std::array<VkImageMemoryBarrier, 2> into_blit = {
+      ImageTransition(staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_TRANSFER_READ_BIT),
+      ImageTransition(color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0u, VK_ACCESS_TRANSFER_WRITE_BIT),
+  };
+  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
+                                  static_cast<uint32_t>(into_blit.size()), into_blit.data());
+  functions_.vkCmdBlitImage(buffer, staging, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_NEAREST);
+  const VkImageMemoryBarrier into_nr =
+      ImageTransition(color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &into_nr);
+
+  // 2. The motion vectors, as Direct3D 12's Present path chooses them: DLSS's copy for this present, else Launchpad's UPLIFT_MV, else none.
+  nr::FrameInputs inputs = {.ui_correction = config_.present_ui_correction, .reset_hint = reset_hint};
+  MotionSource motion_source = MotionSource::NONE;
+  bool launchpad_failed = false;  // review 97f99e3: NR then skips this frame rather than run its features on another kind of motion input
+  if (target.dlss_motion != nullptr) {
+    inputs.motion = {.resource = nr::AsResource(target.dlss_motion)};  // the full subrect, a scale of (1, 1)
+    motion_source = MotionSource::PRESENT_COPY;
+  } else if (!target.dlss_motion_gap_size.Empty()) {
+    // Stress round: DLSS's copy is this load's input but missed this present: zeros of the copies' own shape, so NR runs (no skip, no reload).
+    if (const NVSDK_NGX_Resource_VK* stand_in = ZeroStandIn(buffer, target.dlss_motion_gap_size); stand_in != nullptr) {
+      inputs.motion = {.resource = nr::AsResource(stand_in)};
+      motion_source = MotionSource::PRESENT_COPY;
+    } else {
+      launchpad_failed = true;  // no stand-in could be made: skip rather than change the input's kind
+    }
+  } else if (target.launchpad_motion.view != VK_NULL_HANDLE) {
+    if (ConvertLaunchpadMotion(buffer, target, work)) {
+      inputs.motion = {.resource = nr::AsResource(&present_.launchpad.ngx)};
+      motion_source = MotionSource::LAUNCHPAD;
+    } else if (const NVSDK_NGX_Resource_VK* stand_in = ZeroStandIn(buffer, work.canvas); stand_in != nullptr) {
+      // Stress round: a conversion that missed this present (a busy slot) runs on zeros of the conversion's own shape instead of skipping.
+      inputs.motion = {.resource = nr::AsResource(stand_in)};
+      motion_source = MotionSource::LAUNCHPAD;
+    } else {
+      launchpad_failed = true;
+    }
+  }
+  if (motion_source != MotionSource::LAUNCHPAD && present_.launchpad.image != VK_NULL_HANDLE) {
+    RetirePresentLaunchpad();  // Launchpad's vectors stopped coming: its conversion goes, behind the recordings that used it
+  }
+  inputs.reset_hint = (inputs.reset_hint || motion_source != present_motion_source_);  // spec §9: a provider switch
+  present_motion_source_ = motion_source;
+
+  // 3. NR in place on the intermediate, as on DLSS's Output (the encode, the passes, the change path and the look, the decode), with no game exposure.
+  PipelineResult result = (launchpad_failed ? PipelineResult{.reason = "no Launchpad vectors this frame"}
+                                            : RecordAfterDlss(buffer,
+                                                              {.resource = &present_.color.ngx,
+                                                               .encoding = target.encoding,
+                                                               .diffuse_white_nits = target.diffuse_white_nits,
+                                                               .transfer_strength = target.transfer_strength,
+                                                               .color_strength = target.color_strength},
+                                                              inputs, controls, layout));
+  result.recorded = true;
+  result.motion_source = motion_source;
+
+  // 4. The copy back, only when NR applied (otherwise the image keeps its own bits), then the image's return to its layout behind a global dependency: what
+  // ReShade records next starts from that layout with no source scope of its own (its present state orders nothing).
+  const VkMemoryBarrier later_reads = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+                                       .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+  VkImageLayout image_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  if (result.nr_applied) {
+    const std::array<VkImageMemoryBarrier, 2> out_of_nr = {
+        ImageTransition(color, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+        ImageTransition(staging, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT),
+    };
+    functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
+                                    static_cast<uint32_t>(out_of_nr.size()), out_of_nr.data());
+    functions_.vkCmdBlitImage(buffer, color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit,
+                              VK_FILTER_NEAREST);
+    const std::array<VkImageMemoryBarrier, 2> into_image = {
+        ImageTransition(staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT),
+        ImageTransition(target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT),
+    };
+    functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
+                                    static_cast<uint32_t>(into_image.size()), into_image.data());
+    functions_.vkCmdCopyImage(buffer, staging, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
+    image_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  }
+  const VkImageMemoryBarrier returned =
+      ImageTransition(target.image, image_layout, target.layout, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0u, 1u, &later_reads, 0u, nullptr, 1u,
+                                  &returned);
+  return result;
 }
 
 }  // namespace uplift::sources

@@ -182,8 +182,11 @@ void HelperFront::NotePresent(HelperDevice& device, api::device* owner, const ui
 }
 
 bool HelperFront::NrLoaded(api::device* owner) const {
-  return remote_owner_ == owner && remote_ && remote_->Running()
-         && remote_->LastStatus().session_state != static_cast<uint32_t>(nr::SessionState::OFF);
+  return remote_owner_ == owner && remote_ && remote_->NrMayRun();
+}
+
+bool HelperFront::NrApplied(api::device* owner) const {
+  return remote_owner_ == owner && remote_ && remote_->Running() && remote_->LastStatus().nr_applied != 0u;
 }
 
 void HelperFront::RunClient(HelperDevice& device, api::device* game_device, api::command_queue* queue, TriggerPoint point, uint64_t source,
@@ -394,6 +397,8 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
       .unreported_point = static_cast<uint32_t>(entry.unreported_point),
       .retry_now = (entry.retry_now ? 1u : 0u),
   };
+  wire.drain_now = (frame.drain_now ? 1u : 0u);
+  wire.uplift_mv_lumenite = (entry.uplift_mv_lumenite ? 1u : 0u);  // 2026-10-08: the helper's readouts name UPLIFT_MV's source
   // Plan 5 (key decision 8): without a running UPLIFT_MASK there is no mask to bind. Shared on Direct3D 9 (both transports, Plan 10) and on
   // Direct3D 10 and 11 with fences (design §2.8).
   bool mask_running = false;
@@ -519,13 +524,17 @@ void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, 
   // Plan 6 (v2 design §3.20), Plan 7 (decision 3): at the Uplift technique, the UPLIFT_MV its pass just wrote while LaunchPad
   // runs, and only when MotionVectors can use it (a 32 MiB copy at 4K otherwise); FENCED only (design §2.8). Plan 10 (design §4.3): Direct3D 9
   // too, on both transports, while LAUNCHPAD_ON_D3D9 holds (the one switch): the binding is the IDirect3DTexture9 itself.
+  // 2026-10-08: Lumenite's Kernel too (from Direct3D 10 on), whose vectors Uplift.fx writes into the same UPLIFT_MV.
   api::resource launchpad = {0u};
-  const ui::MotionVectorSource source = settings.motion_vectors;
-  if (device.SharesImages() && (!device.d3d9 || LAUNCHPAD_ON_D3D9)
-      && (source == ui::MotionVectorSource::AUTO || source == ui::MotionVectorSource::LAUNCHPAD)) {
-    const api::effect_technique launchpad_technique = runtime->find_technique(nullptr, LAUNCHPAD_TECHNIQUE);
+  const bool launchpad_here = (!device.d3d9 || LAUNCHPAD_ON_D3D9);
+  const bool lumenite_here = (!device.d3d9 || LUMENITE_ON_D3D9);
+  if (device.SharesImages() && (launchpad_here || lumenite_here) && MotionUsesUpliftMv(settings.motion_vectors)) {
+    const api::effect_technique launchpad_technique = (launchpad_here ? runtime->find_technique(nullptr, LAUNCHPAD_TECHNIQUE) : api::effect_technique{0u});
+    const api::effect_technique lumenite_technique = (lumenite_here ? runtime->find_technique(nullptr, LUMENITE_TECHNIQUE) : api::effect_technique{0u});
+    const bool source_on = ((launchpad_technique.handle != 0u && runtime->get_technique_state(launchpad_technique))
+                            || (lumenite_technique.handle != 0u && runtime->get_technique_state(lumenite_technique)));
     const api::effect_texture_variable motion = runtime->find_texture_variable(nullptr, MOTION_TEXTURE);
-    if (launchpad_technique.handle != 0u && runtime->get_technique_state(launchpad_technique) && motion.handle != 0u) {
+    if (source_on && motion.handle != 0u) {
       api::resource_view view = {0u};
       api::resource_view view_srgb = {0u};
       runtime->get_texture_binding(motion, &view, &view_srgb);
@@ -650,13 +659,32 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   FillPreference(&facts, settings, false);
   facts.dlss_unavailable = view->dlss_unavailable;
   facts.match_game_readable = false;
+  // Fix round 1 (M5): a 64-bit Vulkan device on the helper route. The DLSS stages are greyed with the route's reason (the host's), and DLSS's vectors with
+  // their own: the native context copies them only for a Present that runs on the game's device or a private Direct3D 12 device.
+  if (!view->vulkan_stages_off.empty()) {
+    facts.after_dlss_fixed = view->vulkan_stages_off;
+    facts.before_upscaling_fixed = view->vulkan_stages_off;
+  }
+  if (device != nullptr && !device->route_reason.empty()) {
+    facts.dlss_motion_fixed = "DLSS's motion vectors do not reach Uplift's helper process (Launchpad's and Lumenite's do)";
+  }
   facts.launchpad_ready = (device != nullptr && device->launchpad_ready);
+  facts.lumenite_ready = (device != nullptr && device->lumenite_ready);
+  facts.uplift_mv_lumenite = (device != nullptr && device->uplift_mv_lumenite);
   if (device != nullptr && device->HasClient() && !device->SharesImages()) {
     // Batch 1 review: a Direct3D 10 or 11 device on the CPU-ordered fallback shares no images with the helper, so UPLIFT_MV never reaches NR (Technique skips it).
     facts.launchpad_fixed = (device->d3d10 ? "Launchpad's vectors are not available on this Direct3D 10 device (no fences)"
                                            : "Launchpad's vectors are not available on this Direct3D 11 device (no fences)");
+    facts.lumenite_fixed = (device->d3d10 ? "Lumenite's vectors are not available on this Direct3D 10 device (no fences)"
+                                          : "Lumenite's vectors are not available on this Direct3D 11 device (no fences)");
   }
-  const std::string api_label = (addon_file_ == "gitc-uplift.addon32" ? std::format("{} (32-bit)", ApiName(device_api)) : std::string(ApiName(device_api)));
+  if (d3d9 && !LUMENITE_ON_D3D9) {
+    facts.lumenite_fixed = LUMENITE_D3D9_REASON;  // Uplift.fx's Lumenite pass is compiled from Direct3D 10 on
+  }
+  std::string api_label = (addon_file_ == "gitc-uplift.addon32" ? std::format("{} (32-bit)", ApiName(device_api)) : std::string(ApiName(device_api)));
+  if (device != nullptr && !device->route_reason.empty()) {
+    api_label = std::format("{} (helper)", ApiName(device_api));  // T5: a 64-bit Vulkan device's route, as "Vulkan (native NR)" and "Vulkan (Direct3D 12)"
+  }
   facts.api = api_label;
   if (d3d9) {
     if (device != nullptr) {
@@ -728,7 +756,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
       client_bytes = device->d3d10->SharedBytes();
       client_line = device->d3d10->Line();
     } else if (device->vulkan) {
-      client_line = device->vulkan->Line();  // its imports alias the helper's textures, which the helper's own figure counts
+      client_line = device->vulkan->Line(device->route_reason);  // its imports alias the helper's textures, which the helper's own figure counts
     } else if (device->gl) {
       client_line = device->gl->Line();  // the same
     } else if (device->d3d12) {
@@ -801,6 +829,13 @@ void HelperFront::RetryNow(HelperDevice* device) {
     remote_->RetryNow();
   } else if (device != nullptr) {
     device->retry_now = true;
+  }
+}
+
+void HelperFront::Detach(api::device* owner) {
+  if (remote_ && remote_owner_ == owner) {
+    remote_->Detach();
+    remote_owner_ = nullptr;
   }
 }
 

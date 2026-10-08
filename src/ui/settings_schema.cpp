@@ -13,7 +13,7 @@ namespace {
 
 constexpr std::array<std::string_view, 3> MODELS = {"Model A", "Model B", "Model C"};
 constexpr std::array<std::string_view, 3> SOURCES = {"Auto", "After DLSS", "Present"};
-constexpr std::array<std::string_view, 4> MOTION_VECTORS = {"Auto", "DLSS", "Launchpad", "None"};
+constexpr std::array<std::string_view, 5> MOTION_VECTORS = {"Auto", "DLSS", "Launchpad", "None", "Lumenite"};  // stored-index order (Setup shows Lumenite after Launchpad)
 constexpr std::array<std::string_view, 7> QUALITY_MODES = {"Game", "Performance", "Balanced", "Quality",
                                                            "Ultra Performance", "Ultra Quality", "DLAA"};
 constexpr std::array<std::string_view, 5> PRESETS = {"Game", "J", "K", "L", "M"};
@@ -24,6 +24,7 @@ constexpr std::array<std::string_view, 2> STATE_RESTORE_MODES = {"Full", "Minima
 constexpr std::array<std::string_view, 4> LOG_LEVELS = {"Error", "Warning", "Info", "Debug"};
 constexpr std::array<std::string_view, 2> NGX_HOOK_MODES = {"Auto", "Off (safe mode)"};
 constexpr std::array<std::string_view, 2> FOREIGN_NR_MODES = {"Yield", "Observe"};
+constexpr std::array<std::string_view, 3> VULKAN_NR_MODES = {"Native", "Direct3D 12", "Helper"};  // Plan 19; T5: Helper
 constexpr std::array<std::string_view, 6> RESOLUTION_MODES = {"Full", "Quality (67 %)", "Balanced (58 %)",
                                                               "Performance (50 %)", "Match game", "Custom"};
 constexpr std::array<std::string_view, 2> UPSAMPLING_MODES = {"Classic", "Edge-aware"};
@@ -164,6 +165,41 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .flags = RESTARTS_HISTORY,
         .get = [](const Settings& s) { return static_cast<double>(s.skin_structure); },
         .set = [](Settings& s, double v) { s.skin_structure = static_cast<float>(v); },
+    },
+    {
+        .key = "KeepFaces",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::LOOK,
+        .label = "Keep faces",
+        .tooltip = "Keeps NR's lighting and shading on characters, but stops NR reshaping their faces. NR runs one more time per frame for "
+                   "this (a little more GPU time and video memory), whatever the pass count.",
+        .get = [](const Settings& s) { return Flag(s.keep_faces); },
+        .set = [](Settings& s, double v) { s.keep_faces = (v != 0.0); },
+    },
+    {
+        .key = "FaceProtection",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::LOOK,
+        .label = "Face protection",
+        .tooltip = "How much of NR's fine structure faces still get: 0 leaves faces as the game drew them, 1 lets NR's structure through. "
+                   "A change restarts the extra run's history.",
+        .min = 0.0,
+        .max = 1.0,
+        .flags = RESTARTS_HISTORY,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_protection); },
+        .set = [](Settings& s, double v) { s.face_protection = static_cast<float>(v); },
+    },
+    {
+        .key = "LightingScale",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::LOOK,
+        .label = "Lighting scale (% of height)",
+        .tooltip = "On characters, NR's change broader than this counts as lighting and is kept; anything finer is left out. Larger keeps only "
+                   "the broadest lighting, smaller keeps more of NR's change on faces.",
+        .min = 0.5,
+        .max = 10.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.lighting_scale); },
+        .set = [](Settings& s, double v) { s.lighting_scale = static_cast<float>(v); },
     },
     {
         .key = "Mask",
@@ -447,7 +483,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "Inside the game's frame (NR stage After DLSS or Before upscaling), Auto and DLSS use the game's own DLSS motion "
                    "vectors, and None uses none. On the presented frame (NR stage Present), Auto and DLSS use copies of them where "
                    "Uplift can make them; otherwise NR runs there without them. Launchpad uses iMMERSE Launchpad's motion on the "
-                   "presented image, through Uplift.fx's Uplift technique placed below Launchpad.",
+                   "presented image, through Uplift.fx's Uplift technique placed below Launchpad. Lumenite does the same with LumeniteFX's "
+                   "Kernel: turn Kernel on and put Uplift below it. Auto takes DLSS's, then Launchpad's, then Lumenite's.",
         .choices = MOTION_VECTORS,
         .get = [](const Settings& s) { return Index(s.motion_vectors); },
         .set = [](Settings& s, double v) { s.motion_vectors = FromIndex<MotionVectorSource>(v); },
@@ -854,6 +891,134 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.show_nv_indicator = (v != 0.0); },
     },
     {
+        .key = "ShowFaceMask",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::ADVANCED,
+        .label = "Show the face mask",
+        .tooltip = "Tints what Keep faces protects in magenta, to check what it finds while you tune it. Turn it off to see the result.",
+        .get = [](const Settings& s) { return Flag(s.show_face_mask); },
+        .set = [](Settings& s, double v) { s.show_face_mask = (v != 0.0); },
+    },
+    // Keep faces fix round 1 addendum (the owner's request): the face mask's tuning, live in game. Shader constants only: none restarts NR or the extra run.
+    {
+        .key = "FaceMaskThreshold",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Mask threshold (% of brightness)",
+        .tooltip = "How much NR's change on a pixel, against the pixel's own brightness, still counts as noise. Raise it if the face mask speckles "
+                   "the background or bright glints; lower it if faces are only faintly tinted.",
+        .min = 0.0,
+        .max = 10.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.threshold); },
+        .set = [](Settings& s, double v) { s.face_tuning.threshold = static_cast<float>(v); },
+    },
+    {
+        .key = "FaceMaskFull",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Full protection at (% of brightness)",
+        .tooltip = "The change, against the pixel's own brightness, from which a pixel counts fully as face. Lower it if faces are tinted only in "
+                   "patches; raise it if hair or clothes are tinted too. Always counts as above Mask threshold.",
+        .min = 1.0,
+        .max = 30.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.full); },
+        .set = [](Settings& s, double v) { s.face_tuning.full = static_cast<float>(v); },
+    },
+    {
+        .key = "FaceMaskStrength",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Mask strength",
+        .tooltip = "Raise it if the mask has holes inside faces; lower it if it spreads past them.",
+        .min = 0.5,
+        .max = 4.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.strength); },
+        .set = [](Settings& s, double v) { s.face_tuning.strength = static_cast<float>(v); },
+    },
+    {
+        .key = "FaceMaskSoftness",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Mask softness (% of height)",
+        .tooltip = "Raise it if the mask looks blotchy or flickers; lower it if it spreads past faces.",
+        .min = 0.1,
+        .max = 2.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.softness); },
+        .set = [](Settings& s, double v) { s.face_tuning.softness = static_cast<float>(v); },
+    },
+    {
+        .key = "FaceEdgeFalloff",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Edge falloff (% of height)",
+        .tooltip = "Lower it if light glows past a character's outline; raise it if outlines show a dark rim.",
+        .min = 0.05,
+        .max = 1.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.edge_falloff); },
+        .set = [](Settings& s, double v) { s.face_tuning.edge_falloff = static_cast<float>(v); },
+    },
+    {
+        // Fix round 3 (the owner's glowing spots): lighting comes back only where the mask is dense at the Lighting scale.
+        .key = "FaceLightingDensity",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Lighting density",
+        .tooltip = "How densely a region must be face before NR's lighting comes back in full there. Raise it if glints or bright edges leave "
+                   "glowing spots on characters; lower it if the lighting fades near the edges of faces.",
+        .min = 0.05,
+        .max = 1.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.density); },
+        .set = [](Settings& s, double v) { s.face_tuning.density = static_cast<float>(v); },
+    },
+    // Round 5 (holes in the face mask on shadowed skin): shader constants only.
+    {
+        .key = "FaceFillSkin",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::ADVANCED,
+        .label = "Fill skin by colour",
+        .tooltip = "Grows the face mask over nearby skin of the same colour that NR's change did not mark, such as skin in shadow, so a second pass "
+                   "cannot reshape it either. Turn it off if clothes or hair of a skin-like colour turn magenta.",
+        .get = [](const Settings& s) { return Flag(s.face_tuning.fill_skin); },
+        .set = [](Settings& s, double v) { s.face_tuning.fill_skin = (v != 0.0); },
+    },
+    {
+        .key = "FaceFillRadius",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Fill radius (% of height)",
+        .tooltip = "How far the fill reaches from marked skin. Raise it if broad patches of skin are still uncovered; lower it if the fill spreads onto "
+                   "nearby surfaces.",
+        .min = 0.5,
+        .max = 10.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.fill_radius); },
+        .set = [](Settings& s, double v) { s.face_tuning.fill_radius = static_cast<float>(v); },
+    },
+    {
+        .key = "FaceFillTolerance",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Colour tolerance",
+        .tooltip = "How far a pixel's colour may be from the nearby skin colour and still be filled. Raise it if skin in shadow is still uncovered; lower "
+                   "it if clothes or hair turn magenta.",
+        .min = 0.005,
+        .max = 0.2,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.fill_tolerance); },
+        .set = [](Settings& s, double v) { s.face_tuning.fill_tolerance = static_cast<float>(v); },
+    },
+    {
+        // Round 5: replaces round 4's FaceSpeckFilter switch (test builds only: no migration).
+        .key = "FaceSpeckSize",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::ADVANCED,
+        .label = "Remove specks (px)",
+        .tooltip = "Lets bright specks up to about this size (glints, sparkles) keep NR's normal result instead of the protected one. Larger sizes also stop "
+                   "protecting tiny face details of that size, such as a catchlight or a far-away eye. 0 turns it off.",
+        .min = 0.0,
+        .max = 3.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.speck_size); },
+        .set = [](Settings& s, double v) { s.face_tuning.speck_size = static_cast<uint32_t>(v); },
+    },
+    {
         .key = "LogLevel",
         .kind = SettingKind::CHOICE,
         .section = SettingSection::ADVANCED,
@@ -895,6 +1060,23 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.foreign_nr = FromIndex<ForeignNrMode>(v); },
     },
     {
+        // Plan 19 (the owner's decision): native by default, the private Direct3D 12 device as the fallback and as a choice. T5: Uplift's helper process
+        // after both, and as a choice.
+        .key = "VulkanNr",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::ADVANCED,
+        .label = "Vulkan NR at Present",
+        .tooltip = "64-bit Vulkan games. Native runs NR on the game's own Vulkan device; where it cannot, NR uses a private Direct3D 12 device, and "
+                   "where that cannot either, Uplift's helper process; Details says why. Direct3D 12 starts at the private device. Helper always runs "
+                   "NR in Uplift's helper process. Only Native runs NR inside the game's DLSS: Direct3D 12 and Helper run it at Present, so picking one "
+                   "moves After DLSS or Before upscaling to Present. Uplift adds NGX's extensions to the game's device only when this is Native at the "
+                   "game's start. "
+                   "After native NR's first use the driver keeps about 0.6 GB with the game's device until the game exits.",
+        .choices = VULKAN_NR_MODES,
+        .get = [](const Settings& s) { return Index(s.vulkan_nr); },
+        .set = [](Settings& s, double v) { s.vulkan_nr = FromIndex<VulkanNrMode>(v); },
+    },
+    {
         .key = "AutoRetry",
         .kind = SettingKind::BOOL,
         .section = SettingSection::ADVANCED,
@@ -924,6 +1106,32 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .flags = NEXT_START,
         .get = [](const Settings& s) { return Flag(s.adjust_vulkan_devices); },
         .set = [](Settings& s, double v) { s.adjust_vulkan_devices = (v != 0.0); },
+    },
+    {
+        // Plan 19 T1b: the pending marker's first tier. Never in the panel, like AdjustVulkanDevices.
+        .key = "AdjustVulkanDevicesForNgx",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::HIDDEN,
+        .label = "Add NGX's extensions to Vulkan devices when the game creates them (restart the game)",
+        .tooltip = "64-bit Vulkan games, with AdjustVulkanDevices = 1. 1 also adds the extensions and bufferDeviceAddress NGX needs to run NR natively "
+                   "on the game's device; 0 leaves them out, and NR at Present uses the Direct3D 12 route. Uplift sets 0 itself when the last start "
+                   "with them never reached its first frame.",
+        .flags = NEXT_START,
+        .get = [](const Settings& s) { return Flag(s.adjust_vulkan_devices_for_ngx); },
+        .set = [](Settings& s, double v) { s.adjust_vulkan_devices_for_ngx = (v != 0.0); },
+    },
+    {
+        // Plan 19 T6 (I-4): native NR at Present's latch. Never in the panel, like AdjustVulkanDevicesForNgx.
+        .key = "VulkanNativeNr",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::HIDDEN,
+        .label = "Allow native Vulkan NR at Present (restart the game)",
+        .tooltip = "64-bit Vulkan games. 1 lets NR at Present run natively on the game's Vulkan device when Vulkan NR at Present allows it; 0 starts the "
+                   "route at the next one. Uplift sets 0 itself when the last start with native NR ended before it had run for a few seconds, or the "
+                   "game's device was lost while it ran.",
+        .flags = NEXT_START,
+        .get = [](const Settings& s) { return Flag(s.vulkan_native_nr); },
+        .set = [](Settings& s, double v) { s.vulkan_native_nr = (v != 0.0); },
     },
     {
         // Plan 17: diagnostic only, never in the panel. It exercises Retry now and the 2-strike rule without a real hang.

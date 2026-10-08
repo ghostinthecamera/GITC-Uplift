@@ -83,16 +83,31 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   } else if (!facts.launchpad_ready) {
     launchpad = {.why = "Turn iMMERSE Launchpad on and enable Uplift.fx's Uplift technique below it", .temporary = true};
   }
+  // 2026-10-08: Lumenite, as Launchpad.
+  OptionState& lumenite = at(view.motion_options, MotionPick::LUMENITE);
+  if (!facts.lumenite_fixed.empty()) {
+    lumenite = {.why = facts.lumenite_fixed};
+  } else if (view.stage != SourcePick::PRESENT && !facts.present_fixed.empty()) {
+    lumenite = {.why = facts.present_fixed};
+  } else if (view.stage != SourcePick::PRESENT) {
+    lumenite = {.why = "Lumenite feeds NR on the presented image only", .temporary = true};
+  } else if (!facts.lumenite_ready) {
+    lumenite = {.why = "Turn LumeniteFX's Kernel on and enable Uplift.fx's Uplift technique below it", .temporary = true};
+  }
   hold(&dlss);
   hold(&launchpad);
+  hold(&lumenite);
   const OptionState motion_wish = at(view.motion_options, facts.preferred_motion);
   MotionPick resolved_motion = MotionPick::OFF;
   if (selectable(motion_wish)) {
     resolved_motion = facts.preferred_motion;
   } else if (facts.motion_auto && selectable(launchpad)) {
     resolved_motion = MotionPick::LAUNCHPAD;
-  } else if (facts.preferred_motion == MotionPick::LAUNCHPAD && view.stage != SourcePick::PRESENT && selectable(dlss)) {
-    resolved_motion = MotionPick::DLSS;  // inside the game's frame a Launchpad preference runs on the game's own vectors (the engine's rule)
+  } else if (facts.motion_auto && selectable(lumenite)) {
+    resolved_motion = MotionPick::LUMENITE;  // Auto's order: DLSS, Launchpad, Lumenite
+  } else if ((facts.preferred_motion == MotionPick::LAUNCHPAD || facts.preferred_motion == MotionPick::LUMENITE) && view.stage != SourcePick::PRESENT
+             && selectable(dlss)) {
+    resolved_motion = MotionPick::DLSS;  // inside the game's frame a Launchpad or Lumenite preference runs on the game's own vectors (the engine's rule)
   }
   view.motion = facts.motion.value_or(resolved_motion);
 
@@ -187,6 +202,15 @@ SetupView ResolveSetup(const SetupFacts& facts) {
       add("no UPLIFT_MV arrives: put Uplift.fx's Uplift technique below Launchpad.");
     }
   }
+  if (facts.preferred_motion == MotionPick::LUMENITE && view.motion != MotionPick::LUMENITE) {
+    if (motion_wish.temporary && view.stage != SourcePick::PRESENT) {
+      add("Lumenite's vectors return when NR runs at Present; inside the game's frame NR uses the game's own.");
+    } else if (motion_wish.temporary) {
+      add("Lumenite's vectors return when Lumenite's Kernel and Uplift.fx's Uplift technique are on.");
+    } else if (selectable(motion_wish) && facts.launchpad_gap == MotionGap::NO_UPLIFT_MV) {
+      add("no UPLIFT_MV arrives: put Uplift.fx's Uplift technique below Lumenite's Kernel.");
+    }
+  }
   if (view.resolution != facts.preferred_resolution && facts.preferred_resolution == ResolutionMode::MATCH_GAME
       && (selectable(resolution_wish) || resolution_wish.why == DLSS_NOT_SEEN_REASON)) {
     add("Match game applies when the game renders with DLSS.");
@@ -211,6 +235,7 @@ LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
     case MotionPick::OFF:       card.motion = "none"; break;
     case MotionPick::DLSS:      card.motion = (facts.motion_copied ? "DLSS (the game's, copied for Present)" : "DLSS (the game's)"); break;
     case MotionPick::LAUNCHPAD: card.motion = "Launchpad"; break;
+    case MotionPick::LUMENITE:  card.motion = "Lumenite"; break;
   }
   std::string mode;
   switch (shown.resolution) {
@@ -316,8 +341,10 @@ void SetupSettle::ClickedBest(SetupRow row, uint32_t index, const SetupView& opt
     case SetupRow::MOTION:
       if (!runs(options.motion_options, index)) {
         const std::optional<uint32_t>& stage = rows_[static_cast<size_t>(SetupRow::STAGE)].shown;
-        const bool launchpad = (motion_auto && (!stage || *stage == static_cast<uint32_t>(SourcePick::PRESENT)) && runs(options.motion_options, MotionPick::LAUNCHPAD));
-        best = static_cast<uint32_t>(launchpad ? MotionPick::LAUNCHPAD : MotionPick::OFF);
+        const bool present = (!stage || *stage == static_cast<uint32_t>(SourcePick::PRESENT));
+        const bool launchpad = (motion_auto && present && runs(options.motion_options, MotionPick::LAUNCHPAD));
+        const bool lumenite = (motion_auto && present && runs(options.motion_options, MotionPick::LUMENITE));  // Auto's order
+        best = static_cast<uint32_t>(launchpad ? MotionPick::LAUNCHPAD : lumenite ? MotionPick::LUMENITE : MotionPick::OFF);
       }
       break;
     case SetupRow::RESOLUTION:
@@ -365,6 +392,12 @@ std::string FormatFrameGenerationLine(bool active, uint32_t multiplier, bool fro
 std::optional<std::string> FrameGenerationWarning(bool active, uint32_t passes) {
   if (!active || passes <= 1u) return std::nullopt;
   return std::format("Frame generation is on: {} NR passes can push it past its frame budget; one pass is safest", passes);
+}
+
+std::string_view KeepFacesUnavailable(const KeepFacesFacts& facts) {
+  if (!facts.nr_runs) return "NR does not run in this game";
+  if (!facts.gpu_ready) return "Keep faces cannot run on this GPU (ReShade.log says why)";
+  return {};
 }
 
 StatusCard BuildStatusCard(const CardFacts& facts) {
@@ -485,6 +518,9 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
     working.fixes.push_back(session.message.empty()
                                 ? std::format("Running {} of {} passes.", facts.passes_run, session.passes_requested)
                                 : session.message);
+  }
+  if (!session.faces_note.empty()) {
+    working.fixes.emplace_back(session.faces_note);  // Keep faces fix round 1 (C2): paused or stopped while NR works
   }
   return working;
 }

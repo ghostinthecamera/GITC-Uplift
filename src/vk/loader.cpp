@@ -21,6 +21,10 @@ const Loader* Loader::Get() {
       reinterpret_cast<PFN_vkEnumeratePhysicalDeviceGroups>(GetProcAddress(module, "vkEnumeratePhysicalDeviceGroups"));
   loader->destroy_device = reinterpret_cast<PFN_vkDestroyDevice>(GetProcAddress(module, "vkDestroyDevice"));
   loader->get_physical_device_features = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(GetProcAddress(module, "vkGetPhysicalDeviceFeatures"));
+  loader->get_physical_device_features2 =
+      reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(GetProcAddress(module, "vkGetPhysicalDeviceFeatures2"));
+  loader->get_queue_family_properties =
+      reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(GetProcAddress(module, "vkGetPhysicalDeviceQueueFamilyProperties"));
   loader->get_physical_device_format_properties =
       reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(GetProcAddress(module, "vkGetPhysicalDeviceFormatProperties"));
   loader->get_device_proc_addr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(GetProcAddress(module, "vkGetDeviceProcAddr"));

@@ -73,7 +73,7 @@ struct SetupFacts {
   // The stored preference: read, never written.
   SourcePick preferred_stage = SourcePick::AFTER_DLSS;  // SourcePickOf(settings, explicit_dlss)
   MotionPick preferred_motion = MotionPick::DLSS;       // MotionPickOf(settings)
-  bool motion_auto = true;                              // MotionVectors = Auto: DLSS, else Launchpad, else Off
+  bool motion_auto = true;                              // MotionVectors = Auto: DLSS, else Launchpad, else Lumenite, else Off
   ResolutionMode preferred_resolution = ResolutionMode::FULL;
   float custom_scale = 100.f;
   // What is possible now (§1.2).
@@ -97,6 +97,9 @@ struct SetupFacts {
   std::string_view dlss_motion_fixed;  // Vulkan at Present on a CPU-ordered bridge: DLSS's motion vectors cannot reach NR there (VULKAN_CPU_ORDERED_MOTION)
   bool launchpad_ready = false;        // Launchpad's technique and Uplift.fx's Uplift technique are enabled
   std::string_view launchpad_fixed;    // Launchpad's vectors cannot reach NR on this device: a 32-bit Direct3D 10 or 11 device without fences shares no images
+  bool lumenite_ready = false;         // 2026-10-08: Lumenite's Kernel and Uplift.fx's Uplift technique are enabled
+  std::string_view lumenite_fixed;     // Lumenite's vectors cannot reach NR on this device (Direct3D 9, or no images shared, as Launchpad's)
+  bool uplift_mv_lumenite = false;     // UPLIFT_MV holds Lumenite's vectors now (the running provider reads as Lumenite, not Launchpad)
   bool match_game_readable = true;     // false on the bridges, OpenGL, the helper and Vulkan at Present
   bool match_game_at_dlss_stages = false;  // final review, minor 3: unreadable here, but a DLSS stage on this device reads it (Vulkan at Present)
   std::string_view below_full_fixed;   // why the modes below Full cannot run (fixed); no path sets it since Plan 14 Task 8
@@ -123,7 +126,7 @@ struct SetupFacts {
 
 struct SetupView {
   std::array<OptionState, 3> stage_options = {};       // SourcePick order
-  std::array<OptionState, 3> motion_options = {};      // MotionPick order
+  std::array<OptionState, 4> motion_options = {};      // MotionPick order
   std::array<OptionState, 6> resolution_options = {};  // ResolutionMode order
   SourcePick stage = SourcePick::PRESENT;              // the highlights: what runs (§1.3)
   MotionPick motion = MotionPick::OFF;
@@ -199,6 +202,16 @@ struct StatusView {
 [[nodiscard]] std::string FormatFrameGenerationLine(bool active, uint32_t multiplier, bool from_ngx);
 // With frame generation on, every pass beyond the first can push it past its frame budget ([V7] §4.2).
 [[nodiscard]] std::optional<std::string> FrameGenerationWarning(bool active, uint32_t passes);
+
+// Keep faces (2026-10-08): what decides whether Keep faces can run on the shown device. NR's Character mask (DLSSNR.UseAutoMask), which the extra run
+// needs, is forced off by NR whenever a DLSSNR.ControlMask is bound; Uplift binds none anywhere (its NR mask, UPLIFT_MASK, is applied after NR, in the
+// compose), so that never greys it.
+struct KeepFacesFacts {
+  bool nr_runs = true;       // Uplift runs NR on this kind of device
+  bool gpu_ready = true;  // the GPU loads and stores the formats the recombination needs (as the look stage's), and its pipeline was built
+};
+// Why Keep faces cannot run on the shown device, or empty.
+[[nodiscard]] std::string_view KeepFacesUnavailable(const KeepFacesFacts& facts);
 
 // Plan 6 (v2 design §3.18, D1): the status card, the first failing stage of the verdict ladder.
 enum class CardStage : uint8_t {

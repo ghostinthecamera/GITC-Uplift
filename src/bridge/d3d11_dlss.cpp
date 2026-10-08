@@ -276,8 +276,16 @@ bool D3D11Bridge::CopyPresentMotion(ID3D11Resource* motion, nr::Rect region, flo
   region = ResolveRegion11(motion, region);
   if (!format || description->SampleDesc.Count != 1u || region.width == 0u || region.height == 0u) return false;
   const uint64_t frame = presents_ + 1u;
-  RingSlot& slot = ring_[frame % RING_SLOTS];
-  if (slot.shared.d3d12 && slot.shared.last_use > side_->Completed()) return false;  // still read: no copy this frame (MotionGap NO_COPY)
+  RingSlot& slot = ring_[sources::PresentMotionSlotOf(frame, ring_slots_)];
+  if (slot.shared.d3d12 && slot.shared.last_use > side_->Completed()) {
+    // Still read: no copy this frame (its present binds an older one). Fix round 1 (M6): the ring grows once; the slots in use keep their copies and marks.
+    if (sources::PresentMotionGrows(ring_slots_, sources::PresentMotionWrite::SLOT_BUSY)) {
+      nr::Logf(nr::LogLevel::INFO, "{}: the private queue runs too far behind for four slots: DLSS's motion copies for Present grow from {} to {} slots",
+               label_, ring_slots_, RING_SLOTS);
+      ring_slots_ = RING_SLOTS;
+    }
+    return false;
+  }
   // Fix round 1 (M-4): at the vectors' whole size; the region is copied to (0, 0) and the slot keeps it, for the Present path's subrect.
   if (!EnsureShared(&slot.shared, &ring_failure_, {description->Width, description->Height}, format->format, SHARE_FLAGS, format->bytes_per_pixel,
                     "DLSS's motion vectors for Present")) {
@@ -297,7 +305,7 @@ void D3D11Bridge::ReleasePresentMotion() {
   // call finds nothing and logs nothing.
   if (const uint64_t bytes = RingBytes(); bytes > 0u) {
     const auto slots = std::count_if(ring_.begin(), ring_.end(), [](const RingSlot& slot) { return slot.shared.bytes > 0u; });
-    nr::Logf(nr::LogLevel::INFO, "{}: DLSS's motion vectors' copies for Present released ({} of {} slots, {:.1f} MiB)", label_, slots, RING_SLOTS,
+    nr::Logf(nr::LogLevel::INFO, "{}: DLSS's motion vectors' copies for Present released ({} of {} slots, {:.1f} MiB)", label_, slots, ring_slots_,
              static_cast<double>(bytes) / (1024.0 * 1024.0));
   }
   for (RingSlot& slot : ring_) {
@@ -305,6 +313,7 @@ void D3D11Bridge::ReleasePresentMotion() {
     slot.region = {};
     slot.frame = 0u;
   }
+  ring_slots_ = sources::PRESENT_MOTION_MIN_SLOTS;  // fix round 1 (M6): the next copies start small again
 }
 
 }  // namespace uplift::bridge

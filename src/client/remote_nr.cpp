@@ -18,6 +18,8 @@ constexpr std::chrono::seconds QUIT_CAP{2};    // QUIT answered, the process sti
 // AddonUninit runs at every last-device destruction, and a game that recreates its device (a resolution change) waits for it. An idle
 // helper exits within milliseconds of QUIT; a busy one is ended by the job, as it is when the game itself exits.
 constexpr std::chrono::milliseconds QUIT_EXIT_WAIT{250};
+// Helper hand-over round: a helper that is ended (hung, failed, or not gone after QUIT) is waited for this long, so its NR is gone before NR loads in the game.
+constexpr std::chrono::milliseconds KILL_EXIT_WAIT{1000};
 
 // The NT handles a reply can hand out, besides the block's group (mapping, size and row pitch). Plan 12 (protocol 5): a texture's handle carries its
 // allocation size (`bytes`), which an OpenGL import needs, so a late handle keeps it on the way to the FRAME reply that delivers it; a fence has none.
@@ -79,6 +81,7 @@ void RemoteNr::Forget() {
   outstanding_ = {};
   last_status_ = {};
   have_status_ = false;
+  nr_may_run_ = false;  // the process is gone, and its NR with it
   text_written_ = false;
   late_ = {};
   late_run_signalled_.reset();
@@ -89,19 +92,34 @@ void RemoteNr::Fail(std::string text) {
   failure_ = std::move(text);
   failed_ = true;
   nr::Logf(nr::LogLevel::ERR, "helper stopped: {}", failure_);
-  if (launcher_ != nullptr) {
-    launcher_->Kill();
-  }
+  Kill();
   Forget();
 }
 
+void RemoteNr::Kill() {
+  if (launcher_ == nullptr) return;
+  launcher_->Kill();
+  const auto deadline = std::chrono::steady_clock::now() + KILL_EXIT_WAIT;
+  while (!launcher_->ExitCode() && std::chrono::steady_clock::now() < deadline) {
+    Sleep(5u);
+  }
+  if (!launcher_->ExitCode()) {
+    nr::Log(nr::LogLevel::WARN, "the helper process was ended but had not exited after 1 s");
+  }
+}
+
 std::optional<ipc::Reply> RemoteNr::Transact(const ipc::Request& request, uint32_t cap_ms) {
+  if (request.kind == ipc::RequestKind::FRAME && request.frame.nr_allowed != 0u) {
+    nr_may_run_ = true;  // from here on the helper may load NR, whether or not this FRAME is answered
+  }
   switch (launcher_->Send(request, cap_ms)) {
     case ipc::HelperLauncher::Wait::REPLIED:
       outstanding_ = {};
+      DrainLog();  // helper hand-over round: what the helper logged handling this request reaches ReShade.log now, not at the next present
       return launcher_->Block()->reply;
     case ipc::HelperLauncher::Wait::PENDING:
-      outstanding_ = {request.kind, (request.kind == ipc::RequestKind::FRAME ? request.frame.settings_generation : frame_generation_)};
+      outstanding_ = {request.kind, (request.kind == ipc::RequestKind::FRAME ? request.frame.settings_generation : frame_generation_),
+                      (request.kind == ipc::RequestKind::FRAME && request.frame.nr_allowed != 0u)};
       return std::nullopt;
     case ipc::HelperLauncher::Wait::GONE:
       outstanding_ = {};  // the next Present sees the exit
@@ -127,6 +145,12 @@ void RemoteNr::Consume(const Outstanding& request, const ipc::Reply& reply, bool
         last_status_ = reply.status;
         status_generation_ = request.generation;
         have_status_ = true;
+        // Helper hand-over round: one request at a time, so this answers the newest FRAME; sent without nr_allowed and OFF, the helper's NR is unloaded
+        // (the Session reaches OFF only after its unload) and nothing sent since can load it.
+        if (request.kind == ipc::RequestKind::FRAME && !request.nr_allowed
+            && reply.status.session_state == static_cast<uint32_t>(nr::SessionState::OFF)) {
+          nr_may_run_ = false;
+        }
       }
       break;
     case ipc::RequestKind::NONE:
@@ -172,7 +196,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
   const LUID wanted = {.LowPart = config_.attach.luid_low, .HighPart = config_.attach.luid_high};
   if (launcher_ != nullptr && (wanted.LowPart != launched_for_.LowPart || wanted.HighPart != launched_for_.HighPart)) {
     nr::Log(nr::LogLevel::INFO, "the game moved to another adapter; the helper restarts");
-    launcher_->Kill();
+    Kill();
     Forget();
   }
   if (launcher_ == nullptr) {
@@ -216,7 +240,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
   if (quit_sent_) {
     if (now - quit_at_ > QUIT_CAP) {
       nr::Log(nr::LogLevel::WARN, "the helper did not exit after QUIT; it was ended");
-      launcher_->Kill();
+      Kill();
       Forget();
     }
     return std::nullopt;
@@ -224,6 +248,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
   if (launcher_->Pending()) {
     switch (launcher_->Poll()) {
       case ipc::HelperLauncher::Wait::REPLIED:
+        DrainLog();  // what the helper logged handling the late request
         Consume(Outstanding(outstanding_), launcher_->Block()->reply, true);  // a copy: a refused ATTACH clears outstanding_
         outstanding_ = {};
         if (std::exchange(stale_outstanding_, false)) {
@@ -284,7 +309,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
   const std::optional<ipc::Reply> answered = Transact(request, FRAME_CAP_MS);
   if (!answered) return std::nullopt;
   ipc::Reply reply = *answered;
-  Consume({ipc::RequestKind::FRAME, frame.settings_generation}, reply, false);  // the status; an ok = 0 reply's handles are kept
+  Consume({ipc::RequestKind::FRAME, frame.settings_generation, frame.nr_allowed != 0u}, reply, false);  // the status; an ok = 0 reply's handles are kept
   if (reply.ok == 0u) {
     if (const std::string_view error = ipc::TextOf(reply.error); error != last_error_) {
       last_error_ = std::string(error);

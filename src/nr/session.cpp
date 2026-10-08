@@ -94,7 +94,14 @@ void Session::SetEnabled(bool enabled) {
   }
   switch (state_) {
     case SessionState::LOADING: state_ = SessionState::OFF; break;
-    case SessionState::ACTIVE:  EnterGrace(); break;
+    case SessionState::ACTIVE:
+      // Helper hand-over round: no grace (an owner hand-over) drains at once, never through a GRACE that ends in the same frame.
+      if (config_.grace.count() == 0) {
+        BeginTeardown(SessionState::DRAINING);
+      } else {
+        EnterGrace();
+      }
+      break;
     case SessionState::FAILED:
       draining_from_failure_ = teardown_pending_;
       state_ = (teardown_pending_ ? SessionState::DRAINING : SessionState::OFF);
@@ -120,6 +127,12 @@ void Session::SetCreateOptions(uint32_t preset, uint32_t performance) {
   performance_ = performance;
 }
 
+void Session::NoteFacesWanted(bool wanted) {
+  if (wanted) return;
+  faces_pause_ = FacesPause::NONE;
+  faces_requested_ = false;
+}
+
 void Session::RetryNow() {
   retry_attempts_ = 0u;
   retry_requested_ = (state_ == SessionState::FAILED && enabled_ && !device_lost_);
@@ -129,6 +142,7 @@ void Session::BeginLoading() {
   suspended_ = false;
   message_.clear();
   passes_limit_ = MAX_PASSES;
+  faces_pause_ = FacesPause::NONE;  // a load from OFF fits (and creates) the twin afresh
   retry_requested_ = false;
   state_ = SessionState::LOADING;
 }
@@ -143,6 +157,7 @@ void Session::Load() {
     return;
   }
   runtime_loaded_ = true;
+  create_failed_ = false;  // Plan 19: a load that works ends the creation failure
   consecutive_failures_ = 0u;
   draining_from_failure_ = false;  // a successful reload closes out any failure drain
   reset_pending_ = true;
@@ -154,7 +169,7 @@ void Session::Load() {
 
 void Session::EnterGrace() {
   state_ = SessionState::GRACE;
-  grace_elapsed_ = std::chrono::milliseconds(0);
+  grace_elapsed_ = std::chrono::steady_clock::duration::zero();
 }
 
 void Session::BeginTeardown(SessionState next) {
@@ -180,7 +195,6 @@ void Session::FinishTeardown() {
     }
   }
   draining_from_failure_ = false;
-  Log(LogLevel::INFO, "NR runtime unloaded; NR memory released");
 }
 
 void Session::ReleaseAllFeaturesAndUnload() {
@@ -192,6 +206,9 @@ void Session::ReleaseAllFeaturesAndUnload() {
   if (runtime_loaded_) {
     host_.UnloadRuntime();
     runtime_loaded_ = false;
+    // Helper hand-over round: logged by every path that unloads the runtime (a drain, a device's destruction, a release before the game's NGX shutdown),
+    // once per unload, so ReShade.log pairs each "NR runtime loaded" with it. A dropped runtime (device lost, abandoned) stays mapped: never logged so.
+    Log(LogLevel::INFO, "NR runtime unloaded; NR memory released");
   }
 }
 
@@ -205,8 +222,7 @@ void Session::EnterFailed(std::string message) {
 void Session::Tick() {
   timeline_.Poll();
   const auto now = host_.Now();
-  const auto elapsed = (last_tick_ ? std::chrono::duration_cast<std::chrono::milliseconds>(now - *last_tick_)
-                                   : std::chrono::milliseconds(0));
+  const std::chrono::steady_clock::duration elapsed = (last_tick_ ? now - *last_tick_ : std::chrono::steady_clock::duration::zero());
   last_tick_ = now;
   ReleaseDueRetired();
   switch (state_) {
@@ -265,7 +281,18 @@ void Session::SampleBudget(std::chrono::steady_clock::time_point now) {
   runtime_bytes_ = host_.QueryRuntimeBytes();
   const auto live = static_cast<uint32_t>(features_.size());
   const MemoryInfo memory = host_.QueryMemory();
-  switch (budget_.Sample(memory, live)) {
+  const YieldAction action = budget_.Sample(memory, live + (face_feature_ ? 1u : 0u));
+  if (action != YieldAction::NONE && face_feature_) {
+    // Keep faces yields first, before any pass drops or NR suspends. Pooled memory only returns when the last feature is released, so this too is a full
+    // rebuild: the same passes, without the twin.
+    faces_pause_ = FacesPause::BUDGET;
+    RetireAllFeatures();
+    reset_pending_ = true;
+    budget_.ResetYield();
+    Log(LogLevel::WARN, "Budget: Keep faces paused, the game needs VRAM");
+    return;
+  }
+  switch (action) {
     case YieldAction::DROP_PASS:
       // Pooled memory only returns when the last feature is released, so a
       // pass drop is a full rebuild with one pass fewer.
@@ -298,6 +325,15 @@ void Session::SampleBudget(std::chrono::steady_clock::time_point now) {
           budget_.ResetYield();  // a further increment needs its own fresh 10 s
           Logf(LogLevel::INFO, "VRAM headroom restored; raising to {} of {} pass(es)", passes_limit_, pass_count_);
         }
+      } else if ((faces_pause_ == FacesPause::BUDGET || faces_pause_ == FacesPause::UNFIT)
+                 && budget_.ResumeReady(memory,
+                                        budget_.FeatureBytes(resume_size_) + faces_surface_bytes_ + (first_use_paid_ ? 0u : budget_.FirstUseBytes()),
+                                        now)) {
+        // Keep faces comes back last, after every dropped pass, with the same hold for the cost of its one feature and its surfaces (fix round 1, M5: a
+        // twin that did not fit waits for it too, so it never cycles at the budget's edge).
+        faces_pause_ = FacesPause::NONE;
+        budget_.ResetYield();
+        Log(LogLevel::INFO, "VRAM headroom restored; Keep faces resumes");
       }
       break;
   }
@@ -317,7 +353,14 @@ void Session::RetireFeature(size_t index) {
   features_.erase(features_.begin() + static_cast<std::ptrdiff_t>(index));
 }
 
+void Session::RetireFaceFeature() {
+  if (!face_feature_) return;
+  retired_.push_back({last_use_mark_, std::move(face_feature_)});
+  faces_evaluated_ = false;
+}
+
 void Session::RetireAllFeatures() {
+  RetireFaceFeature();
   while (!features_.empty()) {
     RetireFeature(features_.size() - 1u);
   }
@@ -332,14 +375,14 @@ void Session::ReleaseDueRetired() {
 }
 
 uint64_t Session::LiveFeatureBytes() const {
-  uint64_t bytes = 0u;
+  uint64_t bytes = (face_feature_ ? budget_.FeatureBytes(face_feature_->Capacity()) : 0u);
   for (const auto& feature : features_) {
     bytes += budget_.FeatureBytes(feature->Capacity());
   }
   return bytes;
 }
 
-bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& chain, std::string_view* reason) {
+bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& chain, bool faces_wanted, bool faces_ready, std::string_view* reason) {
   const auto now = host_.Now();
   const uint32_t desired = std::min(pass_count_, passes_limit_);
   // A pass-count decrease keeps its surplus features live and idle, as the Defaults view does: Evaluate runs the
@@ -350,6 +393,9 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
     if (!Fits(chain.size, feature->Capacity())) {
       rebuild = true;
     }
+  }
+  if (face_feature_ && !Fits(chain.size, face_feature_->Capacity())) {
+    rebuild = true;
   }
   if (!rebuild && !features_.empty()) {
     const Size capacity = features_.front()->Capacity();
@@ -370,31 +416,42 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
     small_since_.reset();
     reset_pending_ = true;
   }
-  if (!retired_.empty()) {
+  if (!faces_wanted) {
+    if (face_feature_) {
+      // Keep faces turned off: the twin goes alone, at its last use. Under the pool rule this frees nothing while pass 1 lives, so the passes keep running
+      // undisturbed instead of waiting for it.
+      RetireFaceFeature();
+      Log(LogLevel::INFO, "Keep faces: its extra NR run stopped");
+    }
+    // Off also ends a pause and a failure: turned on again, the twin is fitted (and created) afresh.
+    faces_pause_ = FacesPause::NONE;
+  }
+  // Only a rebuild (every feature retired at once) waits for the pool to empty; the twin retired alone leaves the passes live.
+  if (features_.empty() && !retired_.empty()) {
     *reason = "resizing";
     return false;
   }
-  if (features_.size() >= desired) return true;
+  // Fix round 1 (M4): without its surfaces this frame the twin is only skipped, never retired.
+  const bool want_face = (faces_wanted && faces_ready && faces_pause_ == FacesPause::NONE);
+  const bool need_face = (want_face && !face_feature_);
+  if (features_.size() >= desired && !need_face) return true;
 
-  const FitResult fit = budget_.Fit(chain.size, desired, chain.surface_bytes, host_.QueryMemory(),
+  // The twin is fitted beside the passes, and yields first: it is made only when every wanted pass fits beside it.
+  const FitResult fit = budget_.Fit(chain.size, desired + (want_face ? 1u : 0u), chain.surface_bytes, host_.QueryMemory(),
                                     LiveFeatureBytes() + chain.held_intermediate_bytes, !first_use_paid_);
-  const auto target = std::max(fit.passes, static_cast<uint32_t>(features_.size()));
+  const bool face_fits = (want_face && fit.passes > desired);
+  const auto target = std::max(std::min(fit.passes, desired), static_cast<uint32_t>(features_.size()));
   if (target == 0u) {
     message_ = std::format("NR skipped: needs {}, {} free", Gigabytes(fit.need_bytes), Gigabytes(fit.available_bytes));
     *reason = "budget";
     return false;
   }
-  const bool fresh_set = features_.empty();
-  while (features_.size() < target) {
+  const auto create = [&](std::unique_ptr<FeatureInterface>* created) -> NVSDK_NGX_Result {
     auto feature = host_.NewFeature();
     const auto before = host_.QueryRuntimeBytes();
     last_use_mark_ = timeline_.MarkNow();  // Create is recorded on this frame's list, win or lose
     const NVSDK_NGX_Result result = feature->Create(list, {.capacity = chain.size, .preset = preset_, .performance = performance_});
-    if (NVSDK_NGX_FAILED(result)) {
-      EnterFailed(std::format("NR feature creation failed: {:#010x}", static_cast<uint32_t>(result)));
-      *reason = "create failed";
-      return false;
-    }
+    if (NVSDK_NGX_FAILED(result)) return result;
     first_use_paid_ = true;
     const auto after = host_.QueryRuntimeBytes();
     if (before && after && *after > *before + budget_.StatsOvercountBytes()) {
@@ -403,10 +460,36 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
       budget_.Calibrate(chain.size,
                         *after - *before - budget_.StatsOvercountBytes() + 8u * chain.size.Pixels());
     }
+    *created = std::move(feature);
+    return result;
+  };
+  const bool fresh_set = features_.empty();
+  while (features_.size() < target) {
+    std::unique_ptr<FeatureInterface> feature;
+    if (const NVSDK_NGX_Result result = create(&feature); NVSDK_NGX_FAILED(result)) {
+      create_failed_ = true;
+      create_result_ = static_cast<uint32_t>(result);
+      EnterFailed(std::format("NR feature creation failed: {:#010x}", static_cast<uint32_t>(result)));
+      *reason = "create failed";
+      return false;
+    }
     features_.push_back(std::move(feature));
   }
   if (fresh_set) {
     reset_pending_ = true;  // a new set starts every pass afresh; an appended pass resets alone (index >= passes_evaluated_)
+  }
+  if (need_face && face_fits) {
+    // Fix round 1 (C2): a twin that cannot be created never turns NR off; the passes run on without it until Keep faces is toggled or NR reloads.
+    if (const NVSDK_NGX_Result result = create(&face_feature_); NVSDK_NGX_FAILED(result)) {
+      faces_pause_ = FacesPause::FAILED_CREATE;
+      Logf(LogLevel::ERR, "Keep faces stopped: its extra NR run could not start ({:#010x}); NR runs on without it", static_cast<uint32_t>(result));
+    } else {
+      Log(LogLevel::INFO, "Keep faces: its extra NR run started (pass 1 runs twice)");
+    }
+  } else if (need_face) {
+    faces_pause_ = FacesPause::UNFIT;  // back after the resume hold (SampleBudget), not at the next frame that fits
+    budget_.ResetYield();              // fix round 2 (1): a fresh hold, never one an earlier pause had been accumulating
+    Log(LogLevel::WARN, "Keep faces paused: no video memory for its extra NR run beside the passes");
   }
   message_ = (target < pass_count_ ? std::format("Budget: running {} of {} passes", target, pass_count_) : std::string());
   return true;
@@ -446,8 +529,14 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   }
   last_size_ = chain.size;
 
+  // Keep faces needs the resolver, which recombines the twin's output with pass 1's.
+  const bool faces_wanted = (inputs.faces.wanted && inputs.resolver != nullptr);
+  faces_requested_ = faces_wanted;
+  faces_surface_bytes_ = (faces_wanted ? inputs.faces.surface_bytes : 0u);
   std::string_view reason;
-  if (!EnsureFeatures(list, chain, &reason)) return {nullptr, 0u, reason};
+  if (!EnsureFeatures(list, chain, faces_wanted, inputs.faces.output != nullptr, &reason)) return {nullptr, 0u, reason};
+  const bool faces_run = (faces_wanted && inputs.faces.output != nullptr && face_feature_ != nullptr && faces_pause_ == FacesPause::NONE);
+  bool faces_ran = false;
 
   ID3D12Resource* color = chain.a;
   ID3D12Resource* output = chain.b;
@@ -468,27 +557,45 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
     const std::optional<Controls>* const own =
         (index > 0u && index - 1u < inputs.later_passes.size() ? &inputs.later_passes[index - 1u] : nullptr);
     const Controls& pass_controls = (own != nullptr && own->has_value() ? **own : controls);
+    EvaluateInputs evaluate_inputs = {
+        .color = color,
+        .output = output,
+        .motion = inputs.motion,
+        .motion_scale_x = inputs.motion_scale_x,
+        .motion_scale_y = inputs.motion_scale_y,
+        .control_mask = inputs.control_mask,
+        .backbuffer = inputs.backbuffer,
+        .ui = inputs.ui,
+        .ui_alpha = inputs.ui_alpha,
+        .reset = pass_reset,
+        .bypass = false,
+        .ui_correction = inputs.ui_correction,
+        .depth_inverted = inputs.depth_inverted,
+    };
     host_.Transition(list, output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    const NVSDK_NGX_Result result = feature->Evaluate(
-        list,
-        {
-            .color = color,
-            .output = output,
-            .motion = inputs.motion,
-            .motion_scale_x = inputs.motion_scale_x,
-            .motion_scale_y = inputs.motion_scale_y,
-            .control_mask = inputs.control_mask,
-            .backbuffer = inputs.backbuffer,
-            .ui = inputs.ui,
-            .ui_alpha = inputs.ui_alpha,
-            .reset = pass_reset,
-            .bypass = false,
-            .ui_correction = inputs.ui_correction,
-            .depth_inverted = inputs.depth_inverted,
-        },
-        pass_controls);
+    NVSDK_NGX_Result result = feature->Evaluate(list, evaluate_inputs, pass_controls);
     host_.Transition(list, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     last_use_mark_ = timeline_.MarkNow();
+    if (index == 0u && faces_run && NVSDK_NGX_SUCCEED(result)) {
+      // Keep faces: pass 1's twin on the same input, with the same inputs but its own controls, output and history (a twin that did not run the previous
+      // frame starts afresh), then the recombination of the two into pass 1's result.
+      evaluate_inputs.output = inputs.faces.output;
+      evaluate_inputs.reset = (pass_reset || !faces_evaluated_);
+      host_.Transition(list, inputs.faces.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      const NVSDK_NGX_Result twin_result = face_feature_->Evaluate(list, evaluate_inputs, inputs.faces.controls);
+      host_.Transition(list, inputs.faces.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      last_use_mark_ = timeline_.MarkNow();
+      if (NVSDK_NGX_SUCCEED(twin_result)) {
+        inputs.resolver->CombineFaces(list, output, inputs.faces.output);
+        faces_ran = true;
+      } else {
+        // Fix round 1 (C2): a failed twin never turns NR off. Pass 1's own result stands (no recombination), the twin goes, and Keep faces stays stopped
+        // until it is toggled or NR loads again; NR's failure count is untouched.
+        faces_pause_ = FacesPause::FAILED_EVALUATE;
+        RetireFaceFeature();
+        Logf(LogLevel::ERR, "Keep faces stopped: its extra NR run failed ({:#010x}); NR runs on without it", static_cast<uint32_t>(twin_result));
+      }
+    }
     if (NVSDK_NGX_FAILED(result)) {
       ++consecutive_failures_;
       message_ = std::format("NR evaluate failed: {:#010x}", static_cast<uint32_t>(result));
@@ -507,6 +614,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   consecutive_failures_ = 0u;
   reset_pending_ = false;
   passes_evaluated_ = run_count;
+  faces_evaluated_ = faces_ran;
   const auto run = static_cast<uint32_t>(run_count);
   const uint32_t wanted = (pass_view_limit_ == 0u ? pass_count_ : std::min(pass_count_, pass_view_limit_));
   return {color, run, (run < wanted ? std::string_view("budget") : std::string_view())};
@@ -546,6 +654,10 @@ void Session::Drop(std::string_view message) {
     feature->Abandon();
   }
   features_.clear();
+  if (face_feature_) {
+    face_feature_->Abandon();
+    face_feature_.reset();
+  }
   for (auto& retired : retired_) {
     retired.feature->Abandon();
   }
@@ -577,8 +689,19 @@ SessionStatus Session::Status() const {
   status.bytes_per_megapixel = budget_.BytesPerMegapixel();
   status.message = message_;
   status.suspended = suspended_;
+  status.create_failed = create_failed_;
+  status.create_result = (create_failed_ ? create_result_ : 0u);
+  if (faces_requested_) {
+    switch (faces_pause_) {
+      case FacesPause::NONE:            break;
+      case FacesPause::BUDGET:          status.faces_note = "Keep faces paused: the game needs video memory"; break;
+      case FacesPause::UNFIT:           status.faces_note = "Keep faces paused: no video memory for its extra NR run"; break;
+      case FacesPause::FAILED_CREATE:   status.faces_note = "Keep faces stopped: its extra NR run could not start"; break;
+      case FacesPause::FAILED_EVALUATE: status.faces_note = "Keep faces stopped: its extra NR run failed"; break;
+    }
+  }
   if (state_ == SessionState::GRACE) {
-    status.grace_remaining = std::max(config_.grace - grace_elapsed_, std::chrono::milliseconds(0));
+    status.grace_remaining = std::max(std::chrono::duration_cast<std::chrono::milliseconds>(config_.grace - grace_elapsed_), std::chrono::milliseconds(0));
   }
   if (state_ == SessionState::FAILED && enabled_ && config_.auto_retry && failed_at_) {
     if (retry_attempts_ < RETRY_DELAYS.size()) {

@@ -33,6 +33,17 @@ struct ColorFixes {
 
 inline constexpr size_t LATER_PASSES = 9u;  // passes 2..10
 
+// Keep faces (2026-10-08, .superpowers/sdd/2026-10-08-keep-faces/design.md): pass 1 runs a second time, the twin, with NR's Character mask on and Skin
+// structure at `protection`; on characters only the part of NR's change broader than `lighting_scale` (% of the work image's height) is kept from the user's
+// own run, in pass 1 and in every later pass.
+struct KeepFacesConfig {
+  bool enabled = false;
+  float protection = 0.f;
+  float lighting_scale = 2.5f;
+  bool show_mask = false;  // tints the recovered face mask into the result, for tuning
+  look::FacesTuning tuning;  // fix round 1 addendum: the mask's Advanced rows
+};
+
 // Plan 5: what the next recordings apply beyond their target; the device context sets it before each one.
 struct LookConfig {
   look::LookSettings look;
@@ -42,7 +53,13 @@ struct LookConfig {
   bool mask = false;                   // Mask = Auto: bind the mask copy once the add-on has copied into it
   bool present_ui_correction = false;  // UICorrection = On: forwarded on the Present path only (no effect without a Backbuffer)
   float frame_seconds = 1.f / 60.f;    // Δt since this placement's last recording: the stabiliser and the governor
+  KeepFacesConfig keep_faces;
 };
+
+// Keep faces: what its four surfaces (the twin's output, the despiked difference, the atlas and the fill's atlas, RGBA16F) cost at `canvas`.
+[[nodiscard]] uint64_t FaceSurfaceBytes(nr::Size canvas);
+// Keep faces: the twin's controls, pass 1's with the Character mask on and Skin structure at `protection`.
+[[nodiscard]] nr::Controls FaceTwinControls(const nr::Controls& pass1, float protection);
 
 // Plan 5 (key decision 4): the look stage's surfaces one recording needs, apart from the main set so that the look never restarts NR's history.
 // Plan 14: shared by Direct3D 12's NrPipeline and Vulkan's VkNrPipeline, which allocate them alike.

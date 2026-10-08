@@ -38,6 +38,9 @@ class VkHost final : public Host {
                   D3D12_RESOURCE_STATES after) override;
 
   [[nodiscard]] const Snippet& GetSnippet() const { return snippet_; }
+  // Plan 19: SnippetConfig::initialize_core_for_device for the next LoadRuntime. The owner decides it at each present (the game created no DLSS on the device
+  // yet, so an NGX core already loaded in the process is initialised for it too), not once at creation, which may come before the game's own DLSS.
+  void SetInitializeCoreForDevice(bool initialize) { config_.initialize_core_for_device = initialize; }
 
  private:
   SnippetConfig config_;

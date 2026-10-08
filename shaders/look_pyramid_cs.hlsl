@@ -14,8 +14,6 @@ Texture2D<float4> change_texture : register(t0);
 UPLIFT_IMAGE_FORMAT("rgba16f") RWTexture2D<float4> gauss_atlas : register(u0);
 UPLIFT_IMAGE_FORMAT("r16f") RWTexture2D<float> peak_atlas : register(u1);
 
-static const float KERNEL[4] = {0.125f, 0.375f, 0.375f, 0.125f};
-
 // A texel of level - 1, clamped to it: the change field, zeroed where not finite, or the atlas.
 float4 SourceTexel(int2 texel, int2 size, int base) {
   const int2 clamped = clamp(texel, int2(0, 0), size - 1);
@@ -43,7 +41,7 @@ void main(uint3 id : SV_DispatchThreadID) {
   float4 sum = float4(0.f, 0.f, 0.f, 0.f);
   [unroll] for (int y = 0; y < 4; ++y) {
     [unroll] for (int x = 0; x < 4; ++x) {
-      sum += (KERNEL[x] * KERNEL[y]) * SourceTexel(origin + int2(x - 1, y - 1), source_size, source_base);
+      sum += (PYRAMID_KERNEL[x] * PYRAMID_KERNEL[y]) * SourceTexel(origin + int2(x - 1, y - 1), source_size, source_base);
     }
   }
   float peak = SourcePeak(origin, source_size, source_base);

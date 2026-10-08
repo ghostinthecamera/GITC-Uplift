@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(uplift VERSION 1.1.7 LANGUAGES C CXX)
+project(uplift VERSION 1.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -171,7 +171,7 @@ file(MAKE_DIRECTORY "${UPLIFT_SHADER_OUTPUT}")
 set(UPLIFT_SHADER_HEADERS)
 foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "motion_cs|cs_6_0"
                         "look_pyramid_cs|cs_6_0" "look_stabilize_cs|cs_6_0" "look_shape_cs|cs_6_0" "resolve_cs|cs_6_0"
-                        "meter_cs|cs_6_0")
+                        "meter_cs|cs_6_0" "faces_cs|cs_6_0")
   string(REPLACE "|" ";" shader_parts "${shader}")
   list(GET shader_parts 0 shader_name)
   list(GET shader_parts 1 shader_profile)
@@ -220,6 +220,8 @@ uplift_add_spirv(look_shape_vk look_shape_cs)
 # Plan 14 Task 10: each later pass's own Transfer/Colour strength, and the exposure meter (sampled for Before upscaling, one per output format for After DLSS).
 uplift_add_spirv(resolve_vk resolve_cs)
 uplift_add_spirv(meter_vk_sampled meter_cs)
+# Keep faces (2026-10-08): the twin's recombination and the later passes' protection.
+uplift_add_spirv(faces_vk faces_cs)
 foreach(format IN ITEMS rgba16f r11g11b10f rgba8 rgb10a2 rgba32f)
   uplift_add_spirv(encode_vk_${format} encode_cs -DUPLIFT_VK_SOURCE_STORAGE=1 "-DUPLIFT_VK_TARGET_FORMAT=\"${format}\"")
   uplift_add_spirv(decode_vk_${format} decode_cs -DUPLIFT_VK_SOURCE_STORAGE=1 "-DUPLIFT_VK_TARGET_FORMAT=\"${format}\"")
@@ -280,7 +282,8 @@ target_link_libraries(uplift_addon_core PUBLIC uplift_sources uplift_ui uplift_n
 target_link_libraries(uplift_vk PUBLIC uplift_addon_core)
 # Plan 13: native Vulkan NR's device functions and completion (on nr::Timeline), the 64-bit half only. Batch 3: the native context of the DLSS
 # placements (addon::VkDlssContext, ReShade-free), which sits on both and on the add-on core.
-target_sources(uplift_vk PRIVATE src/vk/nr_functions.cpp src/vk/nr_timeline.cpp src/addon/vk_dlss_context.cpp)
+# Plan 19: native NR at Present's own command buffers on the effect queue (vk::CommandRing).
+target_sources(uplift_vk PRIVATE src/vk/nr_functions.cpp src/vk/nr_timeline.cpp src/vk/command_ring.cpp src/addon/vk_dlss_context.cpp)
 
 # Plan 7: the D3D11 bridge (design 2026-09-28-uplift-d3d11-design-draft.md). ReShade-free.
 # Plan 8: the D3D10 bridge on it (design 2026-09-29-uplift-d3d10-design.md); no new link library.

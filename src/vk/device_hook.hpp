@@ -19,8 +19,8 @@ struct DeviceRecord {
   // VK_KHR_external_semaphore_win32 because ..."). Empty for a device with all three.
   std::string not_adjusted;
   // Plan 13 (design §3.6), recorded by the 64-bit half only. The instance the physical device was enumerated from (the latest
-  // vkEnumeratePhysicalDevices[Groups] wins; null: Uplift did not see it, R84). `ngx_ready`: the game listed NGX's four extensions,
-  // enabled bufferDeviceAddress, and the device has timeline semaphores; `ngx_missing` names what it lacks otherwise.
+  // vkEnumeratePhysicalDevices[Groups] wins; null: Uplift did not see it, R84). `ngx_ready`: the device was created with NGX's four extensions
+  // and bufferDeviceAddress (the game's own, or Uplift's additions, Plan 19) and has timeline semaphores; `ngx_missing` names what it lacks otherwise.
   VkInstance instance = VK_NULL_HANDLE;
   bool ngx_ready = false;
   std::string ngx_missing;
@@ -28,12 +28,17 @@ struct DeviceRecord {
   // it, or Uplift's adjustment did). Native NR's encode shaders write an RG16F storage image, one of the extended formats.
   bool storage_extended_supported = false;
   bool storage_extended_enabled = false;
+  // Plan 19: the first queue family the game created a queue in that supports graphics, the family of ReShade's effect queue (its primary graphics
+  // queue, vulkan_hooks_device.cpp:138-152, 762-767); UINT32_MAX when there is none or the loader could not tell.
+  uint32_t graphics_family = UINT32_MAX;
 };
 
 // Plan 11 (Vulkan design §2): a MinHook detour on vulkan-1.dll!vkCreateDevice. ReShade's layer runs the add-on's AddonInit inside the game's
 // vkCreateInstance, before any device exists, so a detour installed there is in time for every device. The detour adds
 // VK_KHR_external_semaphore_win32, VK_KHR_external_memory_win32 and timeline semaphores when the physical device offers them and the game did
-// not list them, to a copy of the create info (the game's memory is never written).
+// not list them, to a copy of the create info (the game's memory is never written). The 64-bit half adds what NGX needs for native NR too
+// (Plan 19): its four extensions and bufferDeviceAddress, on the same terms (BuildDeviceAdjustment's `add_ngx`). A refusal retries without NGX's
+// additions first, then with the game's own request (R49).
 //
 // Self-contained (key decision b): static state behind its own shared mutex, never the add-on's lock; it throws nothing; no lock is held across
 // the original call; it raises no ReShade event. Install pins vulkan-1.dll (final review I-1: DXVK frees the loader with its last instance, and
@@ -50,8 +55,14 @@ class DeviceHook {
   static std::optional<std::string> Install();
   [[nodiscard]] static bool Installed();
   // `adjust`: AdjustVulkanDevices, and not turned off by the pending marker. `reshade_adds_memory_win32`: ReShade >= 6.8 adds
-  // VK_KHR_external_memory_win32 to every device itself. `pending_marker`: the file written before an adjusted device is created.
-  static void Configure(bool adjust, bool reshade_adds_memory_win32, std::filesystem::path pending_marker);
+  // VK_KHR_external_memory_win32 to every device itself. `pending_marker`: the file written before an adjusted device is created. `adjust_ngx`:
+  // AdjustVulkanDevicesForNgx (Plan 19 T1b; the 64-bit half only adds NGX's extensions and bufferDeviceAddress, and only with `adjust` too).
+  // `native_nr_chosen` (T5): VulkanNr is Native as read at AddonInit. Only the native route needs NGX's additions (Direct3D 12 and the helper never do),
+  // so they are made only then too; the sharing extensions do not depend on it. A device made without them says so in `ngx_missing` (Native then needs
+  // a game restart). `native_nr_latched` (Plan 19 T6 fix round, M-2): VulkanNativeNr is 0 (Uplift's latch): no NGX additions either, and `ngx_missing`
+  // names the key and Clear latch instead.
+  static void Configure(bool adjust, bool adjust_ngx, bool native_nr_chosen, bool native_nr_latched, bool reshade_adds_memory_win32,
+                        std::filesystem::path pending_marker);
   // A copy of what the detour recorded for `device`; nullopt for a device it never saw.
   [[nodiscard]] static std::optional<DeviceRecord> Find(VkDevice device);
   // Every present event of `device`: the second one of an adjusted device proves the first real present returned, so the adjustment works in
@@ -65,10 +76,15 @@ class DeviceHook {
   // no adjusted device took the process down, whatever device was still alive then, unless a creation is under way (a thread inside an adjusted
   // vkCreateDevice: a game's crash handler that calls ExitProcess ends up here too). No lock.
   static void NoteProcessExit();
-  // AddonInit (the first call of the process only; later ones say true): a marker left by the last start means an adjusted device never presented
-  // and never went. True when there is none. When one was left, it is deleted, later devices get the "Uplift turned its adjustment off" reason,
-  // and the result is false: the caller turns AdjustVulkanDevices off, saves, and says so.
-  [[nodiscard]] static bool CheckMarker(const std::filesystem::path& pending_marker);
+  // What a marker left by the last start asks for (Plan 19 T1b: two tiers).
+  enum class MarkerVerdict {
+    NONE,        // no marker (or not the process's first call)
+    NGX_OFF,     // first tier: a device with NGX's additions waited on it; the caller turns AdjustVulkanDevicesForNgx off, saves, and says so
+    ADJUST_OFF,  // second tier: a device without them did; the caller turns AdjustVulkanDevices off, saves, and says so
+  };
+  // AddonInit (the first call of the process only; later ones say NONE): a marker left by the last start means an adjusted device never presented
+  // and never went. When one was left, it is deleted and later devices get the matching "Uplift turned ... off" reason.
+  [[nodiscard]] static MarkerVerdict CheckMarker(const std::filesystem::path& pending_marker);
 #if defined(_WIN64)
   // Plan 13 (design §3.6, 64-bit only): Install also detours the loader's vkEnumeratePhysicalDevices, vkEnumeratePhysicalDeviceGroups (the
   // instance native NR's VULKAN_Init_Ext2 needs) and vkDestroyDevice. Empty once all three are in; else why not (native NR is then unavailable).
@@ -77,6 +93,9 @@ class DeviceHook {
   // lock held and inside a try: the add-on tears the device's native NR down there (design §3.6). Then the detour forgets the device's NGX
   // core initialisation (nr::Snippet::ForgetVulkanDevice) and calls the original. Set once, from AddonInit.
   static void SetDestroyCallback(void (*callback)(VkDevice device));
+  // Plan 19: create_device(vulkan), in each vkCreateInstance, with the app's API version as ReShade codes it (major << 12 | minor << 8). ReShade appends
+  // VK_KHR_push_descriptor to a device of an instance below 1.4; the latest instance's version decides (0, none seen yet, reads below 1.4).
+  static void NoteInstanceApiVersion(uint32_t api_version);
 #endif
 };
 

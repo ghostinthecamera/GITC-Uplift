@@ -103,9 +103,15 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const bool resolution_scale_hidden =
       (descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM);
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && settings->resolution_mode == ResolutionMode::FULL);
+  // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
+  const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
+                                 || descriptor.key == "FaceLightingDensity" || descriptor.key == "FaceSpeckSize";
+  const bool keep_faces_off = ((descriptor.key == "FaceProtection" || descriptor.key == "LightingScale" || keep_faces_tuning) && !settings->keep_faces);
+  // Round 5: the fill's radius and tolerance only while it is on.
+  const bool fill_off = ((descriptor.key == "FaceFillRadius" || descriptor.key == "FaceFillTolerance") && !settings->face_tuning.fill_skin);
   // ui-review.md §3 rule 1: these rows matter only after a choice in the row just above them, so they
   // are hidden -- not merely greyed -- until that choice is made.
-  if (pass_follows || shaping_off || stabilize_off || not_metered || resolution_scale_hidden || upsampling_hidden) {
+  if (pass_follows || shaping_off || stabilize_off || not_metered || resolution_scale_hidden || upsampling_hidden || keep_faces_off || fill_off) {
     return false;
   }
 
@@ -113,10 +119,17 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   // ui-review.md §3 rule 1 / §2 finding 5: Game state after NR only matters once NR can run inside the
   // game's frame; while no DLSS placement can run this session, it is greyed and says why.
   // Plan 9: the Direct3D 9Ex row is greyed the same way where it does nothing (every game but a Direct3D 9 one).
+  // Plan 19: the VulkanNr row likewise, everywhere but a 64-bit Vulkan game.
+  // Keep faces (2026-10-08): its rows where it cannot run, and the face mask's view (in Advanced, far from the switch) while it is off.
+  const bool keep_faces_row = (descriptor.key == "KeepFaces" || descriptor.key == "FaceProtection" || descriptor.key == "LightingScale"
+                               || descriptor.key == "ShowFaceMask" || keep_faces_tuning);
   const std::string_view disabled_reason =
-      (descriptor.key == "StateRestore" && !view.dlss_unavailable.empty())  ? std::string_view(view.dlss_unavailable)
-      : (descriptor.key == "UseD3D9Ex" && !view.d3d9ex_unavailable.empty()) ? std::string_view(view.d3d9ex_unavailable)
-                                                                            : std::string_view();
+      (descriptor.key == "StateRestore" && !view.dlss_unavailable.empty())     ? std::string_view(view.dlss_unavailable)
+      : (descriptor.key == "UseD3D9Ex" && !view.d3d9ex_unavailable.empty())    ? std::string_view(view.d3d9ex_unavailable)
+      : (descriptor.key == "VulkanNr" && !view.vulkan_nr_unavailable.empty()) ? std::string_view(view.vulkan_nr_unavailable)
+      : (keep_faces_row && !view.keep_faces_unavailable.empty())               ? std::string_view(view.keep_faces_unavailable)
+      : (descriptor.key == "ShowFaceMask" && !settings->keep_faces)            ? std::string_view("Turn on Keep faces (Look) first")
+                                                                               : std::string_view();
   ImGui::BeginDisabled(!disabled_reason.empty() || read_only);
   bool changed = false;
   std::string saved_note;  // Plan 14 (R90): the Resolution combo's tooltip, while the mode that runs is not the stored one
@@ -212,6 +225,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           state->drag.local_tone = active;
         } else if (descriptor.key == "ResolutionScale") {
           state->drag.resolution_scale = active;
+        } else if (descriptor.key == "FaceProtection") {
+          state->drag.face_protection = active;
         }
         if (descriptor.pass != 0u && (descriptor.flags & setting_flags::RESTARTS_HISTORY) != 0u) {
           state->drag.pass_slider |= active;
@@ -227,6 +242,14 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           std::array<std::string_view, 3> why = {};
           if (!disabled_reason.empty()) {
             why.fill(disabled_reason);  // e.g. Game state after NR, greyed while no DLSS placement can run
+          }
+          if (descriptor.key == "VulkanNr" && disabled_reason.empty()) {
+            // Plan 19 (the owner's UI rules): Native greyed where it cannot run, with why; the highlight is the route that runs. T5: Direct3D 12 too.
+            why[static_cast<size_t>(VulkanNrMode::NATIVE)] = view.vulkan_native_unavailable;
+            why[static_cast<size_t>(VulkanNrMode::DIRECT3D_12)] = view.vulkan_d3d12_unavailable;
+            if (view.vulkan_nr_running) {
+              value = static_cast<int>(*view.vulkan_nr_running);
+            }
           }
           std::array<std::string_view, 3> tips = {};
           tips.fill(descriptor.tooltip);
@@ -319,6 +342,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       ImGui::TextDisabled("%s", note.c_str());
     }
   }
+  if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty() && !view.vulkan_nr_note.empty()) {
+    ImGui::TextDisabled("%s", view.vulkan_nr_note.c_str());
+  }
   // The reset arrow after a row that differs from its default (design §3.16, G1). The Enable
   // switch itself is the one row without an arrow: "reset" would only mean "switch NR off".
   if (descriptor.section != SettingSection::TOP && !IsDefault(*settings, descriptor)) {
@@ -401,6 +427,7 @@ bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* st
     ImGui::SameLine();
     if (ImGui::SmallButton("Clear latch")) {
       settings->dlss_placement_blocked = false;
+      settings->vulkan_native_nr = true;  // Plan 19 fix round (I-C): native Vulkan NR's latch too, from the next start
       changed = true;
     }
   }
@@ -408,17 +435,18 @@ bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* st
   return changed;
 }
 
-// Plan 14: the Motion vectors row -- Off / DLSS / Launchpad -- from Setup, as the NR stage row.
+// Plan 14: the Motion vectors row -- Off / DLSS / Launchpad / Lumenite (2026-10-08) -- from Setup, as the NR stage row.
 bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* state) {
   ImGui::PushID("MotionVectors");
-  static constexpr std::array<const char*, 3> OPTIONS = {"Off", "DLSS", "Launchpad"};
-  std::array<std::string_view, 3> tips = {
+  static constexpr std::array<const char*, 4> OPTIONS = {"Off", "DLSS", "Launchpad", "Lumenite"};
+  std::array<std::string_view, 4> tips = {
       "No motion vectors, anywhere.",
       "The game's own DLSS motion vectors: bound directly inside the frame, and copied for Present when "
       "NR stage is Present.",
       "iMMERSE Launchpad on, and Uplift.fx's Uplift technique below it. The presented image only.",
+      "LumeniteFX's Kernel on, and Uplift.fx's Uplift technique below it. The presented image only. Auto uses Launchpad when both are on.",
   };
-  std::array<std::string_view, 3> why = {};
+  std::array<std::string_view, 4> why = {};
   for (size_t index = 0u; index < why.size(); ++index) {
     why[index] = view.setup.motion_options[index].why;
   }
@@ -631,6 +659,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
         state->retry_now = true;
         if (view.dlss_latched) {
           settings->dlss_placement_blocked = false;
+          settings->vulkan_native_nr = true;
           changed = true;
         }
       }
@@ -638,6 +667,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     case CardButton::CLEAR_LATCH:
       if (ImGui::Button("Clear latch##card")) {
         settings->dlss_placement_blocked = false;
+        settings->vulkan_native_nr = true;
         changed = true;
       }
       break;

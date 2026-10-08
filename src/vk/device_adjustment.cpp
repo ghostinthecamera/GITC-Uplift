@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <initializer_list>
 #include <string_view>
 
 namespace uplift::vk {
@@ -28,6 +29,22 @@ DeviceAdjustment BuildDeviceAdjustment(const DeviceAdjustmentInput& input) {
   if (input.adjust && !input.vulkan12_features && !input.timeline_features && offered(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)) {
     append(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
     adjustment.chain_timeline_features = true;
+  }
+
+  if (input.adjust && input.add_ngx) {
+    const bool ext_address = listed(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+    for (const char* name : {VK_NVX_BINARY_IMPORT_EXTENSION_NAME, VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+                             VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME}) {
+      const std::string_view view = name;
+      if (listed(view) || !offered(view)) continue;
+      if (view == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME && ext_address) continue;
+      if (view == VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME && input.reshade_adds_push_descriptor) continue;
+      adjustment.ngx_added.push_back(name);
+    }
+    const bool khr_address = listed(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
+                             || std::ranges::any_of(adjustment.ngx_added, [](std::string_view name) { return name == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME; });
+    adjustment.chain_buffer_device_address = (!input.vulkan12_features && !input.buffer_device_address_features && input.buffer_device_address_supported
+                                              && !ext_address && khr_address);
   }
 
   adjustment.presents = listed(VK_KHR_SWAPCHAIN_EXTENSION_NAME);

@@ -8,10 +8,25 @@
 #include "nr/vk_handles.hpp"
 #include "nr/vk_host.hpp"
 #include "sources/after_dlss_source.hpp"
+#include "vk/format.hpp"
 #include "vk/loader.hpp"
 
 namespace uplift::addon {
+
 namespace {
+
+// Fix round 1 (M1): the per-frame trace's name of the motion a present bound (an older copy adds its age there).
+template <typename Bound>
+std::string_view BoundMotionName(Bound bound) {
+  switch (bound) {
+    case Bound::NONE:       return "none";
+    case Bound::LAUNCHPAD:  return "Launchpad's UPLIFT_MV";
+    case Bound::OWN_COPY:   return "DLSS's vectors (this frame's copy)";
+    case Bound::OLDER_COPY: return "DLSS's vectors (an older copy)";
+    case Bound::NO_COPY:    return "no copy of DLSS's vectors";
+  }
+  return "none";
+}
 
 constexpr uint32_t TRACE_FRAMES = 8u;  // spec §13: per-frame traces for 8 frames after a state change
 // v2 design §3.1 (plan amendment 11): DLSS_IDLE_MINIMUM is in addon/placement.hpp since Plan 18 Task 12 (fix round 1), which shares it.
@@ -20,6 +35,76 @@ constexpr auto DLSS_LATCH_WINDOW = std::chrono::seconds(10);
 // Key decision h (design §1.2): the per-device reservation NGX keeps on a Vulkan device after native NR's first use.
 constexpr uint64_t VK_FIRST_USE_BYTES = 640ull << 20u;
 constexpr double MIB = 1024.0 * 1024.0;
+// Plan 19: the CPU wait for the game's present queue before native NR at Present (the bridge's WAIT_CAP_MS); a timeout skips the frame.
+constexpr auto PRESENT_QUEUE_WAIT = std::chrono::milliseconds(2000);
+// T6 (I-2): this many present-queue timeouts in a row stop NR at Present here for good, as three stop the bridge.
+constexpr uint32_t PRESENT_QUEUE_TIMEOUT_LIMIT = 3u;
+// T6 (M-3): how long Teardown waits for Uplift's own command buffers (the game idled the device, so they should be done already).
+constexpr auto RING_TEARDOWN_WAIT = std::chrono::milliseconds(2000);
+// In-game round 1 (bug A): how long a switch from native Present to a DLSS stage waits for Uplift's own command buffers before NR's features may go.
+constexpr auto RING_SWITCH_WAIT = std::chrono::milliseconds(2000);
+
+// Review 97f99e3: the canvas NR runs at for a recording at `output` with `layout` (VkNrPipeline's Resolve).
+nr::Size CanvasOf(const sources::WorkLayout& layout, nr::Size output) {
+  const nr::Size image = (layout.image.Empty() ? output : layout.image);
+  return (layout.canvas.Empty() ? image : layout.canvas);
+}
+
+// Review 97f99e3 (Important 2): what NGX is handed as motion for `inputs` at `canvas` (`in_canvas`: Before upscaling pads into a larger canvas, so the game's
+// vectors are copied into an RG16F canvas image).
+VkMotionShape MotionShapeOf(const nr::FrameInputs& inputs, nr::Size canvas, bool in_canvas) {
+  if (inputs.motion.resource == nullptr) return {.kind = VkMotionKind::NONE, .format = VK_FORMAT_R16G16_SFLOAT};
+  if (in_canvas) return {.kind = VkMotionKind::GAME_VECTORS, .format = VK_FORMAT_R16G16_SFLOAT};
+  const NVSDK_NGX_ImageViewInfo_VK& view = nr::VkResourceOf(inputs.motion.resource)->Resource.ImageViewInfo;
+  const uint32_t width = (inputs.motion.rect.width != 0u ? inputs.motion.rect.width : view.Width);
+  const uint32_t height = (inputs.motion.rect.height != 0u ? inputs.motion.rect.height : view.Height);
+  return {.kind = VkMotionKind::GAME_VECTORS, .format = static_cast<uint32_t>(view.Format), .low_res = (width < canvas.width || height < canvas.height)};
+}
+
+std::string_view MotionKindName(VkMotionKind kind) {
+  switch (kind) {
+    case VkMotionKind::NONE:         return "none";
+    case VkMotionKind::GAME_VECTORS: return "the game's vectors";
+    case VkMotionKind::PRESENT_COPY: return "DLSS's vectors copied for Present";
+    case VkMotionKind::LAUNCHPAD:    return "Launchpad's UPLIFT_MV";
+  }
+  return "none";
+}
+
+std::string DescribeMotion(const VkMotionShape& shape) {
+  if (shape.kind == VkMotionKind::NONE) return std::string(MotionKindName(shape.kind));
+  return std::format("{} (VkFormat {}, {})", MotionKindName(shape.kind), shape.format, (shape.low_res ? "low-res" : "full-res"));
+}
+
+std::string_view StreamName(VkNrStream stream) {
+  switch (stream) {
+    case VkNrStream::OWN_BUFFERS:      return "Present (Uplift's own command buffers)";
+    case VkNrStream::AFTER_DLSS:       return "After DLSS (the game's command buffers)";
+    case VkNrStream::BEFORE_UPSCALING: return "Before upscaling (the game's command buffers)";
+    case VkNrStream::NONE:             break;
+  }
+  return "no placement";
+}
+
+// T6 (M-2): the format the swap-chain image's bits are copied raw into: the bridge's shared format, with an sRGB one (a swap chain ReShade did not make
+// mutable reports its own sRGB format) taken to its UNORM sibling, so the RGBA16F blit never linearises the stored values.
+DXGI_FORMAT PresentCopyFormat(DXGI_FORMAT reported) {
+  const DXGI_FORMAT shared = vk::SharedFormatOf(reported);
+  switch (shared) {
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    default:                              return shared;
+  }
+}
+
+// Plan 19: the layout ReShade keeps the swap-chain image in at a trigger (vk::Usage is ReShade's api::resource_usage; its Vulkan backend maps them so).
+VkImageLayout LayoutOf(vk::Usage usage) {
+  switch (usage) {
+    case vk::Usage::PRESENT:       return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    case vk::Usage::RENDER_TARGET: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    default:                       return VK_IMAGE_LAYOUT_GENERAL;
+  }
+}
 
 }  // namespace
 
@@ -56,12 +141,19 @@ std::unique_ptr<VkDlssContext> VkDlssContext::Create(VkContextSetup setup, std::
   loader->get_memory_properties(setup.binding.physical, &memory);
 
   std::unique_ptr<VkDlssContext> context(new VkDlssContext(*functions, setup.binding.device, storage_formats));
+  context->physical_ = setup.binding.physical;
   context->completion_ = vk::NrCompletion::Create(context->functions_, context->device_, std::move(setup.signal), error);
   if (!context->completion_) return nullptr;
-  setup.snippet.initialize_core_for_device = false;  // batch 1 review, minor 4: the game's own core is never initialised a second time
-  context->host_ = (setup.host != nullptr ? std::move(setup.host)
-                                          : std::make_unique<nr::VkHost>(std::move(setup.snippet), setup.binding, std::move(setup.adapter),
-                                                                         context->functions_));
+  // Batch 1 review, minor 4: false for a DLSS game, whose own core is never initialised a second time. Plan 19: decided again at each present
+  // (FrameConfig::vk_initialize_core), before the Session loads.
+  setup.snippet.initialize_core_for_device = false;
+  if (setup.host != nullptr) {
+    context->host_ = std::move(setup.host);
+  } else {
+    auto vk_host = std::make_unique<nr::VkHost>(std::move(setup.snippet), setup.binding, std::move(setup.adapter), context->functions_);
+    context->vk_host_ = vk_host.get();
+    context->host_ = std::move(vk_host);
+  }
   context->session_ = std::make_unique<nr::Session>(*context->host_, context->completion_->Timeline(),
                                                     nr::SessionConfig{.budget = {.first_use_bytes = VK_FIRST_USE_BYTES}});
   context->pipeline_ = std::make_unique<sources::VkNrPipeline>(context->functions_, context->device_, memory, *context->session_,
@@ -73,6 +165,16 @@ std::unique_ptr<VkDlssContext> VkDlssContext::Create(VkContextSetup setup, std::
   // Plan 14: the look stage's pyramid peaks (R16F) and scene-cut state (RGBA32F) are storage images too; without them the look is skipped, as on a
   // Direct3D 12 device without typed UAV loads.
   context->pipeline_->SetLookStorage(storage(VK_FORMAT_R16_SFLOAT) && storage(VK_FORMAT_R32G32B32A32_SFLOAT));
+  // Plan 19 (hard rule 1): native NR at Present records into command buffers of Uplift's own, from the effect queue's family; never ReShade's immediate list.
+  if (setup.queue_family != UINT32_MAX) {
+    context->before_present_load_ = std::move(setup.before_present_load);
+    context->queue_family_ = setup.queue_family;
+    context->ring_ = vk::CommandRing::Create(context->functions_, context->device_, setup.queue_family, error);
+    if (!context->ring_) {
+      context->Teardown();  // nothing ran on the GPU yet
+      return nullptr;
+    }
+  }
   return context;
 }
 
@@ -101,8 +203,22 @@ void VkDlssContext::SetDlssUnavailableReason(std::string reason) {
   dlss_unavailable_reason_ = std::move(reason);
 }
 
-bool VkDlssContext::WantsNr() const {
+bool VkDlssContext::AtDlssPlacement() const {
   return (!dropped_ || core_shut_down_) && !torn_down_ && (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
+}
+
+bool VkDlssContext::WouldRunDlssStage(ui::PlacementSource source) const {
+  if (torn_down_ || dropped_ || core_shut_down_ || source != ui::PlacementSource::DLSS) return false;
+  // BeginFrame's own choice (its `choose`), with the off latch as it stands.
+  const PlacementChoice choice = ChoosePlacement(ui::PlacementSource::AUTO, dlss_unavailable_reason_, dlss_seen_, BeforeUpscaling(), {}, dlss_off_.Off());
+  return choice.placement == Placement::AFTER_DLSS || choice.placement == Placement::BEFORE_UPSCALING;
+}
+
+bool VkDlssContext::WantsNr() const {
+  // T6 (I-3): after the game's NGX shutdown only a DLSS placement keeps the claim (Plan 13's exit protection); at Present the route goes on along the chain.
+  // Review 97f99e3 (Important 1): a dropped NR keeps it for good, as its runtime may still be mapped.
+  if (dropped_ && !torn_down_) return true;
+  return AtDlssPlacement() || (!dropped_ && !core_shut_down_ && !torn_down_ && NativePresent());
 }
 
 void VkDlssContext::ResetFrameStatus() {
@@ -115,17 +231,28 @@ void VkDlssContext::ResetFrameStatus() {
   motion_scale_y_ = 1.f;
 }
 
-void VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& config, bool nr_allowed, bool present_holds_nr,
-                               std::chrono::steady_clock::time_point now) {
+TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& config, bool nr_allowed, bool present_holds_nr,
+                                       std::chrono::steady_clock::time_point now, const VkPresentFrame& present) {
+  frame_ready_ = false;
   // Checked every frame, even OFF: a lost device is never signalled or loaded into again.
   if (!torn_down_ && !dropped_ && completion_->PollDeviceLost()) {
     NoteDeviceLost(now);
   }
+  // T6 fix round (I-A): a clean release at the game's NGX shutdown during native Present stops it here only once the game has gone on presenting; a game
+  // that shut NGX down to exit reaches vkDestroyDevice first. Until then nothing runs and the route stays native.
+  if (pending_stop_since_ && present_stopped_.empty() && !torn_down_ && !dropped_
+      && CoreShutdownStopDue(++pending_stop_presents_, now - *pending_stop_since_)) {
+    present_stopped_ = "the game shut NVIDIA's NGX down on its device";
+  }
   if (torn_down_ || dropped_ || core_shut_down_) {
     ResetFrameStatus();
-    return;
+    return TriggerPoint::NONE;
   }
   config_ = config;
+  present_frame_ = present;
+  if (vk_host_ != nullptr) {
+    vk_host_->SetInitializeCoreForDevice(config.vk_initialize_core);  // Plan 19: read at the Session's next load
+  }
   config_.nr_allowed = nr_allowed;
   present_holds_nr_ = present_holds_nr;
   controls_ = config.controls;
@@ -155,6 +282,22 @@ void VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& config, b
   if (placement_.placement != Placement::AFTER_DLSS && placement_.placement != Placement::BEFORE_UPSCALING) {
     ResetFrameStatus();  // the DLSS placements keep their last evaluate's result
   }
+  // Plan 19: the frame native NR at Present runs on, resolved before the Session hears its size. In-game round 1: Uplift's own command buffers are made
+  // again when Present comes back after a DLSS stage released them.
+  if (NativePresent() && ring_ == nullptr && queue_family_ != UINT32_MAX && !ring_failed_) {
+    std::string error;
+    ring_ = vk::CommandRing::Create(functions_, device_, queue_family_, &error);
+    if (!ring_) {
+      ring_failed_ = true;
+      nr::Logf(nr::LogLevel::ERR, "Vulkan: {}; NR at Present cannot run natively here", error);
+    }
+  }
+  if (NativePresent()) {
+    ResolvePresentFrame(now);
+  } else {
+    present_encoding_.reset();
+    SetPresentProblem({});
+  }
 
   const ui::SessionOptions& options = config.session;
   session_->SetGrace(options.grace);
@@ -162,6 +305,7 @@ void VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& config, b
   session_->SetMarginOverride(options.margin_override_bytes);
   session_->SetCreateOptions(options.preset, options.performance);
   session_->SetPassCount(options.pass_count);
+  session_->NoteFacesWanted(config.look.keep_faces.enabled);  // Keep faces fix round 2 (4): its off edge, even on a frame NR then skips
   session_->SetAutoRetry(options.auto_retry);
   session_->SetPassViewLimit(config.pass_view_limit);
   if (config.settings_generation != settings_generation_) {
@@ -177,18 +321,241 @@ void VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& config, b
   // present event, so its first compile stays out of the game's evaluate; they are released (at their marks) as soon as the add-on stops asking.
   if (config.present_motion_copy) {
     pipeline_->PreparePresentMotion();
+    NotePresentMotionSecond(now);
   } else {
     pipeline_->ReleasePresentMotion();
     present_motion_logged_ = false;
+    present_motion_counters_ = {};  // fix round 1 (M2): the next window starts when the copies are asked for again
   }
   // Batch 2 carry: the Session hears the frame size every frame, in every state (its FAILED retry and the resume size depend on it).
   if (const nr::Size frame_size = SessionFrameSize(); !frame_size.Empty()) {
     session_->NoteFrameSize(frame_size);
   }
   UpdateSession(now);
+  if (dropped_ || !NativePresent()) return TriggerPoint::NONE;  // In-game round 1: a switch whose old GPU work did not finish drops NR
+  // Plan 19: as DeviceContext's Present path: a recording is readied only while NR runs and the frame can take it.
+  frame_ready_ = (session_->State() == nr::SessionState::ACTIVE && ring_ != nullptr && present_problem_.empty() && present_encoding_.has_value()
+                  && present.back_buffer.image != VK_NULL_HANDLE);
+  return trigger_.OnPresent(present.marker_expected, config.effects_on);
+}
+
+void VkDlssContext::ResolvePresentFrame(std::chrono::steady_clock::time_point now) {
+  const vk::ImageInfo& image = present_frame_.back_buffer;
+  present_encoding_.reset();
+  if (image.image == VK_NULL_HANDLE) return;  // no frame this present: nothing to say
+  // The bridge's rules for what reaches NR (copy access, one sample, a format Uplift processes), without its sharing extension.
+  std::string problem = vk::BackBufferProblem(image, true);
+  const DXGI_FORMAT copy_format = PresentCopyFormat(image.format);
+  copy_format_ = vk::VkFormatOf(copy_format);
+  if (problem.empty() && !Blittable(copy_format_)) {
+    problem = std::format("This GPU's Vulkan driver cannot convert the back buffer's format (VkFormat {}) for NR at Present", static_cast<int>(copy_format_));
+  }
+  if (problem.empty()) {
+    // The copy keeps the image's stored values (an sRGB-created image's included), so the encoding is the one the bridge resolves for its shared copy.
+    present_encoding_ = color::ResolveEncoding(config_.encoding, present_frame_.color_space, copy_format);
+    if (!present_encoding_) {
+      problem = "HDR10 HLG output is not supported";
+    }
+  }
+  SetPresentProblem(std::move(problem));
+  if (!present_encoding_) return;
+  present_diffuse_white_nits_ = (config_.diffuse_white_nits > 0.f ? config_.diffuse_white_nits : color::DefaultDiffuseWhiteNits(*present_encoding_));
+  present_layout_ = SettleLayout(image.size, false, now);  // the Session hears the canvas
+}
+
+void VkDlssContext::SetPresentProblem(std::string problem) {
+  if (problem == present_problem_) return;
+  if (!problem.empty()) {
+    nr::Log(nr::LogLevel::WARN, problem);
+  }
+  present_problem_ = std::move(problem);
+}
+
+bool VkDlssContext::Blittable(VkFormat copy_format) {
+  if (copy_format == blit_checked_format_) return blit_supported_;
+  blit_checked_format_ = copy_format;
+  const vk::Loader* const loader = vk::Loader::Get();
+  if (loader == nullptr || loader->get_physical_device_format_properties == nullptr || physical_ == VK_NULL_HANDLE) {
+    blit_supported_ = true;  // nothing to ask: NVIDIA's drivers blit every display format
+    return blit_supported_;
+  }
+  const auto blits = [&](VkFormat format) {
+    VkFormatProperties properties = {};
+    loader->get_physical_device_format_properties(physical_, format, &properties);
+    constexpr VkFormatFeatureFlags BOTH = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    return (properties.optimalTilingFeatures & BOTH) == BOTH;
+  };
+  blit_supported_ = (copy_format != VK_FORMAT_UNDEFINED && blits(copy_format) && blits(VK_FORMAT_R16G16B16A16_SFLOAT));
+  return blit_supported_;
+}
+
+std::string_view VkDlssContext::CheckMotion(const VkMotionShape& shape) {
+  switch (VkMotionCheck(session_motion_, shape, motion_mismatches_)) {
+    case VkMotionVerdict::RUN:
+      session_motion_ = shape;
+      motion_mismatches_ = 0u;
+      return {};
+    case VkMotionVerdict::SKIP:
+      ++motion_mismatches_;
+      return "the motion vectors changed (NR reloads if that lasts)";
+    case VkMotionVerdict::RELOAD:
+      ++motion_mismatches_;
+      if (input_reload_reason_.empty()) {
+        input_reload_reason_ = std::format("its motion vectors changed from {} to {}", DescribeMotion(*session_motion_), DescribeMotion(shape));
+      }
+      return "the motion vectors changed: NR reloads";
+  }
+  return {};
+}
+
+sources::PipelineResult VkDlssContext::SkipPresent(std::string_view reason) {
+  nr_applied_ = false;
+  passes_run_ = 0u;
+  skip_reason_ = reason;
+  skip_from_session_ = false;
+  return {.reason = reason};
+}
+
+sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage usage, const VkPresentQueues& queues, const VkLaunchpadMotion& launchpad,
+                                                  std::chrono::steady_clock::time_point now) {
+  if (point == TriggerPoint::NONE || !frame_ready_) return {};
+  frame_ready_ = false;
+  if (torn_down_ || dropped_ || core_shut_down_ || ring_ == nullptr || queues.queue == VK_NULL_HANDLE || !present_encoding_) return {};
+  // Spec §11: on the Present path NR would also run on generated frames.
+  if (config_.ngx_frame_generation > 0u && !config_.present_with_frame_gen) return SkipPresent("frame generation is on");
+  const auto log_failure = [this](std::string_view what) {
+    if (!std::exchange(present_failure_logged_, true)) {
+      nr::Logf(nr::LogLevel::WARN, "Vulkan: {}; NR skips such frames at Present", what);
+    }
+  };
+  if (queues.flush_present_queue) {
+    // Design §3.4 case 2, as the bridge: Uplift's submission is ordered after the game's frame only on the effect queue, so the present queue is flushed
+    // and waited for on the CPU first, before ReShade's effects so far are flushed (they must not reach the queue ahead of the game's frame either).
+    second_queue_ = true;
+    switch (ring_->WaitForQueue(queues.flush_present_queue, PRESENT_QUEUE_WAIT)) {
+      case vk::CommandRing::Status::READY:
+        present_queue_timeouts_ = 0u;
+        break;
+      case vk::CommandRing::Status::BUSY: return SkipPresent("the game's present queue is still busy");  // the last timeout's fence is still pending
+      case vk::CommandRing::Status::TIMEOUT:
+        log_failure("the game's present queue did not finish within 2 s");
+        // T6 (I-2): three in a row, as the bridge latches: no more waits here; the add-on moves NR at Present along the chain (PresentStopped).
+        if (++present_queue_timeouts_ >= PRESENT_QUEUE_TIMEOUT_LIMIT && present_stopped_.empty()) {
+          present_stopped_ = "the game's present queue did not finish within 2 s three times in a row";
+        }
+        return SkipPresent("the game's present queue is still busy");
+      case vk::CommandRing::Status::LOST:
+        NoteDeviceLost(now);
+        return {};
+      case vk::CommandRing::Status::FAILED:
+        log_failure("a submission on the game's present queue failed");
+        return SkipPresent("a submission on the game's present queue failed");
+    }
+  }
+  VkCommandBuffer buffer = VK_NULL_HANDLE;
+  switch (ring_->Begin(&buffer)) {
+    case vk::CommandRing::Status::READY: break;
+    case vk::CommandRing::Status::BUSY:
+    case vk::CommandRing::Status::TIMEOUT:
+      if (busy_skips_++ == 0u) {
+        nr::Log(nr::LogLevel::INFO, "Vulkan: a frame went without NR at Present: Uplift's command buffers were all still on the GPU (counted in Details)");
+      }
+      return SkipPresent("Uplift's command buffers are busy");
+    case vk::CommandRing::Status::LOST:
+      NoteDeviceLost(now);
+      return {};
+    case vk::CommandRing::Status::FAILED:
+      log_failure("Uplift's command buffer could not be begun");
+      return SkipPresent("Uplift's command buffer could not be begun");
+  }
+  ApplyLookConfig(now);
+  // As DeviceContext::Run: DLSS's copy for this present while MotionVectors wants DLSS's (it stamps the copy's use), else Launchpad's UPLIFT_MV.
+  const vk::NrImage dlss_motion = ((config_.motion_vectors && config_.present_motion_copy) ? PresentMotion() : vk::NrImage{});
+  const bool launchpad_wanted = (config_.launchpad_motion && launchpad.view != VK_NULL_HANDLE);
+  if (!config_.motion_vectors || !config_.present_motion_copy) {
+    present_motion_bound_ = (launchpad_wanted ? BoundMotion::LAUNCHPAD : BoundMotion::NONE);  // flicker fix: the per-frame trace names the motion
+  }
+  // Review 97f99e3 (Important 2), stress round: the motion input this present is meant to have, from the settings, not from what arrived. DLSS's copies while
+  // MotionVectors wants them (a present whose copy is missing gets zeros of the copies' own shape: VkPresentTarget::dlss_motion_gap_size), else Launchpad's
+  // UPLIFT_MV at the Uplift technique (a missed conversion gets zeros of its shape), else none. So a source that skips a frame never changes the input's kind:
+  // no skip and no reload; only a real change of setting or shape does.
+  const nr::Size present_canvas = CanvasOf(present_layout_, present_frame_.back_buffer.size);
+  const bool copies_meant = (config_.motion_vectors && config_.present_motion_copy && !dlss_motion_size_.Empty());
+  nr::Size copy_size = dlss_motion_size_;
+  if (dlss_motion.image != VK_NULL_HANDLE) {
+    copy_size = {dlss_motion.ngx.Resource.ImageViewInfo.Width, dlss_motion.ngx.Resource.ImageViewInfo.Height};
+  }
+  VkMotionShape motion_shape = {.kind = (launchpad_wanted ? VkMotionKind::LAUNCHPAD : VkMotionKind::NONE), .format = VK_FORMAT_R16G16_SFLOAT};
+  if (copies_meant || dlss_motion.image != VK_NULL_HANDLE) {
+    motion_shape = {.kind = VkMotionKind::PRESENT_COPY, .format = VK_FORMAT_R16G16_SFLOAT,
+                    .low_res = (copy_size.width < present_canvas.width || copy_size.height < present_canvas.height)};
+  }
+  if (const std::string_view motion_skip = CheckMotion(motion_shape); !motion_skip.empty()) return SkipPresent(motion_skip);
+  const sources::VkPresentTarget target = {
+      .image = present_frame_.back_buffer.image,
+      .layout = LayoutOf(usage),
+      .size = present_frame_.back_buffer.size,
+      .copy_format = copy_format_,
+      .encoding = *present_encoding_,
+      .diffuse_white_nits = present_diffuse_white_nits_,
+      .transfer_strength = config_.transfer_strength,
+      .color_strength = config_.color_strength,
+      .dlss_motion = (dlss_motion.image != VK_NULL_HANDLE ? &dlss_motion.ngx : nullptr),
+      .dlss_motion_gap_size = ((copies_meant && dlss_motion.image == VK_NULL_HANDLE) ? copy_size : nr::Size{}),
+      .launchpad_motion = (launchpad_wanted ? color::VkSampledView{.view = launchpad.view, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+                                            : color::VkSampledView{}),
+      .launchpad_size = launchpad.size,
+      .launchpad_format = launchpad.format,
+      .motion_scale_x = config_.motion_scale_x,
+      .motion_scale_y = config_.motion_scale_y,
+  };
+  const sources::PipelineResult result = pipeline_->RecordPresent(buffer, target, controls_, false, present_layout_);
+  if (result.reason == "create failed" && present_create_failure_.empty()) {
+    // T6 (M-4): a creation that failed at Present, not for want of memory (the Session's retry and budget handle that), ends native Present for the session.
+    const nr::SessionStatus status = session_->Status();
+    if (status.create_failed && status.create_result != static_cast<uint32_t>(NVSDK_NGX_Result_FAIL_OutOfGPUMemory)) {
+      present_create_failure_ = status.message;
+    }
+  }
+  if (result.recorded) {
+    // Hard rule 2: the game's frame, ReShade's work so far, then Uplift's NR (the rest of ReShade's work follows on the same queue).
+    queues.flush_effects();
+    if (const VkResult submitted = ring_->Submit(queues.queue); submitted != VK_SUCCESS) {
+      if (submitted == VK_ERROR_DEVICE_LOST) {
+        NoteDeviceLost(now);
+        return {};
+      }
+      log_failure(std::format("Uplift's command buffer could not be submitted (VkResult {})", static_cast<int>(submitted)));
+      return SkipPresent("Uplift's command buffer could not be submitted");
+    }
+    last_present_submission_ = now;  // T6 (I-4): a device loss soon after this latches native NR off
+  }
+  nr_applied_ = result.nr_applied;
+  passes_run_ = result.passes_run;
+  skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
+  skip_from_session_ = (result.nr_applied ? false : result.from_session);
+  motion_source_ = result.motion_source;
+  motion_scale_x_ = 1.f;
+  motion_scale_y_ = 1.f;
+  if (result.nr_applied) {
+    trigger_used_ = point;
+    if (point != logged_trigger_) {
+      logged_trigger_ = point;
+      nr::Logf(nr::LogLevel::INFO, "NR trigger: {} (Vulkan, native)", TriggerPointName(point));
+    }
+  }
+  if (trace_frames_ > 0u) {
+    --trace_frames_;
+    nr::Logf(nr::LogLevel::TRACE, "frame {}: NR {} at {} (Vulkan, native), {} pass(es) {}; motion: {}", completion_->Timeline().CurrentFrame(),
+             (result.nr_applied ? "applied" : "skipped"), TriggerPointName(point), result.passes_run, result.reason,
+             (present_motion_bound_ == BoundMotion::OLDER_COPY ? std::format("DLSS's vectors (the copy {} frame(s) older)", present_motion_age_)
+                                                                : std::string(BoundMotionName(present_motion_bound_))));
+  }
+  return result;
 }
 
 nr::Size VkDlssContext::SessionFrameSize() const {
+  if (NativePresent()) return canvas_size_;  // Plan 19: the settled canvas of the swap-chain image (SettleLayout, as Direct3D 12's Present path)
   const bool dlss_placement = (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
   return ((dlss_placement && !canvas_size_.Empty()) ? canvas_size_ : output_size_);
 }
@@ -231,6 +598,15 @@ void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
   const bool before_upscaling = (placement_.placement == Placement::BEFORE_UPSCALING);
   bool placement_ready = ((placement_.placement == Placement::AFTER_DLSS || before_upscaling) && !dlss_idle_ && output_message_.empty());
   const bool allowed = (config_.session.enabled && config_.nr_allowed && blocked_reason_.empty());
+  // Plan 19: native NR at Present loads once the frame can take it (its encoding resolved) and the RGBA16F intermediate's pipelines are built, here, as the
+  // DLSS placements' are.
+  if (NativePresent() && ring_ != nullptr && present_problem_.empty() && present_encoding_.has_value()) {
+    placement_ready = true;
+    if (allowed && !pipeline_->Prepare(VK_FORMAT_R16G16B16A16_SFLOAT)) {
+      SetPresentProblem("The Vulkan colour pipelines for NR at Present could not be built");
+      placement_ready = false;
+    }
+  }
   // Batch 2 review (minor 3): the pipelines the placement needs are built here, in the present, when NR is about to load: the first compile (a few ms, once
   // per output format, or once for Before upscaling) stays out of the game's evaluate, and a placement whose pipelines cannot be built never loads NR.
   if (placement_ready && allowed && before_upscaling && !pipeline_->PreparePreSr()) {
@@ -242,7 +618,52 @@ void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
     SetOutputProblem(std::format("The Vulkan colour pipeline for DLSS's output format (VkFormat {}) could not be built", static_cast<int>(output_format_)));
     placement_ready = false;
   }
-  const bool want = (allowed && placement_ready);
+  bool want = (allowed && placement_ready);
+  // In-game round 1 (bug A): NR's Session belongs to the command buffers it was loaded for. A placement that moves between native Present (Uplift's own
+  // buffers) and a DLSS stage (the game's) reloads it from OFF: the old path's GPU work finished first (the ring's fences, capped; the DLSS stage's through the
+  // Session's own teardown marks), NGX's features, A, B and the Present surfaces released, and the new path creates its features afresh, as from cold.
+  // Review 97f99e3 (Important 2): After DLSS and Before upscaling are streams of their own, and a lasting change of the motion input reloads too.
+  const VkNrStream wanted_stream = (NativePresent()  ? VkNrStream::OWN_BUFFERS
+                                    : before_upscaling ? VkNrStream::BEFORE_UPSCALING
+                                    : dlss_placement   ? VkNrStream::AFTER_DLSS
+                                                       : VkNrStream::NONE);
+  if (session_->State() == nr::SessionState::OFF) {
+    session_stream_ = VkNrStream::NONE;
+    own_drain_waited_ = false;
+    session_motion_.reset();
+    motion_mismatches_ = 0u;
+    input_reload_reason_.clear();
+  }
+  if (!stream_reload_ && !input_reload_reason_.empty()) {
+    stream_reload_ = true;
+    nr::Logf(nr::LogLevel::INFO, "Vulkan: NR reloads from off: {}", input_reload_reason_);
+    input_reload_reason_.clear();
+  }
+  if (!stream_reload_ && VkStreamNeedsReload(session_stream_, wanted_stream, session_->State() == nr::SessionState::OFF)) {
+    stream_reload_ = true;
+    nr::Logf(nr::LogLevel::INFO, "Vulkan: NR moves from {} to {}: it reloads from off", StreamName(session_stream_), StreamName(wanted_stream));
+    if (session_stream_ == VkNrStream::OWN_BUFFERS && ring_ && !std::exchange(own_drain_waited_, true) && !ring_->WaitIdle(RING_SWITCH_WAIT)) {
+      nr::Log(nr::LogLevel::WARN, "Vulkan: Uplift's command buffers did not finish within 2 s of leaving Present; NR stays off on this device until the game exits");
+      Drop(false);  // no NGX call: the GPU may still run them
+      return;
+    }
+  }
+  // Transitions: a hand-over to another owner (the add-on sets no grace then) drains NR loaded for Present here at once; Uplift's own command buffers finish
+  // first (capped), as at a stage change. A drain with the configured grace (NR off by the user) needs no wait: its marks come long after.
+  if (!want && session_stream_ == VkNrStream::OWN_BUFFERS && session_->State() != nr::SessionState::OFF && config_.session.grace.count() == 0 && ring_
+      && !std::exchange(own_drain_waited_, true) && !ring_->WaitIdle(RING_SWITCH_WAIT)) {
+    nr::Log(nr::LogLevel::WARN, "Vulkan: Uplift's command buffers did not finish within 2 s of leaving Present; NR stays off on this device until the game exits");
+    Drop(false);
+    return;
+  }
+  if (stream_reload_) {
+    if (session_->State() == nr::SessionState::OFF) {
+      stream_reload_ = false;
+    } else {
+      want = false;
+      session_->SetGrace(std::chrono::milliseconds(0));  // straight to the drain; BeginFrame sets the configured grace again next present
+    }
+  }
   // As DeviceContext (fix round 2, Important 1): skip SetEnabled(false) only when the DLSS idle is the sole reason and the Session is suspended.
   const bool idle_only = (allowed && dlss_placement && dlss_idle_);
   if (!(idle_only && session_->Status().suspended)) {
@@ -254,14 +675,26 @@ void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
     nr::Logf(nr::LogLevel::INFO, "session {} -> {} (Vulkan)", nr::SessionStateName(logged_state_), nr::SessionStateName(state));
     logged_state_ = state;
     logged_after_dlss_ = false;  // each activation logs its trigger again
+    logged_trigger_ = TriggerPoint::NONE;
     trace_frames_ = TRACE_FRAMES;
   };
   note_state();
+  if (session_->State() == nr::SessionState::LOADING && NativePresent() && before_present_load_) {
+    before_present_load_();  // T6 fix round (M-1): the crash marker goes on disk before NGX initialises on the game's device
+  }
   session_->Tick();
   note_state();
+  if (session_->State() != nr::SessionState::OFF && session_stream_ == VkNrStream::NONE) {
+    session_stream_ = wanted_stream;  // In-game round 1: the buffers this load is for
+  }
   // Batch 2 review (minor 7), the VRAM release after a disable: A, B and the zero motion go with NR.
   if (session_->State() == nr::SessionState::OFF || session_->State() == nr::SessionState::FAILED) {
     pipeline_->ReleaseIntermediates();
+    // In-game round 1 (bug A): off Present, Uplift's own command buffers go too, once their fences say the GPU is done (made again for Present).
+    if (ring_ && !NativePresent() && ring_->WaitIdle(std::chrono::milliseconds(0))) {
+      ring_->Destroy();
+      ring_.reset();
+    }
   }
 }
 
@@ -368,15 +801,36 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
   const bool readable = (image_view && sources::VkNrPipeline::MotionFormatReadable(vectors.Format) && uint64_t{motion_region.x} + motion_region.width <= vectors.Width
                          && uint64_t{motion_region.y} + motion_region.height <= vectors.Height);
   present_motion_gap_ = (readable ? ui::MotionGap::NONE : ui::MotionGap::GAME_PASSED_NONE);
+  if (readable) {
+    dlss_motion_size_ = {motion_region.width, motion_region.height};  // stress round: the Present copies' shape, for a present that misses its copy
+  }
   if (placement_.placement == Placement::PRESENT && config_.present_motion_copy) {
     // NR runs on the Present path (the bridge's) with DLSS's own motion vectors, copied here in the game's frame, right after DLSS read them, for the present
     // that closes it. The Session never loads: nothing of NGX's is called on this device.
-    if (!readable) return {.reason = "no readable motion vectors"};
+    PresentMotionCounters& counters = present_motion_counters_;
+    ++counters.evaluates;
+    const nr::Timeline& timeline = completion_->Timeline();
+    const uint64_t current = timeline.CurrentFrame();
+    const uint64_t completed = timeline.CompletedFrame();
+    const uint64_t lag = (current > completed ? current - completed : 0u);
+    counters.lag_min = std::min(counters.lag_min, lag);
+    counters.lag_max = std::max(counters.lag_max, lag);
+    if (!readable) {
+      ++counters.skipped_input;
+      return {.reason = "no readable motion vectors"};
+    }
     const bool opened_here = OpenToken(list);
-    const bool copied = pipeline_->RecordPresentMotion(buffer, {.view = vectors.ImageView, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, motion_region,
-                                                       frame.mv_scale_x * config_.motion_scale_x, frame.mv_scale_y * config_.motion_scale_y,
-                                                       completion_->Timeline().CurrentFrame() + 1u,
-                                                       config_.dlss_motion_upside_down);  // a throw leaves the token open
+    const sources::PresentMotionWrite write =
+        pipeline_->RecordPresentMotion(buffer, {.view = vectors.ImageView, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, motion_region,
+                                       frame.mv_scale_x * config_.motion_scale_x, frame.mv_scale_y * config_.motion_scale_y, current + 1u,
+                                       config_.dlss_motion_upside_down);  // a throw leaves the token open
+    const bool copied = (write == sources::PresentMotionWrite::WRITTEN);
+    switch (write) {
+      case sources::PresentMotionWrite::WRITTEN:   ++counters.copies; break;
+      case sources::PresentMotionWrite::NO_INPUT:  ++counters.skipped_input; break;
+      case sources::PresentMotionWrite::RING_BUSY: ++counters.skipped_ring; break;
+      case sources::PresentMotionWrite::SLOT_BUSY: ++counters.skipped_slot; break;
+    }
     if (opened_here && !copied) {
       DropOpenToken(list);
     }
@@ -409,6 +863,17 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
     nr_applied_ = false;
     passes_run_ = 0u;
     skip_reason_ = "preparing the new format";
+    skip_from_session_ = false;
+    reset_owed_ = true;
+    return {.reason = skip_reason_};
+  }
+  // Review 97f99e3 (Important 2): never a different motion input from the one this load's features were first evaluated with.
+  if (const std::string_view motion_skip =
+          CheckMotion(MotionShapeOf(ReadDlssFrame(frame, copies, &copies.output, region, false).inputs, CanvasOf(layout, output_size_), false));
+      !motion_skip.empty()) {
+    nr_applied_ = false;
+    passes_run_ = 0u;
+    skip_reason_ = motion_skip;
     skip_from_session_ = false;
     reset_owed_ = true;
     return {.reason = skip_reason_};
@@ -528,6 +993,20 @@ const NVSDK_NGX_Resource_VK* VkDlssContext::BeforeDlssEvaluate(VkCommandBuffer b
     skip_from_session_ = false;
     return nullptr;
   }
+  {
+    // Review 97f99e3 (Important 2): as After DLSS's. In a padded canvas the game's vectors reach NGX as an RG16F canvas copy (or the zero image).
+    const nr::FrameInputs probe = ReadDlssFrame(frame, copies, (frame.color != nullptr ? &copies.color : nullptr), frame.color_region, false).inputs;
+    const nr::Size image = (layout.image.Empty() ? frame_size_ : layout.image);
+    const nr::Size canvas = CanvasOf(layout, frame_size_);
+    if (const std::string_view motion_skip = CheckMotion(MotionShapeOf(probe, canvas, canvas != image)); !motion_skip.empty()) {
+      nr_applied_ = false;
+      passes_run_ = 0u;
+      skip_reason_ = motion_skip;
+      skip_from_session_ = false;
+      reset_owed_ = true;
+      return nullptr;
+    }
+  }
   // Plan 3, Minor 4: pessimistic; only a frame that applies NR clears the owed reset.
   const bool reset_was_owed = std::exchange(reset_owed_, true);
   ApplyLookConfig(now);
@@ -565,7 +1044,7 @@ const NVSDK_NGX_Resource_VK* VkDlssContext::BeforeDlssEvaluate(VkCommandBuffer b
 VkImage VkDlssContext::PrepareMaskCopy(VkFormat format, nr::Size size, bool* first) {
   if (torn_down_ || dropped_ || core_shut_down_ || !pipeline_) return VK_NULL_HANDLE;
   const bool dlss_placement = (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
-  const bool wanted = (config_.look.mask && dlss_placement && session_->State() == nr::SessionState::ACTIVE);
+  const bool wanted = (config_.look.mask && (dlss_placement || NativePresent()) && session_->State() == nr::SessionState::ACTIVE);  // Plan 19: and native Present
   return pipeline_->PrepareMaskCopy((wanted ? format : VK_FORMAT_UNDEFINED), size, first);
 }
 
@@ -618,6 +1097,7 @@ void VkDlssContext::NoteDeviceLost(std::chrono::steady_clock::time_point now) {
   if (device_lost_) return;
   device_lost_ = true;
   dlss_latch_tripped_ = (last_game_list_recording_.has_value() && now - *last_game_list_recording_ <= DLSS_LATCH_WINDOW);
+  present_latch_tripped_ = (last_present_submission_.has_value() && now - *last_present_submission_ <= DLSS_LATCH_WINDOW);  // T6 (I-4), the same window
   output_message_ = (dlss_latch_tripped_ ? std::string("Vulkan device lost soon after NR ran inside the game's frame: the DLSS placements stay off from the next start "
                                                        "(Clear latch to try again)")
                                          : std::string("Vulkan device lost: NR stays off on this device"));
@@ -637,6 +1117,7 @@ void VkDlssContext::Drop(bool device_lost) {
   static_cast<void>(pipeline_.release());
   static_cast<void>(session_.release());
   static_cast<void>(host_.release());
+  static_cast<void>(ring_.release());  // Plan 19: its buffers may still be pending; the device's end takes them
   if (completion_) {
     completion_->Abandon();  // every query says complete; no event or semaphore destroyed
   }
@@ -645,6 +1126,14 @@ void VkDlssContext::Drop(bool device_lost) {
 void VkDlssContext::OnCoreShutdown(std::chrono::milliseconds cap) {
   if (torn_down_ || dropped_ || core_shut_down_) return;
   core_shut_down_ = true;
+  // T6 (I-3), fix round (I-A): at native Present the route goes on along the chain, but only after a clean release (below) and once the game has gone on
+  // presenting (BeginFrame). WantsNr is false from now on. A Drop or a loss here never hands NR on: an abandoned runtime may still be mapped.
+  const auto pend_stop = [this] {
+    if (NativePresent()) {
+      pending_stop_since_ = std::chrono::steady_clock::now();
+      pending_stop_presents_ = 0u;
+    }
+  };
   ResetFrameStatus();
   output_message_ = "The game shut NVIDIA's NGX down on this device: NR stays off here until the game restarts";
   if (completion_->PollDeviceLost()) {
@@ -664,10 +1153,18 @@ void VkDlssContext::OnCoreShutdown(std::chrono::milliseconds cap) {
   if (session_->State() == nr::SessionState::OFF) {
     nr::Log(nr::LogLevel::INFO, "Vulkan: the game shut NGX down on its device; NR was off there");
     note_kept();
+    pend_stop();
     return;  // nothing of NGX's is held and nothing is freed: no wait
   }
-  // Every piece of NR's own work is in a game command buffer whose recording ends with its token's event, so the events say when the GPU is done with it.
-  const bool finished = completion_->WaitSubmitted(cap);
+  // Every piece of NR's own work at the DLSS placements is in a game command buffer whose recording ends with its token's event, so the events say when the
+  // GPU is done with it. Plan 19: at Present it is in Uplift's own command buffers, whose fences say so.
+  const auto started = std::chrono::steady_clock::now();
+  bool finished = completion_->WaitSubmitted(cap);
+  if (finished && ring_ != nullptr) {
+    const auto left = std::max(std::chrono::duration_cast<std::chrono::milliseconds>(cap - (std::chrono::steady_clock::now() - started)),
+                               std::chrono::milliseconds(0));
+    finished = ring_->WaitIdle(left);
+  }
   if (completion_->DeviceLost()) {
     NoteDeviceLost(std::chrono::steady_clock::now());
     return;
@@ -687,6 +1184,7 @@ void VkDlssContext::OnCoreShutdown(std::chrono::milliseconds cap) {
   pipeline_->ReleaseNrSurfaces();
   nr::Log(nr::LogLevel::INFO, "Vulkan: NR released on the game's device before the game's NGX shutdown");
   note_kept();
+  pend_stop();
 }
 
 void VkDlssContext::Teardown() {
@@ -697,7 +1195,17 @@ void VkDlssContext::Teardown() {
     NoteDeviceLost(std::chrono::steady_clock::now());
     return;
   }
+  // T6 (M-3): the game idled the device, which covers the effect queue where Uplift's own command buffers ran; their fences confirm it before anything they
+  // used goes. If they do not (a broken idle), nothing is freed and NGX is not called: as an abandon.
+  if (ring_ && !ring_->WaitIdle(RING_TEARDOWN_WAIT)) {
+    nr::Log(nr::LogLevel::WARN, "Vulkan: Uplift's command buffers had not finished when the game's device went; NR's runtime stays loaded until the game exits");
+    Drop(false);
+    return;
+  }
   completion_->DeviceIdle();  // batch 1 carry: the game idled the device, so the flush below finds every token and frame complete
+  if (ring_) {
+    ring_->Destroy();  // Plan 19: the idle covers the effect queue, where Uplift's own command buffers ran
+  }
   pipeline_->ReleasePresentMotion();
   pipeline_->ReleaseIntermediates();
   if (!core_shut_down_) {
@@ -723,12 +1231,58 @@ std::string VkDlssContext::DetailsLine() const {
   if (!WantsNr() && NrState() == nr::SessionState::OFF) return {};
   const nr::SessionStatus status = (session_ ? session_->Status() : nr::SessionStatus{});
   const uint64_t bytes = status.runtime_bytes.value_or(0u) + (pipeline_ ? pipeline_->HeldBytes() : 0u);
+  if (NativePresent()) {
+    // Plan 19: the route the card names, with what the Present path's own counters say (as the bridge's line does).
+    std::string line = std::format("Vulkan: NR runs natively on the game's Vulkan device ({:.0f} MiB; {})", static_cast<double>(bytes) / MIB, VK_FIRST_USE_NOTE);
+    if (busy_skips_ > 0u) {
+      line += std::format(", {} frame(s) without NR while Uplift's command buffers were busy", busy_skips_);
+    }
+    if (second_queue_) {
+      line += ", presents from a second queue";
+    }
+    return line;
+  }
   return std::format("Vulkan: NR runs inside the game's frame (native Vulkan NR, {:.0f} MiB; {})", static_cast<double>(bytes) / MIB, VK_FIRST_USE_NOTE);
 }
 
 vk::NrImage VkDlssContext::PresentMotion() {
   // Final review C-1: none once the copies stopped. The frame no longer advances then, so the last slot would be bound again at every present.
-  return ((CanCopy() && pipeline_) ? pipeline_->PresentMotion(completion_->Timeline().CurrentFrame()) : vk::NrImage{});
+  if (!CanCopy() || !pipeline_) return {};
+  uint64_t age = 0u;
+  const vk::NrImage copy = pipeline_->PresentMotion(completion_->Timeline().CurrentFrame(), &age);
+  if (config_.present_motion_copy) {
+    PresentMotionCounters& counters = present_motion_counters_;
+    ++counters.presents;
+    if (copy.image == VK_NULL_HANDLE) {
+      ++counters.missed;
+      present_motion_bound_ = BoundMotion::NO_COPY;
+    } else if (age == 0u) {
+      ++counters.own;
+      present_motion_bound_ = BoundMotion::OWN_COPY;
+    } else {
+      ++counters.older;
+      present_motion_bound_ = BoundMotion::OLDER_COPY;
+      present_motion_age_ = age;
+    }
+  }
+  return copy;
+}
+
+void VkDlssContext::NotePresentMotionSecond(std::chrono::steady_clock::time_point now) {
+  PresentMotionCounters& counters = present_motion_counters_;
+  if (!counters.since) {
+    counters.since = now;
+    return;
+  }
+  if (now - *counters.since < std::chrono::seconds(1)) return;
+  if (counters.presents > 0u || counters.evaluates > 0u) {
+    nr::Logf(nr::LogLevel::TRACE,
+             "Vulkan: Present motion: {} evaluates for {} presents; {} copies, skipped {} (input) {} (ring slot) {} (slot's last use); presents bound {} own, "
+             "{} older, {} none; GPU lag at the evaluates {}..{} frames",
+             counters.evaluates, counters.presents, counters.copies, counters.skipped_input, counters.skipped_ring, counters.skipped_slot, counters.own,
+             counters.older, counters.missed, (counters.lag_min == UINT64_MAX ? 0u : counters.lag_min), counters.lag_max);
+  }
+  counters = {.since = now};
 }
 
 ui::MotionGap VkDlssContext::PresentMotionGap() const {
@@ -758,9 +1312,13 @@ ContextStatus VkDlssContext::Status() const {
   if (waiting_for_claim && present_holds_nr_ && dlss_placement) {
     placement_note = "Switching from Present: NR starts here once the Present path has released it";
   }
+  // Plan 19: at native Present the frame's own problem is the output's, unless the context stopped (a loss or the game's NGX shutdown say so instead).
+  const bool native_present = NativePresent();
+  const std::string_view output_problem =
+      ((native_present && !device_lost_ && !core_shut_down_) ? std::string_view(present_problem_) : std::string_view(output_message_));
   status.message = ContextMessage({
       .blocked = (blocked_reason_.empty() && claimed_elsewhere ? std::string_view("NR runs on another device in this game") : std::string_view(blocked_reason_)),
-      .output = output_message_,
+      .output = output_problem,
       .placement = placement_note,
       .skip_reason = skip_reason_,
       .skip_from_session = skip_from_session_,
@@ -769,6 +1327,13 @@ ContextStatus VkDlssContext::Status() const {
   status.nr_applied = nr_applied_;
   status.passes_run = passes_run_;
   status.frame = (before_upscaling ? frame_size_ : output_size_);  // Before upscaling: the render size NR works on, not DLSS's output
+  if (native_present) {
+    // Plan 19: as Direct3D 12's Present path reports itself.
+    status.frame = present_frame_.back_buffer.size;
+    status.trigger = trigger_used_;
+    status.encoding = present_encoding_;
+    status.diffuse_white_nits = present_diffuse_white_nits_;
+  }
   status.intermediate_bytes = (pipeline_ ? pipeline_->HeldBytes() : 0u);
   status.device_lost = device_lost_;
   status.placement = placement_.placement;
@@ -779,7 +1344,7 @@ ContextStatus VkDlssContext::Status() const {
   status.canvas = canvas_size_;
   status.blocked = blocked_reason_;
   status.claimed_elsewhere = claimed_elsewhere;
-  status.output_problem = output_message_;
+  status.output_problem = output_problem;
   status.placement_note = placement_note;
   status.skip_reason = skip_reason_;
   status.skip_from_session = skip_from_session_;
@@ -793,7 +1358,7 @@ ContextStatus VkDlssContext::Status() const {
   const bool match_game_waiting = (config_.resolution == ui::ResolutionMode::MATCH_GAME && (!main_snapshot_ || dlss_off_.Off()) && !before_upscaling);
   status.resolution_applied = (match_game_waiting ? ui::ResolutionMode::FULL : config_.resolution);
   status.upsampling = config_.upsampling;
-  if (!status.canvas.Empty() && dlss_placement) {
+  if (!status.canvas.Empty() && (dlss_placement || native_present)) {
     // As Direct3D 12's line: below the floor the render is padded into the canvas; below the output size the change returns through the upsampling.
     std::string detail;
     if (status.canvas != status.work) {
@@ -810,28 +1375,53 @@ ContextStatus VkDlssContext::Status() const {
     status.exposure_line = sources::ExposureLine(pipeline_->LastExposure());  // Plan 17
   }
   status.motion_source = motion_source_;
-  switch (motion_source_) {
-    case sources::MotionSource::DIRECT:
-      status.motion_line = std::format("Motion vectors: DLSS (the game's own, scale {} x {})", motion_scale_x_, motion_scale_y_);
-      break;
-    case sources::MotionSource::NONE:
-    case sources::MotionSource::PRESENT_COPY:
-    case sources::MotionSource::LAUNCHPAD:    {
-      std::string_view reason = "the game passed no motion vectors";
-      if (!config_.motion_vectors) {
-        reason = "set to Off";
-      } else if (!dlss_seen_) {
-        reason = "no DLSS running yet";
-      } else if (!last_motion_vectors_missing_) {
-        reason = "NR has not run yet";
+  if (native_present) {
+    // Plan 19: the Present path's lines, as Direct3D 12's bridged Vulkan context gives them.
+    switch (motion_source_) {
+      case sources::MotionSource::PRESENT_COPY: status.motion_line = "Motion vectors: DLSS (copied for Present)"; break;
+      case sources::MotionSource::LAUNCHPAD:
+        status.motion_line = std::format("Motion vectors: {} (UPLIFT_MV, scale {} x {})", UpliftMvName(config_), config_.motion_scale_x, config_.motion_scale_y);
+        break;
+      case sources::MotionSource::DIRECT:
+      case sources::MotionSource::NONE: {
+        const std::string_view reason = ((!config_.motion_vectors && !config_.launchpad_motion) ? "set to Off"
+                                         : config_.present_motion_copy                           ? "no copy of DLSS's vectors this frame"
+                                         : config_.launchpad_motion                              ? NoUpliftMvReason(config_)
+                                                                                                 : "DLSS's vectors do not reach the Present path on this device");
+        status.motion_line = std::format("Motion vectors: none ({})", reason);
+        break;
       }
-      status.motion_line = std::format("Motion vectors: none ({})", reason);
-      break;
     }
+  } else {
+    switch (motion_source_) {
+      case sources::MotionSource::DIRECT:
+        status.motion_line = std::format("Motion vectors: DLSS (the game's own, scale {} x {})", motion_scale_x_, motion_scale_y_);
+        break;
+      case sources::MotionSource::NONE:
+      case sources::MotionSource::PRESENT_COPY:
+      case sources::MotionSource::LAUNCHPAD:    {
+        std::string_view reason = "the game passed no motion vectors";
+        if (!config_.motion_vectors) {
+          reason = "set to Off";
+        } else if (!dlss_seen_) {
+          reason = "no DLSS running yet";
+        } else if (!last_motion_vectors_missing_) {
+          reason = "NR has not run yet";
+        }
+        status.motion_line = std::format("Motion vectors: none ({})", reason);
+        break;
+      }
+    }
+  }
+  if (native_present && config_.launchpad_motion && motion_source_ == sources::MotionSource::NONE) {
+    status.launchpad_gap = ui::MotionGap::NO_UPLIFT_MV;  // Plan 19, as Direct3D 12's Present path
   }
   if (dlss_placement) {
     status.ui_correction_note = "Not needed here: the HUD is drawn after NR";
+  } else if (native_present) {
+    status.ui_correction_note = "Unavailable here: the HUD is already in this image; use the NR mask";  // Plan 19, as Direct3D 12's Present path
   }
+  status.keep_faces_supported = (!pipeline_ || pipeline_->KeepFacesSupported());
   return status;
 }
 

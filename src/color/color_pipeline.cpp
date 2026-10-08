@@ -10,6 +10,7 @@
 #include "decode_ps.h"
 #include "decode_vs.h"
 #include "encode_cs.h"
+#include "faces_cs.h"
 #include "look_pyramid_cs.h"
 #include "look_shape_cs.h"
 #include "look_stabilize_cs.h"
@@ -38,16 +39,43 @@ constexpr uint32_t DETAIL_TABLE = 7u * TABLE_SIZE;
 constexpr uint32_t SHAPE_TABLE = 8u * TABLE_SIZE;
 constexpr uint32_t RESOLVE_TABLE = 9u * TABLE_SIZE;
 constexpr uint32_t RESOLVE_SWAPPED_TABLE = 10u * TABLE_SIZE;
-constexpr uint32_t DESCRIPTORS_PER_SLOT = 11u * TABLE_SIZE;
+// Keep faces: pass 1's pyramid and combine, a later pass's (A -> B, or swapped B -> A), and Show the face mask.
+constexpr uint32_t FACES_LEVEL_FIRST_TABLE = 11u * TABLE_SIZE;
+constexpr uint32_t FACES_LEVEL_TABLE = 12u * TABLE_SIZE;
+constexpr uint32_t FACES_LEVEL_SWAPPED_TABLE = 13u * TABLE_SIZE;
+constexpr uint32_t FACES_COMBINE_FIRST_TABLE = 14u * TABLE_SIZE;
+constexpr uint32_t FACES_COMBINE_TABLE = 15u * TABLE_SIZE;
+constexpr uint32_t FACES_COMBINE_SWAPPED_TABLE = 16u * TABLE_SIZE;
+constexpr uint32_t FACES_SHOW_TABLE = 17u * TABLE_SIZE;
+// Fix round 4: the despike of pass 1's difference, and of a later pass's (A -> B, or swapped B -> A).
+constexpr uint32_t FACES_DESPIKE_FIRST_TABLE = 18u * TABLE_SIZE;
+constexpr uint32_t FACES_DESPIKE_TABLE = 19u * TABLE_SIZE;
+constexpr uint32_t FACES_DESPIKE_SWAPPED_TABLE = 20u * TABLE_SIZE;
+constexpr uint32_t DESCRIPTORS_PER_SLOT = 21u * TABLE_SIZE;
 constexpr uint32_t STABILIZE_CUT = 0u;  // look_stabilize_cs.hlsl's modes and flags
 constexpr uint32_t STABILIZE_LEVELS = 1u;
 constexpr uint32_t STABILIZE_DETAIL = 2u;
 constexpr uint32_t STABILIZE_FLAG_RESET = 1u;
 constexpr uint32_t STABILIZE_FLAG_MOTION = 2u;
 constexpr uint32_t STABILIZE_FLAG_VECTORS = 4u;
+constexpr uint32_t FACES_MODE_LEVEL = 0u;  // faces_cs.hlsl's modes
+constexpr uint32_t FACES_MODE_FIRST = 1u;
+constexpr uint32_t FACES_MODE_LATER = 2u;
+constexpr uint32_t FACES_MODE_SHOW = 3u;
+constexpr uint32_t FACES_MODE_DESPIKE = 4u;
+constexpr uint32_t FACES_FLAG_FIRST = 1u;  // faces_cs.hlsl's flags
+constexpr uint32_t FACES_FLAG_FILL = 2u;
 
 uint32_t Bits(float value) {
   return std::bit_cast<uint32_t>(value);
+}
+
+// faces_cs.hlsl's constants. A level dispatch's `first` matters at level 1 only.
+std::array<uint32_t, 16> FacesConstants(nr::Size size, uint32_t levels, uint32_t mode, uint32_t level, uint32_t flags,
+                                        const look::FacesParameters& parameters) {
+  return {size.width, size.height, levels, mode, level, flags, Bits(parameters.low_level), Bits(parameters.mask_level),
+          Bits(parameters.edge_level), Bits(parameters.dead_zone), Bits(parameters.full_weight), Bits(parameters.coverage_gain), Bits(parameters.density),
+          parameters.speck_radius, Bits(parameters.fill_level), Bits(parameters.fill_tolerance)};
 }
 
 // shaders/encode_cs.hlsl's constants; `change_mode` selects its change-field pass, `second_output` its u1 write.
@@ -177,11 +205,17 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
       || !build_compute(g_resolve_cs, sizeof(g_resolve_cs), &resolve_pipeline_, "resolve")) {
     return false;
   }
+  // Keep faces fix round 1 (C3): optional. Without it NR runs as before and Keep faces is unavailable (FacesReady).
+  const D3D12_COMPUTE_PIPELINE_STATE_DESC faces = {.pRootSignature = root_signature_.Get(), .CS = {.pShaderBytecode = g_faces_cs, .BytecodeLength = sizeof(g_faces_cs)}};
+  if (const HRESULT result = device->CreateComputePipelineState(&faces, IID_PPV_ARGS(&faces_pipeline_)); FAILED(result)) {
+    faces_pipeline_.Reset();
+    nr::Logf(nr::LogLevel::WARN, "Keep faces is unavailable on this device: its pipeline could not be built ({:#010x})", static_cast<uint32_t>(result));
+  }
   D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
   uav_loads_ = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)))
                && options.TypedUAVLoadAdditionalFormats != FALSE;
   if (!uav_loads_) {
-    nr::Log(nr::LogLevel::WARN, "this GPU has no typed UAV loads: Shape result, Metered exposure and pass strengths are unavailable");
+    nr::Log(nr::LogLevel::WARN, "this GPU has no typed UAV loads: Shape result, Metered exposure, pass strengths and Keep faces are unavailable");
   }
   const D3D12_DESCRIPTOR_HEAP_DESC shader_heap = {.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                                                   .NumDescriptors = RING_SLOTS * DESCRIPTORS_PER_SLOT,
@@ -451,6 +485,82 @@ bool ColorPipeline::RecordResolve(ID3D12GraphicsCommandList* list, uint32_t slot
   const std::array<uint32_t, 4> constants = {pass.size.width, pass.size.height, Bits(pass.transfer_strength),
                                              Bits(pass.color_strength)};
   DispatchCompute(list, resolve_pipeline_.Get(), constants, base, pass.size.width, pass.size.height);
+  return true;
+}
+
+bool ColorPipeline::RecordFacesPyramid(ID3D12GraphicsCommandList* list, uint32_t slot, const FacesPass& pass) {
+  if (!SlotInRange(slot, "RecordFacesPyramid")) return false;
+  const bool first = (pass.mask == nullptr);
+  uint32_t table = FACES_LEVEL_TABLE;
+  if (first) {
+    table = FACES_LEVEL_FIRST_TABLE;
+  } else if (pass.swapped) {
+    table = FACES_LEVEL_SWAPPED_TABLE;
+  }
+  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + table;
+  // Round 5: pass 1 with the fill writes the fill's pyramid too (u1).
+  const bool fill = (first && pass.parameters.fill);
+  WriteTable(base, {{pass.changed}, {pass.reference}, {pass.mask}}, {{pass.atlas}, {(fill ? pass.fill : nullptr)}});
+  const uint32_t flags = (first ? FACES_FLAG_FIRST : 0u) | (fill ? FACES_FLAG_FILL : 0u);
+  for (uint32_t level = 1u; level <= pass.layout.levels; ++level) {
+    if (level > 1u) {
+      // Level reads level - 1.
+      if (fill) {
+        UavBarriers(list, {pass.atlas, pass.fill});
+      } else {
+        UavBarriers(list, {pass.atlas});
+      }
+    }
+    const nr::Size size = look::LevelSize(pass.layout.image, level);
+    DispatchCompute(list, faces_pipeline_.Get(), FacesConstants(pass.layout.image, pass.layout.levels, FACES_MODE_LEVEL, level, flags, pass.parameters), base,
+                    size.width, size.height);
+  }
+  return true;
+}
+
+bool ColorPipeline::RecordFacesCombine(ID3D12GraphicsCommandList* list, uint32_t slot, const FacesPass& pass) {
+  if (!SlotInRange(slot, "RecordFacesCombine")) return false;
+  const bool first = (pass.mask == nullptr);
+  uint32_t table = FACES_COMBINE_TABLE;
+  if (first) {
+    table = FACES_COMBINE_FIRST_TABLE;
+  } else if (pass.swapped) {
+    table = FACES_COMBINE_SWAPPED_TABLE;
+  }
+  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + table;
+  if (first) {
+    WriteTable(base, {{pass.atlas}, {}, {}, {pass.detail}, {pass.fill}}, {{pass.changed}, {pass.reference}});
+  } else {
+    WriteTable(base, {{pass.atlas}, {pass.mask}, {pass.reference}, {pass.detail}}, {{pass.changed}});
+  }
+  DispatchCompute(list, faces_pipeline_.Get(),
+                  FacesConstants(pass.layout.image, pass.layout.levels, (first ? FACES_MODE_FIRST : FACES_MODE_LATER), 0u,
+                                 ((first && pass.parameters.fill) ? FACES_FLAG_FILL : 0u), pass.parameters),
+                  base,
+                  pass.layout.image.width, pass.layout.image.height);
+  return true;
+}
+
+bool ColorPipeline::RecordFacesDespike(ID3D12GraphicsCommandList* list, uint32_t slot, const FacesPass& pass) {
+  if (!SlotInRange(slot, "RecordFacesDespike")) return false;
+  uint32_t table = FACES_DESPIKE_TABLE;
+  if (pass.mask == nullptr) {
+    table = FACES_DESPIKE_FIRST_TABLE;
+  } else if (pass.swapped) {
+    table = FACES_DESPIKE_SWAPPED_TABLE;
+  }
+  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + table;
+  WriteTable(base, {{pass.changed}, {pass.reference}}, {{pass.detail}});
+  DispatchCompute(list, faces_pipeline_.Get(), FacesConstants(pass.layout.image, pass.layout.levels, FACES_MODE_DESPIKE, 0u, 0u, pass.parameters), base,
+                  pass.layout.image.width, pass.layout.image.height);
+  return true;
+}
+
+bool ColorPipeline::RecordFacesShow(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D12Resource* target, ID3D12Resource* mask, nr::Size size) {
+  if (!SlotInRange(slot, "RecordFacesShow")) return false;
+  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + FACES_SHOW_TABLE;
+  WriteTable(base, {{}, {mask}}, {{target}});
+  DispatchCompute(list, faces_pipeline_.Get(), FacesConstants(size, 1u, FACES_MODE_SHOW, 0u, 0u, {}), base, size.width, size.height);
   return true;
 }
 

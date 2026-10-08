@@ -524,11 +524,20 @@ MaskCopy VkClient::CopyMask(vk::GameHost& host, const vk::ImageInfo& mask, NrLin
   return {.size = mask.size};
 }
 
-std::string VkClient::Line() const {
+bool VkClient::FreeRetired(vk::GameHost& host) {
+  interop_.FreeFinished(host);
+  if (!interop_.Idle()) return false;
+  interop_.FreeAll(host);  // nothing is retired any more: the wait fences, none of them in flight
+  return true;
+}
+
+std::string VkClient::Line(std::string_view route_reason) const {
   const double mib = static_cast<double>(ImportedBytes()) / MIB;
-  std::string line = (fenced_ ? std::format("Vulkan ({}): NR runs in Uplift's 64-bit helper (shared textures and fences, {:.1f} MiB)", BITNESS, mib)
-                              : std::format("Vulkan ({}): NR runs in Uplift's 64-bit helper (shared textures, CPU-ordered, {:.1f} MiB): {}", BITNESS,
-                                            mib, cpu_reason_));
+  // T5: gitc-uplift.addon64 names the route of a Vulkan device whose NR runs in the helper, and why the chain got there.
+  const std::string lead = (route_reason.empty() ? std::format("Vulkan ({}): NR runs in Uplift's 64-bit helper", BITNESS)
+                                                 : std::format("Vulkan: NR runs in Uplift's helper process: {}", route_reason));
+  std::string line = (fenced_ ? std::format("{} (shared textures and fences, {:.1f} MiB)", lead, mib)
+                              : std::format("{} (shared textures, CPU-ordered, {:.1f} MiB): {}", lead, mib, cpu_reason_));
   if (second_queue_) {
     line += ", presents from a second queue";
   }

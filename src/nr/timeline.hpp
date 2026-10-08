@@ -77,6 +77,8 @@ class Timeline {
 
   uint64_t BeginFrame(ID3D12CommandQueue* queue);
   [[nodiscard]] uint64_t CurrentFrame() const { return current_frame_.load(std::memory_order_acquire); }
+  // Present-motion flicker fix: the newest frame the GPU has passed (the instrumentation's lag is CurrentFrame minus this).
+  [[nodiscard]] uint64_t CompletedFrame() const { return completed_(); }
   [[nodiscard]] bool IsComplete(uint64_t frame) const;
   // Fix round 1, Important 1: a mark taken at or before the latest present-queue switch's frame also
   // needs that switch's barrier token complete, whatever `mark.token` itself is -- the switch means

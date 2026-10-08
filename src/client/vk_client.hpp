@@ -73,7 +73,11 @@ class VkClient {
   void FreeVulkan(vk::GameHost& host);
   // What this side imported (the helper's transport counts the same textures as its own VRAM, so the overlay never adds it).
   [[nodiscard]] uint64_t ImportedBytes() const { return color_.bytes + mask_.bytes + motion_.bytes; }
-  [[nodiscard]] std::string Line() const;
+  // T5 (gitc-uplift.addon64): after ReleaseAll, once the device's NR left the helper: frees what the queue has passed. True when nothing is retired and no
+  // capped wait is in flight any more; everything is freed then, and the client may go (it holds no Vulkan object).
+  bool FreeRetired(vk::GameHost& host);
+  // The Details line. `route_reason` (T5, gitc-uplift.addon64 only): why a 64-bit Vulkan device's NR runs in the helper; the line then names that route.
+  [[nodiscard]] std::string Line(std::string_view route_reason = {}) const;
   [[nodiscard]] std::string_view Latch() const { return latch_; }  // non-empty once the client stopped for the session
   // Plan 17: Retry now after the helper stopped (the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
   void ClearLatch() { latch_.clear(); }

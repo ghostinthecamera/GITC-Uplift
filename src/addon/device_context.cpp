@@ -43,6 +43,8 @@ sources::LookConfig LookConfigFrom(const ui::Settings& settings,
       .later_controls = later_controls,
       .mask = (settings.mask == ui::MaskMode::AUTO),
       .present_ui_correction = (settings.ui_correction == ui::UiCorrection::ON),
+      .keep_faces = {.enabled = settings.keep_faces, .protection = settings.face_protection, .lighting_scale = settings.lighting_scale,
+                     .show_mask = settings.show_face_mask, .tuning = settings.face_tuning},
   };
   for (size_t index = 0u; index < settings.passes.size(); ++index) {
     const ui::PassSettings& pass = settings.passes[index];
@@ -222,6 +224,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   session_->SetMarginOverride(options.margin_override_bytes);
   session_->SetCreateOptions(options.preset, options.performance);
   session_->SetPassCount(options.pass_count);
+  session_->NoteFacesWanted(config.look.keep_faces.enabled);  // Keep faces fix round 2 (4): its off edge, even on a frame NR then skips
   session_->SetAutoRetry(options.auto_retry);
   session_->SetPassViewLimit(config.pass_view_limit);
   if (config.settings_generation != settings_generation_) {
@@ -820,6 +823,13 @@ void DeviceContext::OnCoreShutdown(std::chrono::milliseconds cap, uint64_t upsca
   nr::Log(nr::LogLevel::INFO, "Direct3D 12: the game shut NGX down on its device; NR released before it");
 }
 
+std::string DeviceContext::CreateFailure() const {
+  if (!session_) return {};
+  nr::SessionStatus status = session_->Status();
+  const bool out_of_memory = (status.create_result == static_cast<uint32_t>(NVSDK_NGX_Result_FAIL_OutOfGPUMemory));
+  return ((status.create_failed && !out_of_memory) ? std::move(status.message) : std::string());
+}
+
 ContextStatus DeviceContext::Status() const {
   ContextStatus status;
   if (session_) {
@@ -860,6 +870,7 @@ ContextStatus DeviceContext::Status() const {
   status.encoding = encoding_;
   status.diffuse_white_nits = diffuse_white_nits_;
   status.intermediate_bytes = present_source_->HeldBytes();
+  status.keep_faces_supported = present_source_->Pipeline().KeepFacesSupported();
   status.device_lost = device_lost_;
   status.placement = placement_.placement;
   status.placement_line = FormatPlacementLine(placement_, main_snapshot_);
@@ -918,7 +929,7 @@ ContextStatus DeviceContext::Status() const {
       // UPLIFT_MV cannot bind -- this frame's vectors are the game's own DLSS ones, and the readout says why.
       const bool launchpad_would_run = (config_.motion_vectors_want_launchpad && placement_.placement != Placement::PRESENT);
       status.motion_line = (launchpad_would_run
-                                ? std::string("Motion vectors: DLSS (Launchpad feeds the presented image only)")
+                                ? std::format("Motion vectors: DLSS ({} feeds the presented image only)", UpliftMvName(config_))
                                 : std::format("Motion vectors: DLSS (the game's own, scale {} x {})", motion_scale_x_,
                                               motion_scale_y_));
       break;
@@ -928,25 +939,26 @@ ContextStatus DeviceContext::Status() const {
       break;
     case sources::MotionSource::LAUNCHPAD:
       status.motion_line =
-          std::format("Motion vectors: Launchpad (UPLIFT_MV, scale {} x {})", config_.motion_scale_x, config_.motion_scale_y);
+          std::format("Motion vectors: {} (UPLIFT_MV, scale {} x {})", UpliftMvName(config_), config_.motion_scale_x, config_.motion_scale_y);
       break;
     case sources::MotionSource::NONE: {
       std::string_view reason = "the game passed no motion vectors";
       if (!config_.motion_vectors && !config_.launchpad_motion) {
         reason = "set to Off";
       } else if (!config_.motion_vectors) {
-        reason = (placement_.placement == Placement::PRESENT ? "no UPLIFT_MV this frame (Uplift.fx below Launchpad)"
-                                                              : "Launchpad works on the presented image only");
+        reason = (placement_.placement == Placement::PRESENT ? NoUpliftMvReason(config_)
+                                                              : (config_.uplift_mv_lumenite ? "Lumenite works on the presented image only"
+                                                                                            : "Launchpad works on the presented image only"));
       } else if (placement_.placement == Placement::PRESENT) {
         if (bridged_ && (config_.vulkan || dlss_stages_)) {
           // Plan 14: on Vulkan DLSS's vectors reach the Present path through the native context's copies, while the add-on asks for them. Plan 18: Direct3D
           // 11's ring is the same copy for the Present path's reasons.
           reason = (config_.present_motion_copy ? "no copy of DLSS's vectors this frame"
-                    : config_.launchpad_motion  ? "no UPLIFT_MV this frame (Uplift.fx below Launchpad)"
+                    : config_.launchpad_motion  ? NoUpliftMvReason(config_)
                                                 : "DLSS's vectors do not reach the Present path on this device");
         } else if (bridged_) {
           // Plan 8: a bridged context never sees the game's DLSS, so only Launchpad can feed it.
-          reason = (config_.launchpad_motion ? "no UPLIFT_MV this frame (Uplift.fx below Launchpad)"
+          reason = (config_.launchpad_motion ? NoUpliftMvReason(config_)
                                              : "DLSS vectors need a 64-bit Direct3D 11, Direct3D 12 or Vulkan game");
         } else if (!dlss_seen_) {
           // Auto is only ever transiently on Present while it waits for DLSS to show up; Source = Present

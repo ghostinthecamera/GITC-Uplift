@@ -20,4 +20,16 @@ LookPlan PlanLook(const LookConfig& config, nr::Size image, bool reduced, bool m
   };
 }
 
+uint64_t FaceSurfaceBytes(nr::Size canvas) {
+  constexpr uint64_t RGBA16F_BYTES = 8u;
+  return (2u * canvas.Pixels() + 2u * look::MakeAtlas(canvas).size.Pixels()) * RGBA16F_BYTES;
+}
+
+nr::Controls FaceTwinControls(const nr::Controls& pass1, float protection) {
+  nr::Controls twin = pass1;
+  twin.auto_mask = true;
+  twin.skin_structure = protection;
+  return twin;
+}
+
 }  // namespace uplift::sources

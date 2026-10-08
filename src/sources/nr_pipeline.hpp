@@ -18,6 +18,7 @@
 #include "sources/auto_exposure.hpp"
 #include "sources/look_plan.hpp"
 #include "sources/motion_source.hpp"
+#include "sources/present_motion_ring.hpp"
 
 namespace uplift::sources {
 
@@ -144,6 +145,8 @@ class NrPipeline final : private nr::PassResolver {
   void NoteMaskCopied() { mask_.copied = (mask_.texture != nullptr); }
   // Plan 17: the exposure the latest recording's encode read (the Details line).
   [[nodiscard]] ExposureReport LastExposure() const { return exposure_report_; }
+  // Keep faces (2026-10-08): the device loads the formats its recombination reads back (typed UAV loads, as the look stage needs).
+  [[nodiscard]] bool KeepFacesSupported() const { return color_.SupportsUavLoads() && color_.FacesReady(); }
 
  private:
   using Texture = Microsoft::WRL::ComPtr<ID3D12Resource>;
@@ -197,6 +200,19 @@ class NrPipeline final : private nr::PassResolver {
     std::array<bool, CHECK_SLOTS> pending = {};
     uint32_t next = 0u;  // the oldest slot, written next
   };
+  // Keep faces (2026-10-08): the twin's output, which pass 1's recombination rewrites with the face mask the later passes read, and the pyramid of a pass's
+  // weighted change, both at the canvas. Apart from the main set, made while Keep faces is on and freed like the look set.
+  struct FaceSurfaces {
+    Texture twin;    // RGBA16F
+    Texture detail;  // RGBA16F: fix round 4's despiked difference (made with the others, so Remove specks never reallocates)
+    Texture atlas;   // RGBA16F, look::MakeAtlas(size)
+    Texture fill;    // RGBA16F, the same size: round 5's fill pyramid (made with the others, so Fill skin by colour never reallocates)
+    look::Atlas layout;
+    nr::Size size;
+    uint64_t bytes = 0u;
+    nr::Mark last_use;
+  };
+
   // After NR: what the decode reads as t1.
   struct AfterNr {
     ID3D12Resource* texture = nullptr;            // NR's output, or the (shaped) change field
@@ -205,6 +221,13 @@ class NrPipeline final : private nr::PassResolver {
   };
 
   void ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) override;
+  // Keep faces: pass 1's recombination (FacesPass with no mask), after the Session's twin evaluate.
+  void CombineFaces(ID3D12GraphicsCommandList* list, ID3D12Resource* lighting, ID3D12Resource* faces) override;
+  // Keep faces: the twin and the atlas at `canvas`, made now unless held. False (logged once): Keep faces is skipped this recording.
+  bool EnsureFaces(nr::Size canvas);
+  void RetireFaces();
+  // Keep faces: the recombination of one pass (`pass.changed` rewritten), on the recording's slot: the pyramid of its weighted change, then the combine.
+  void RecordFaces(ID3D12GraphicsCommandList* list, color::FacesPass pass);
   [[nodiscard]] LookPlan LookPlanFor(nr::Size image, bool reduced) const;  // sources::PlanLook for this device and this set
   bool EnsureLook(const LookPlan& plan);       // false: the look (and C at Full) is skipped this recording
   void RetireLook();
@@ -223,6 +246,8 @@ class NrPipeline final : private nr::PassResolver {
 
   LookConfig config_;
   LookSurfaces look_;
+  FaceSurfaces faces_;
+  bool faces_ran_ = false;  // Keep faces: this recording's pass 1 ran its twin, so the later passes keep only their broad change inside the face mask
   MaskCopy mask_;
   MeterState exposure_;
   ExposureCheck check_;
@@ -258,13 +283,14 @@ class NrPipeline final : private nr::PassResolver {
     float input_scale = 0.f;
     nr::Mark last_use;  // the newest recording on this set (CommitSlot): the GPU is done with it once complete
   };
-  // Amendment 7, deepened by I-2 (Plan 4 fix round 4): four copies, indexed by the frame the next
-  // present closes, modulo four -- so a copy still has an unused slot to land in while the GPU runs up
-  // to about two frames behind the CPU (the normal case with NR on), not just one.
-  static constexpr size_t MOTION_COPY_SLOTS = 4u;
+  // Amendment 7, deepened by I-2 (Plan 4 fix round 4): copies indexed by the frame the next present closes. The flicker fix (2026-10-08): four slots, grown
+  // to eight once a copy is skipped for a slot still read (a lag past 3; fix round 1, M6), and a present without its own binds the
+  // newest at most PRESENT_MOTION_MAX_AGE frames older (present_motion_ring.hpp), so the motion source never switches for a missed copy.
+  static constexpr size_t MOTION_COPY_SLOTS = PRESENT_MOTION_SLOTS;  // room for the grown ring
   struct MotionCopies {
     std::array<Texture, MOTION_COPY_SLOTS> textures;
     std::array<uint64_t, MOTION_COPY_SLOTS> frames = {};    // the frame each copy was made for; 0 = none
+    size_t slots = PRESENT_MOTION_MIN_SLOTS;                 // the slots in use (made): 4, or 8 once grown
     std::array<nr::Mark, MOTION_COPY_SLOTS> last_use = {};  // the newest recording that wrote or read it
     nr::Size size;
   };
@@ -293,6 +319,7 @@ class NrPipeline final : private nr::PassResolver {
   void RetireMotionCopies();   // likewise for the motion copies
   void RetireLaunchpadMotion();  // likewise for Launchpad's converted motion
   void RetireDlssPresentMotion();  // Plan 18 (fix round 1, M-1): likewise for Direct3D 11's converted ring vectors
+  bool MakeMotionCopies(size_t first, size_t end, nr::Size size);  // motion_copies_.textures[first, end); none kept on a failure
   // Plan 18 (fix round 1, M-1): records the motion copy of `motion` (DLSS's raw vectors in the ring slot, the region its rect) into dlss_present_motion_ at
   // the region's size with `scale_x/y` applied, on the committed `slot`. The texture to bind whole at a scale of (1, 1), or none (an unreadable format, a
   // region outside the texture, or no memory): NR then runs with the zero motion, never with the raw vectors.

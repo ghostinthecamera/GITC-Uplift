@@ -93,8 +93,9 @@ class DlssOffLatch {
 // Plan 14 (design §2.2, batch 2 review): the gates of the native Vulkan context's copies of DLSS's motion vectors, made in the game's frame for the Present path.
 struct PresentMotionGates {
   bool enabled = false;
-  nr::SessionState nr_state = nr::SessionState::OFF;  // the bridged context's; OFF without one
+  nr::SessionState nr_state = nr::SessionState::OFF;  // the bridged context's; OFF without one (Plan 19: the native context's at native Present)
   bool bridge_gpu_ordered = false;                    // a bridge exists, is GPU-ordered and has not stopped (a CPU-ordered one holds the add-on's lock across capped waits)
+  bool native_present = false;                        // Plan 19: NR at Present runs natively (no bridge involved), which binds the copies as the bridge does
   bool same_queue = false;                            // the game presents on the effect runtime's queue (else the bridge waits a GPU frame inside the present event)
   bool native_wants_nr = false;                       // the native context runs a DLSS placement, which binds DLSS's vectors directly
   bool native_can_copy = true;                        // the native context, if there is one, has not been shut down, dropped or torn down
@@ -104,8 +105,164 @@ struct PresentMotionGates {
   // the copies (it stays at Plan 13's footprint: no frame semaphore signalled at every present, no evaluate watched).
   bool upscaler_created = false;
 };
-// True while the copies are wanted. NR "on" is LOADING, ACTIVE or GRACE: not FAILED or DRAINING, which cannot run NR.
+// True while the copies are wanted. NR "on" is LOADING, ACTIVE or GRACE: not FAILED or DRAINING, which cannot run NR. Natively at Present OFF counts as on too
+// (stress round: NR loads within the present that reads the gates, and its first recording must already have them).
 [[nodiscard]] bool PresentMotionWanted(const PresentMotionGates& gates);
+
+// Plan 19 (the owner's decisions): where NR at Present runs on a 64-bit Vulkan device. Native, on the game's own VkDevice, whenever the setting asks for it and
+// nothing makes it impossible; the private Direct3D 12 device (VkBridge) otherwise, with the reason the card and the log give. T5 (2026-10-08): the chain is
+// Native -> Direct3D 12 -> Helper (NR in gitc-uplift-helper64.exe, through HelperFront and VkClient), each taken when the one before cannot run.
+enum class VkNrRoute : uint8_t {
+  NATIVE,
+  DIRECT3D_12,
+  HELPER,
+};
+// T6 fix round (I-A): the game's NGX shutdown while NR ran natively at Present becomes a stop (the route moves along the chain) only once the game has gone
+// on presenting for this long, both counts: a game that shuts NGX down as it exits reaches vkDestroyDevice first, so no fallback is ever built for it.
+inline constexpr uint32_t CORE_SHUTDOWN_STOP_PRESENTS = 120u;
+inline constexpr std::chrono::seconds CORE_SHUTDOWN_STOP_AFTER{2};
+// `presents` presents and `elapsed` since the shutdown. Pure.
+[[nodiscard]] inline bool CoreShutdownStopDue(uint32_t presents, std::chrono::steady_clock::duration elapsed) {
+  return presents >= CORE_SHUTDOWN_STOP_PRESENTS && elapsed >= CORE_SHUTDOWN_STOP_AFTER;
+}
+// In-game round 1 (bug A, a GPU hang switching a running native Present to After DLSS): which command buffers a native Vulkan context's NR records into.
+// NR's Session (its NGX features, its intermediates) belongs to one of them; a placement that wants the other reloads it from OFF first, after the GPU has
+// finished the old one's work, so the features are always created by the path that uses them (the cold path, proven in game).
+// Review 97f99e3: every native placement is its own stream, After DLSS and Before upscaling included (both record into the game's buffers, but feed NR
+// different inputs).
+enum class VkNrStream : uint8_t {
+  NONE,              // no NR runs (no placement, or Present on the Direct3D 12 or helper route)
+  OWN_BUFFERS,       // native Present: Uplift's own command buffers on ReShade's effect queue
+  AFTER_DLSS,        // the game's command buffers, after its DLSS evaluate
+  BEFORE_UPSCALING,  // the game's command buffers, before its DLSS evaluate
+};
+// True when the Session, loaded for `loaded_for` and not OFF, must go through OFF before NR runs for `wanted`. Pure.
+[[nodiscard]] inline bool VkStreamNeedsReload(VkNrStream loaded_for, VkNrStream wanted, bool session_off) {
+  return !session_off && loaded_for != VkNrStream::NONE && wanted != VkNrStream::NONE && wanted != loaded_for;
+}
+// Review 97f99e3 (Important 2): NGX may set a feature up at its first evaluate from the motion input it is handed, so the live features never see a
+// different kind of motion input from the one they were first evaluated with: what NGX is handed as motion vectors, in kind, format and resolution.
+enum class VkMotionKind : uint8_t {
+  NONE,          // Uplift's all-zero image at the canvas
+  GAME_VECTORS,  // the game's own (in place, or copied into Before upscaling's canvas)
+  PRESENT_COPY,  // DLSS's vectors copied for Present
+  LAUNCHPAD,     // UPLIFT_MV converted to the work image
+};
+struct VkMotionShape {
+  VkMotionKind kind = VkMotionKind::NONE;
+  uint32_t format = 0u;  // the VkFormat NGX reads
+  bool low_res = false;  // smaller than the canvas NR runs at (DLSS's render-resolution vectors)
+  friend bool operator==(const VkMotionShape&, const VkMotionShape&) = default;
+};
+// A different shape for this many recordings in a row reloads the Session from OFF; fewer (a copy missing for a frame or two) only skip NR on those
+// recordings, so NGX never evaluates the live features with it.
+inline constexpr uint32_t VK_MOTION_RELOAD_RECORDINGS = 10u;  // stress round: was 30 (half a second at 60 fps per settings change)
+enum class VkMotionVerdict : uint8_t {
+  RUN,     // the shape the features were first evaluated with (or the first evaluate of this load)
+  SKIP,    // a different one: no NR on this recording
+  RELOAD,  // a different one for VK_MOTION_RELOAD_RECORDINGS recordings: no NR, and the Session reloads from OFF
+};
+// `loaded_with`: the shape of this load's first evaluate (nullopt: none yet); `mismatches_before`: different recordings in a row before this one. Pure.
+[[nodiscard]] inline VkMotionVerdict VkMotionCheck(const std::optional<VkMotionShape>& loaded_with, const VkMotionShape& shape, uint32_t mismatches_before) {
+  if (!loaded_with || *loaded_with == shape) return VkMotionVerdict::RUN;
+  return (mismatches_before + 1u >= VK_MOTION_RELOAD_RECORDINGS ? VkMotionVerdict::RELOAD : VkMotionVerdict::SKIP);
+}
+// In-game round 1 (bug B): while the native context runs a DLSS stage, the helper never drives NR (it is not even attached, so ReShade's effect events stay
+// with the native context). In-game round 2 (the owner, 2026-10-08): the native context runs a DLSS stage only while VulkanNr is Native (DecideVkStages), so
+// with VulkanNr Helper the helper always runs. Pure.
+[[nodiscard]] inline bool VkHelperRuns(VkNrRoute route, bool native_at_dlss_stage) {
+  return route == VkNrRoute::HELPER && !native_at_dlss_stage;
+}
+// Transitions (owner, 2026-10-08: "Make sure all transition possibilities are robust"): NR has exactly one owner per 64-bit Vulkan device at a time.
+// Every owner change, whatever causes it, goes through one hand-over: the old owner stops recording at once, its GPU work finishes (capped), its Session
+// drains to OFF with no grace and unloads, and only then the new owner loads from OFF (NrClaim and the helper's claim keep them apart). Only a plain NR off
+// and on by the user (the owner stays) and a VRAM yield keep the grace.
+enum class VkNrOwner : uint8_t {
+  NONE,               // nobody: the native context dropped NR (its runtime may still be mapped) or the device was lost
+  NATIVE_PRESENT,     // the native context, at Present (the native route)
+  NATIVE_DLSS_STAGE,  // the native context, at After DLSS or Before upscaling (VulkanNr governs Present only)
+  BRIDGE,             // the bridge's context on the private Direct3D 12 device, at Present
+  HELPER,             // Uplift's helper process, at Present
+};
+// What decides the owner this frame. The stage and the route chain are the ones ChooseVkNrRoute and the native context's placement give.
+struct VkOwnerFacts {
+  bool abandoned = false;             // the native context dropped NR, or the device was lost
+  bool native_at_dlss_stage = false;  // the native context's placement is After DLSS or Before upscaling
+  VkNrRoute route = VkNrRoute::NATIVE;
+};
+[[nodiscard]] VkNrOwner ChooseVkNrOwner(const VkOwnerFacts& facts);
+// The things that can hold NR loaded on a device: the native context (both of its owners), the bridge's context, the helper.
+enum class VkNrHolder : uint8_t {
+  NATIVE,
+  BRIDGE,
+  HELPER,
+};
+// Whether `holder` drains now, with no grace (the hand-over's steps 1-3): it is not the owner. The owner keeps its grace (a plain NR off and on).
+[[nodiscard]] bool VkHolderDrainsNow(VkNrOwner owner, VkNrHolder holder);
+enum class VkOwnerCause : uint8_t {
+  STAGE,     // the native context's placement moved between Present and a DLSS stage
+  SETTING,   // VulkanNr changed
+  FALLBACK,  // the route chain moved by itself (a route became impossible or possible again)
+};
+struct VkOwnerChange {
+  bool changed = false;  // an owner change between two owners (the first decision, and a move to nobody, are none)
+  VkOwnerCause cause = VkOwnerCause::FALLBACK;
+};
+// `stage_changed` and `setting_changed` compare this frame's facts with the previous frame's; the stage outranks the setting. Pure.
+[[nodiscard]] VkOwnerChange VkOwnerChangeOf(VkNrOwner previous, VkNrOwner now, bool stage_changed, bool setting_changed);
+[[nodiscard]] std::string_view VkOwnerName(VkNrOwner owner);
+// "NR moves from {old owner} to {new owner} ({cause}): the old one drains now, the new one starts from off"; `detail`: the route's reason for a fallback.
+[[nodiscard]] std::string VkOwnerChangeLine(VkNrOwner previous, VkNrOwner now, VkOwnerCause cause, std::string_view detail);
+// What decides it, per device. Views must outlive the call.
+struct VkRouteFacts {
+  ui::VulkanNrMode setting = ui::VulkanNrMode::NATIVE;
+  std::string_view native_needs;    // what native Vulkan NR needs that the device lacks (NGX's extensions, ReShade 6.8, the hooks...); empty: nothing
+  std::string_view start_error;     // the native context could not start here (its error, or no command buffers of Uplift's own); empty: it could
+  std::string_view create_failure;  // NGX could not create NR's feature on the device this session (the Session's message, with NGX's result); empty: no
+  // T5: the Direct3D 12 route's own impossibilities, kept for the session as the native ones are.
+  std::string_view d3d12_start_error;     // the bridge or its context could not start here (their error); empty: they could
+  std::string_view d3d12_create_failure;  // NGX could not create NR's feature on the private Direct3D 12 device (the Session's message); empty: no
+  // T6 (I-2, I-3, I-4): native NR at Present stopped here (second-queue timeouts, the game's NGX shutdown) or is latched off from an earlier start or a device
+  // loss: a whole sentence, used as it is; empty: no.
+  std::string_view native_off;
+};
+struct VkRouteChoice {
+  VkNrRoute route = VkNrRoute::DIRECT3D_12;
+  // Why NR does not run natively (the Direct3D 12 route), or why it runs in the helper (the chain's reasons, joined by "; ", or the setting); empty on the
+  // native route.
+  std::string reason;
+  std::string native_unavailable;  // why Native cannot run here: the panel greys it with this; empty: it can
+  std::string d3d12_unavailable;   // T5: why Direct3D 12 cannot run here, the same way; empty: it can
+};
+// The chain starts at the setting's route. A route that cannot run hands over to the next one: a native impossibility (a creation failure, then T6's
+// `native_off`, then a start failure, then what the device lacks) to Direct3D 12, a Direct3D 12 one (a creation failure, then a start failure) to the helper, which is final. A creation
+// failure stays for the session (the caller keeps it), so the routes never ping-pong. On the Direct3D 12 route a native impossibility outranks the setting's
+// own reason. Pure.
+[[nodiscard]] VkRouteChoice ChooseVkNrRoute(const VkRouteFacts& facts);
+// The log's line when a device's route is decided or changes: "Vulkan: NR at Present runs natively on the game's Vulkan device", "Vulkan: NR at Present
+// runs on a private Direct3D 12 device: {reason}", or "Vulkan: NR at Present runs in Uplift's helper process: {reason}".
+[[nodiscard]] std::string VkRouteLine(const VkRouteChoice& choice);
+// In-game round 2 (the owner, 2026-10-08; replaces round 1's "VulkanNr governs the Present stage only"): only native Vulkan NR runs inside the game's DLSS.
+// Fix round 1 (I2, the coordinator's ruling: what works stays available): the DLSS stages are greyed, and the native context is given Present whatever is
+// stored, only while VulkanNr is Direct3D 12 or Helper, or a failure stops native NR inside the game's DLSS too (what the device lacks, the game's NGX
+// shutdown, a loss, an abandon). A failure of native Present alone (its command buffers, the present queue's timeouts, the VulkanNativeNr latch) moves
+// Present along the chain and leaves the DLSS stages native and selectable.
+struct VkStageFacts {
+  VkNrRoute route = VkNrRoute::NATIVE;                  // where NR at Present runs (never decides the stages: kept for the matrix)
+  ui::VulkanNrMode setting = ui::VulkanNrMode::NATIVE;  // VulkanNr
+  std::string_view native_dlss_off;                     // why native NR cannot run inside the game's DLSS either; empty: it can
+  bool dlss_stage_wanted = false;                       // the native context would run a DLSS stage this present (the stored stage, DLSS seen, nothing in the way)
+  bool stopped_at_dlss_stage = false;                   // the native context stopped at a DLSS stage (the game's NGX shutdown) and keeps it
+};
+struct VkStageDecision {
+  std::string stages_off;             // why After DLSS and Before upscaling are greyed; empty: selectable
+  bool native_present_only = false;   // the native context gets Present (Source Auto, PreUpscale off) whatever is stored
+  bool native_at_dlss_stage = false;  // the native context runs a DLSS stage this present: ChooseVkNrOwner's input
+};
+[[nodiscard]] VkStageDecision DecideVkStages(const VkStageFacts& facts);
+// In-game round 2: a pick of Direct3D 12 or Helper in VulkanNr (from `before` to `after`) while the stored stage is After DLSS or Before upscaling moves the
+// stored stage to Present at once, as a click on Present. A pick of Native leaves the stage where it is. Pure.
+[[nodiscard]] bool VkRoutePickMovesStage(ui::VulkanNrMode before, ui::VulkanNrMode after, ui::SourcePick stage);
 
 // Plan 15 (design 2026-10-02 §2): NR held off a Direct3D 12 device after the game's own NGX shutdown there, until the game's DLSS starts on it again: a
 // present that sees a DLSS create on the device since the shutdown (FeatureRegistry::UpscalerCreates rising past its value then: the game re-initialised

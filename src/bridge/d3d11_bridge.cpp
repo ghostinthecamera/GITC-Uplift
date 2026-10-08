@@ -232,8 +232,14 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
   // Plan 18 (design §4): with `dlss_motion`, this frame's ring slot (copied in the game's evaluate) is DLSS's vectors for the Present path, before Launchpad's.
   RingSlot* ring_slot = nullptr;
   if (dlss_motion) {
-    RingSlot& slot = ring_[presents_ % RING_SLOTS];
-    if (slot.shared.d3d12 && slot.frame == presents_) ring_slot = &slot;
+    // This present's own copy, else (flicker fix) the newest at most PRESENT_MOTION_MAX_AGE frames older: still DLSS's vectors, so no switch to Launchpad's.
+    std::array<uint64_t, RING_SLOTS> frames = {};
+    for (size_t index = 0u; index < RING_SLOTS; ++index) {
+      frames[index] = (ring_[index].shared.d3d12 ? ring_[index].frame : 0u);
+    }
+    if (const sources::PresentMotionPick pick = sources::PickPresentMotion(frames, presents_); pick.slot) {
+      ring_slot = &ring_[*pick.slot];
+    }
   }
   // Decision 3: LaunchPad's UPLIFT_MV, shared like the mask (RG16F, +32 MiB at 4K). The sharing rule (design §9 g):
   // D3D11 can only open a D3D12 shared texture made ALLOW_RENDER_TARGET, and outside R8, R16 and the display formats

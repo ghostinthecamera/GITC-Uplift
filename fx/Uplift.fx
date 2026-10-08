@@ -25,9 +25,18 @@
 // the LaunchPad block). There is no shader change for Vulkan.
 //
 // Plan 12: OpenGL too, with the compute marker (ReShade's GLSL backend reports __RENDERER__ 0x14xxx for GL 4.6, so the compute pass below applies). There is no shader change for OpenGL.
+//
+// Lumenite (2026-10-08): with LumeniteFX's Kernel ("LUMENITE: Kernel") enabled, this technique can turn Kernel's optical flow into UPLIFT_MV instead.
+// Put Uplift below Kernel. Uplift sets UPLIFT_USE_LUMENITE itself, through the add-on API, whenever Motion vectors is Lumenite, or Auto without
+// LaunchPad; nothing of Lumenite's ships with Uplift. Only Kernel computes the flow, once a frame, for every effect that redeclares its textures, as
+// this file does below. Kernel's flow is at 1/8 of the screen, so the Motion pass below brings it to full size along the edges of this frame's image, and
+// fades it out where Kernel is unsure of it. One of the two is compiled in at a time: LaunchPad's when both are set. Direct3D 10 and newer.
 
 #ifndef UPLIFT_USE_LAUNCHPAD
   #define UPLIFT_USE_LAUNCHPAD 0
+#endif
+#ifndef UPLIFT_USE_LUMENITE
+  #define UPLIFT_USE_LUMENITE 0
 #endif
 
 #if __RENDERER__ >= 0x9000
@@ -47,17 +56,80 @@
   #endif
 #endif
 
-#if UPLIFT_LAUNCHPAD
+// Lumenite (2026-10-08): only without LaunchPad's, from Direct3D 10 on (the nine-cell upsample below is not checked on shader model 3).
+#define UPLIFT_LUMENITE 0
+#if !UPLIFT_LAUNCHPAD && UPLIFT_USE_LUMENITE && __RENDERER__ >= 0xa000
+  #undef UPLIFT_LUMENITE
+  #define UPLIFT_LUMENITE 1
+#endif
+
+#if UPLIFT_LAUNCHPAD || UPLIFT_LUMENITE
 texture UPLIFT_MV { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RG16F; };
 
 void UpliftMotionVS(uint id : SV_VertexID, out float4 position : SV_Position, out float2 texcoord : TEXCOORD) {
   texcoord = float2((id == 2) ? 2.0 : 0.0, (id == 1) ? 2.0 : 0.0);
   position = float4(texcoord * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
 }
+#endif
 
+#if UPLIFT_LAUNCHPAD
 // LaunchPad's motion is a UV offset from this frame to the previous one; NR and Uplift's stabiliser take pixels.
 float2 UpliftMotionPS(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target {
   return Deferred::get_motion(texcoord) * float2(BUFFER_WIDTH, BUFFER_HEIGHT);
+}
+#endif
+
+#if UPLIFT_LUMENITE
+// Kernel's two shared textures, declared exactly as Lumenite's own effects import them, so ReShade gives this file the same ones. Kernel writes them; this
+// file only reads them.
+namespace Kernel {
+  texture2D tFlow { Width = BUFFER_WIDTH/8; Height = BUFFER_HEIGHT/8; Format = RG16F; };
+  texture2D tConfidence { Width = BUFFER_WIDTH/8; Height = BUFFER_HEIGHT/8; Format = R16F; };
+}
+sampler2D UpliftKernelFlow { Texture = Kernel::tFlow; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
+sampler2D UpliftKernelConfidence { Texture = Kernel::tConfidence; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
+texture UpliftBackBufferTex : COLOR;
+sampler UpliftBackBuffer { Texture = UpliftBackBufferTex; AddressU = CLAMP; AddressV = CLAMP; };
+
+// Kernel's grid: one cell per 8x8 pixels (its textures' own size).
+static const float2 UPLIFT_FLOW_CELLS = float2(BUFFER_WIDTH / 8, BUFFER_HEIGHT / 8);
+// Confidence: a cell at or below LOW contributes no motion, at or above HIGH all of it, smoothly between. A cell Kernel is unsure of is taken as still:
+// NR then keeps that pixel's history where it is and rejects it on its own where the image changed, which wrong motion would not let it do.
+#define UPLIFT_LUMENITE_CONFIDENCE_LOW 0.25
+#define UPLIFT_LUMENITE_CONFIDENCE_HIGH 0.6
+// Edge-aware weighting: a cell counts less the more its luma (at its centre) differs from this pixel's, relative to the brighter of the two, so a bright
+// edge and an HDR image weigh alike. At EDGE the weight is exp(-0.5); SPREAD is the spatial reach, in cells.
+#define UPLIFT_LUMENITE_EDGE 0.12
+#define UPLIFT_LUMENITE_SPREAD 0.75
+
+float UpliftLuma(float3 color) { return dot(color, float3(0.2126, 0.7152, 0.0722)); }
+
+// Kernel's flow is a UV offset from this frame to the previous one, as LaunchPad's (Lumenite's own effects fetch the previous frame at uv + flow). It
+// comes to full size through a joint bilateral upsample over the 3x3 cells around this pixel: each cell's flow, weighted by its distance and by how alike
+// its colour is to this pixel's, so a pixel takes the motion of the side of an edge it is on instead of an 8-pixel block. Each cell's confidence scales
+// its flow but not its weight, so unsure cells pull the result toward zero motion. Then to pixels, as LaunchPad's.
+float2 UpliftLumeniteMotionPS(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target {
+  float luma = UpliftLuma(tex2Dlod(UpliftBackBuffer, float4(texcoord, 0.0, 0.0)).rgb);
+  float2 cell = texcoord * UPLIFT_FLOW_CELLS - 0.5;  // this pixel in cell-centre coordinates
+  float2 nearest = floor(cell + 0.5);
+  float2 flow = 0.0;
+  float weights = 0.0;
+  [unroll] for (int y = -1; y <= 1; ++y) {
+    [unroll] for (int x = -1; x <= 1; ++x) {
+      float2 index = clamp(nearest + float2(x, y), 0.0, UPLIFT_FLOW_CELLS - 1.0);
+      float2 uv = (index + 0.5) / UPLIFT_FLOW_CELLS;
+      float2 delta = cell - index;
+      float spatial = exp(-dot(delta, delta) / (2.0 * UPLIFT_LUMENITE_SPREAD * UPLIFT_LUMENITE_SPREAD));
+      float guide = UpliftLuma(tex2Dlod(UpliftBackBuffer, float4(uv, 0.0, 0.0)).rgb);
+      float difference = (luma - guide) / (max(max(luma, guide), 0.0) + 0.05);
+      float range = exp(-(difference * difference) / (2.0 * UPLIFT_LUMENITE_EDGE * UPLIFT_LUMENITE_EDGE));
+      float weight = spatial * range;
+      float confidence = smoothstep(UPLIFT_LUMENITE_CONFIDENCE_LOW, UPLIFT_LUMENITE_CONFIDENCE_HIGH, tex2Dlod(UpliftKernelConfidence, float4(uv, 0.0, 0.0)).x);
+      flow += (weight * confidence) * tex2Dlod(UpliftKernelFlow, float4(uv, 0.0, 0.0)).xy;
+      weights += weight;
+    }
+  }
+  return (flow / max(weights, 1e-6)) * float2(BUFFER_WIDTH, BUFFER_HEIGHT);
 }
 #endif
 
@@ -73,7 +145,8 @@ technique Uplift <
   ui_label = "Uplift (DLSS-NR position)";
   ui_tooltip = "Marks where Uplift runs DLSS-NR among your effects. With iMMERSE LaunchPad above it and Motion "
                "vectors set to LaunchPad or Auto, Uplift links itself to LaunchPad automatically and hands its "
-               "motion vectors here; no preprocessor edit needed.";
+               "motion vectors here; no preprocessor edit needed. LumeniteFX's Kernel above it works the same way "
+               "(Motion vectors Lumenite, or Auto without LaunchPad).";
 >
 {
 #if UPLIFT_LAUNCHPAD
@@ -85,6 +158,14 @@ technique Uplift <
   {
     VertexShader = UpliftMotionVS;
     PixelShader = UpliftMotionPS;
+    RenderTarget = UPLIFT_MV;
+  }
+#endif
+#if UPLIFT_LUMENITE
+  pass Motion
+  {
+    VertexShader = UpliftMotionVS;
+    PixelShader = UpliftLumeniteMotionPS;
     RenderTarget = UPLIFT_MV;
   }
 #endif

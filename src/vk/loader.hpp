@@ -24,6 +24,8 @@ struct Loader {
   PFN_vkEnumeratePhysicalDeviceGroups enumerate_physical_device_groups = nullptr;
   PFN_vkDestroyDevice destroy_device = nullptr;
   PFN_vkGetPhysicalDeviceFeatures get_physical_device_features = nullptr;
+  PFN_vkGetPhysicalDeviceFeatures2 get_physical_device_features2 = nullptr;  // Plan 19, optional too: the bufferDeviceAddress support check
+  PFN_vkGetPhysicalDeviceQueueFamilyProperties get_queue_family_properties = nullptr;  // Plan 19, optional too: the effect queue's family
   PFN_vkGetPhysicalDeviceFormatProperties get_physical_device_format_properties = nullptr;
   PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
   PFN_vkEnumerateDeviceExtensionProperties enumerate_device_extensions = nullptr;

@@ -262,7 +262,8 @@ bool VkBridge::Run(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage
         return false;
     }
   }
-  // LaunchPad's UPLIFT_MV, or (Plan 14) DLSS's copied vectors, shared like the mask (Plan 7 §9 g's flags). Retired when a recording comes without one.
+  // LaunchPad's UPLIFT_MV, or (Plan 14) DLSS's copied vectors, shared like the mask (Plan 7 §9 g's flags). Retired once recordings come without one for
+  // longer than a short gap (flicker fix: a present with no copy at all is rare now, PresentMotion binding an older copy, and it never remakes the share).
   ID3D12Resource* motion12 = nullptr;
   if (motion.image != VK_NULL_HANDLE && motion.format == DXGI_FORMAT_R16G16_FLOAT && motion.samples == 1u) {
     if (!motion_.d3d12 || motion_.size != motion.size) {
@@ -281,8 +282,10 @@ bool VkBridge::Run(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage
       }
     }
     motion12 = motion_.d3d12.Get();  // null when the share failed: NR runs without motion
-  } else if (motion_.d3d12) {
-    Retire(host, &motion_);
+    motion_gap_presents_ = 0u;
+  } else if (motion_.d3d12 && ++motion_gap_presents_ > MOTION_KEEP_PRESENTS) {
+    Retire(host, &motion_);  // the motion stopped (Launchpad off, DLSS's copies no longer asked for): the share goes
+    motion_gap_presents_ = 0u;
   }
   const VkImageInfo motion_source = (motion12 != nullptr ? motion : VkImageInfo{});
   const bool wrote = (gpu_ordered_ ? RunGpuOrdered(host, back_buffer, entry_state, motion_source, motion12, motion_is_dlss, record)
@@ -504,11 +507,12 @@ uint64_t VkBridge::SharedBytes() const {
   return color_.bytes + mask_.bytes + motion_.bytes;
 }
 
-std::string VkBridge::StatusLine() const {
+std::string VkBridge::StatusLine(std::string_view route_reason) const {
   const double mib = static_cast<double>(SharedBytes()) / (1024.0 * 1024.0);
-  std::string line = (gpu_ordered_ ? std::format("Vulkan: NR runs on a private Direct3D 12 device (shared textures and fences, {:.1f} MiB)", mib)
-                                   : std::format("Vulkan: NR runs on a private Direct3D 12 device (shared textures, CPU-ordered, {:.1f} MiB): {}",
-                                                 mib, cpu_reason_));
+  const std::string device = (route_reason.empty() ? std::string("a private Direct3D 12 device")
+                                                   : std::format("a private Direct3D 12 device: {}", route_reason));
+  std::string line = (gpu_ordered_ ? std::format("Vulkan: NR runs on {} (shared textures and fences, {:.1f} MiB)", device, mib)
+                                   : std::format("Vulkan: NR runs on {} (shared textures, CPU-ordered, {:.1f} MiB): {}", device, mib, cpu_reason_));
   if (busy_skips_ > 0u) {
     line += std::format(", {} frame(s) without NR while the bridge was busy", busy_skips_);
   }

@@ -65,6 +65,9 @@ class RemoteNr final : public NrLink {
   [[nodiscard]] bool Attached() const { return attached_; }
   [[nodiscard]] std::string_view Failure() const { return failure_; }  // "It exited with code 0x...", ...; empty while healthy
   [[nodiscard]] const ipc::Status& LastStatus() const { return last_status_; }
+  // Helper hand-over round: the helper's NR may be loaded. True from the first FRAME sent with nr_allowed until a FRAME sent without it is answered with
+  // its Session OFF (no FRAME since could load it again), or the helper process is gone. A status that is stale, missing or still pending never clears it.
+  [[nodiscard]] bool NrMayRun() const { return nr_may_run_; }
   // The helper's PID: the current one, else the last (0 before the first start).
   [[nodiscard]] DWORD Pid() const { return pid_; }
   // Presents that could not send a FRAME because a request was still outstanding (the helper was busy) while its Session was ACTIVE:
@@ -84,6 +87,7 @@ class RemoteNr final : public NrLink {
   struct Outstanding {
     ipc::RequestKind kind = ipc::RequestKind::NONE;
     uint64_t generation = 0u;  // the settings generation it was sent under (FRAME)
+    bool nr_allowed = false;   // a FRAME's nr_allowed: one sent without it that answers OFF proves the helper's NR unloaded
   };
 
   // Send + wait `cap_ms`: the reply when it came in time; nullopt when it is pending (recorded) or the helper is gone.
@@ -91,6 +95,7 @@ class RemoteNr final : public NrLink {
   // A reply's effect on this side. `late`: it landed after its request's cap, so nobody holds its handles yet.
   void Consume(const Outstanding& request, const ipc::Reply& reply, bool late);
   void Fail(std::string text);  // kills the helper, keeps `text` for the card, forgets nothing else
+  void Kill();                  // ends the helper and waits (capped) for its process to go, so its NR's memory is released before anything loads
   void Forget();                // the helper is gone: drops its per-process state
   void DiscardRemote(uint64_t remote);
   void DiscardLate();  // closes and forgets the handles in late_
@@ -116,6 +121,7 @@ class RemoteNr final : public NrLink {
   uint64_t status_generation_ = 0u;  // the settings generation the last status was produced under
   uint64_t frame_generation_ = 0u;   // the settings generation of the newest FRAME sent (a RUN follows its FRAME's)
   bool have_status_ = false;
+  bool nr_may_run_ = false;  // NrMayRun()
   uint64_t written_generation_ = 0u;
   bool text_written_ = false;
   ipc::Handles late_;                       // handles of replies that landed late, for the next FRAME reply

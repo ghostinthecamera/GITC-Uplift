@@ -2,7 +2,7 @@
 
 // Plan 10 (design §2.2). The add-on side of NR in Uplift's 64-bit helper: the D3D9, D3D10 and D3D11 clients, the helper's lifetime (RemoteNr),
 // the 9Ex toggle, the overlay's lines and the status card. Moved out of addon32.cpp unchanged: gitc-uplift.addon32 hosts it for every device,
-// gitc-uplift.addon64 for its Direct3D 9 devices. Each host keeps the ReShade registration, the settings and the panel state, the NrClaim, the
+// gitc-uplift.addon64 for its Direct3D 9 devices (T5: and its Vulkan devices whose NR at Present takes the helper route). Each host keeps the ReShade registration, the settings and the panel state, the NrClaim, the
 // swap-chain selector, the runtime, back-buffer and marker lookup, the LaunchPad link and the API check, and calls the front from its
 // handlers. Not thread-safe: the host's lock.
 
@@ -89,6 +89,11 @@ struct HelperDevice {
   std::string mask_note;      // Plan 5: the overlay's "NR mask" line
   // Plan 14: Launchpad's technique and the Uplift technique are both enabled (Setup's Launchpad option); the host sets it at each present.
   bool launchpad_ready = false;
+  bool lumenite_ready = false;      // 2026-10-08: the same for Lumenite's Kernel (Setup's Lumenite option)
+  bool uplift_mv_lumenite = false;  // 2026-10-08: Uplift.fx writes Lumenite's vectors into UPLIFT_MV; the FRAME tells the helper, for its readouts
+  // T5: why a 64-bit Vulkan device's NR at Present runs in the helper (addon::VkRouteChoice's reason; gitc-uplift.addon64 sets it at each present). The
+  // Details line and the footer name the route with it. Empty in gitc-uplift.addon32 and for every other API.
+  std::string route_reason;
   // The game's DXGI local budget and usage (design §2.10), measured at most once a second and sent with the next FRAME.
   Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
   std::chrono::steady_clock::time_point last_memory_query;
@@ -183,6 +188,7 @@ struct HelperFrame {
   const ui::OverlayState* overlay = nullptr;
   bool nr_allowed = true;          // the host's NrClaim
   bool claimed_elsewhere = false;  // NR is on and the claim went to another device: Present returns after noting it
+  bool drain_now = false;          // transitions (64-bit Vulkan): NR's owner moved away from the helper, which drains with no grace
   std::chrono::steady_clock::time_point now;
 };
 
@@ -223,8 +229,11 @@ class HelperFront {
   // Returns the Direct3D 10 client, moved out of `device`: the relay is ReShade's proxy, so the host destroys it only after it has released
   // its lock (null for any other device).
   [[nodiscard]] std::unique_ptr<client::D3D10Client> DestroyDevice(HelperDevice* device, reshade::api::device* owner);
-  // For the host's NrClaim: `owner`'s NR is loaded (its helper runs and its Session is not OFF).
+  // For the host's NrClaim: `owner`'s NR may be loaded in the helper (helper hand-over round: until a FRAME sent without nr_allowed is answered with the
+  // Session OFF, or the helper is gone; never cleared by a stale, missing or pending status).
   [[nodiscard]] bool NrLoaded(reshade::api::device* owner) const;
+  // Transitions' stress hook: the helper's last status said NR applied on `owner`'s latest recording.
+  [[nodiscard]] bool NrApplied(reshade::api::device* owner) const;
   // The panel's view for `game_device` (of `device_api`), after the host's API check: the 9Ex readout, the motion line, the lines and the
   // status card, then Setup and the working card's rows (ui::FinishSetup, with `state` and `now`: Plan 14, from the helper's status in protocol 6).
   // `device` is the host's entry, or null before the game's first frame. The host has set `view->dlss_unavailable`.
@@ -232,6 +241,9 @@ class HelperFront {
                const ui::Settings& settings, ui::OverlayView* view, ui::OverlayState* state, std::chrono::steady_clock::time_point now) const;
   // The card's Retry now: a stopped helper starts afresh; otherwise the next FRAME carries it.
   void RetryNow(HelperDevice* device);
+  // T5: `owner`, a 64-bit Vulkan device, no longer runs NR in the helper (its route changed and the helper's NR is off; the host released its client):
+  // the helper is detached when it serves `owner`, and the next device to need it attaches afresh.
+  void Detach(reshade::api::device* owner);
   // ReShade's create_device event (id 96): asks for a Direct3D 9Ex device when the toggle is on, and writes the pending marker.
   bool CreateDevice(reshade::api::device_api device_api, uint32_t& api_version, bool use_d3d9ex);
   // AddonUninit: QUIT, a capped wait for the exit, then the job closes: the helper never outlives the game.

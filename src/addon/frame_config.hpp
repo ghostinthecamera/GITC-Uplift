@@ -17,6 +17,7 @@ struct FrameConfigInputs {
   uint32_t ngx_frame_generation = 0u;
   bool nr_allowed = true;
   uint64_t settings_generation = 0u;
+  bool uplift_mv_lumenite = false;  // 2026-10-08: Uplift.fx writes Lumenite's vectors into UPLIFT_MV (the host's link knows)
 };
 
 [[nodiscard]] FrameConfig BuildFrameConfig(const FrameConfigInputs& inputs, ui::ControlsCoalescer* coalescer,

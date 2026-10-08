@@ -15,10 +15,12 @@ class MarkerLedger {
   struct Reservation {
     bool counted = false;  // the creation counts toward the marker until Created or Proven says otherwise
     bool write = false;    // the file must be written now, before the device is created
+    bool ngx = false;      // Plan 19 T1b: the file, when written now, says a device with NGX's additions waits on it (the first tier)
   };
 
-  // An adjusted device is about to be created. Not counted once the adjustment is proven.
-  [[nodiscard]] Reservation Reserve();
+  // An adjusted device is about to be created; `ngx`: with NGX's additions. Not counted once the adjustment is proven. The file is written when
+  // the count leaves 0, and written again when the first device with NGX's additions joins a file that does not say so yet.
+  [[nodiscard]] Reservation Reserve(bool ngx = false);
   // The creation is over. `device` is the new adjusted device and is counted from now on (when the reservation was); null when nothing adjusted
   // exists (the creation failed, or went through without the additions), which releases the reservation. True when the file must be deleted.
   [[nodiscard]] bool Created(Reservation reservation, const void* device);
@@ -34,6 +36,7 @@ class MarkerLedger {
   std::unordered_set<const void*> devices_;  // adjusted devices that count
   bool proven_ = false;
   bool written_ = false;  // the file is on disk by this ledger's account
+  bool written_ngx_ = false;  // and it says NGX's additions
 };
 
 }  // namespace uplift::vk

@@ -20,6 +20,26 @@ std::optional<bool> LaunchPadLink::Update(const LaunchPadLinkFrame& frame) {
   return frame.wanted;
 }
 
+UpliftMvSources ChooseUpliftMvSources(ui::MotionVectorSource setting, bool launchpad_on, bool lumenite_on) {
+  switch (setting) {
+    case ui::MotionVectorSource::AUTO:      return {.launchpad = launchpad_on, .lumenite = (!launchpad_on && lumenite_on)};
+    case ui::MotionVectorSource::LAUNCHPAD: return {.launchpad = launchpad_on};
+    case ui::MotionVectorSource::LUMENITE:  return {.lumenite = lumenite_on};
+    case ui::MotionVectorSource::DLSS:
+    case ui::MotionVectorSource::NONE:      break;
+  }
+  return {};
+}
+
+bool MotionUsesUpliftMv(ui::MotionVectorSource setting) {
+  return setting == ui::MotionVectorSource::AUTO || setting == ui::MotionVectorSource::LAUNCHPAD || setting == ui::MotionVectorSource::LUMENITE;
+}
+
+std::string LumeniteLinkLine(bool value) {
+  return std::format("Lumenite link: UPLIFT_USE_LUMENITE = {}; ReShade recompiles Uplift.fx, and other add-ons that keep ReShade handles across a "
+                     "recompile may be affected", (value ? 1 : 0));
+}
+
 std::string LaunchPadLinkLine(bool value) {
   return std::format("LaunchPad link: UPLIFT_USE_LAUNCHPAD = {}; ReShade recompiles Uplift.fx, and other add-ons that keep ReShade handles across a "
                      "recompile may be affected", (value ? 1 : 0));

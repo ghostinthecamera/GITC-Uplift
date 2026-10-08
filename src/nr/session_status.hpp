@@ -36,6 +36,12 @@ struct SessionStatus {
   // Plan 6 (D11): while FAILED with AutoRetry on and attempts left, the time to the next automatic retry.
   std::optional<std::chrono::milliseconds> retry_in;
   bool retries_exhausted = false;  // FAILED after the last automatic retry: waiting for a change or Retry now
+  // Plan 19: the latest failure was NR's feature creation (EnsureFeatures; `message` has NGX's result), until a load succeeds again. Native Vulkan NR at
+  // Present falls back to the Direct3D 12 route on it.
+  bool create_failed = false;
+  uint32_t create_result = 0u;  // Plan 19 T6 (M-4): NGX's result of that creation (an NVSDK_NGX_Result), while `create_failed`
+  // Keep faces fix round 1 (C2): why Keep faces does not run although it is on (paused or stopped), for the card; empty otherwise. Static text.
+  std::string_view faces_note;
 };
 
 // Upper-case state name for logs and the overlay.

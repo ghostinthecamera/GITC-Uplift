@@ -92,6 +92,9 @@ float3 ShapeChange(ShapeInput shape_input, ShapeSettings settings, bool sdr) {
   return float3(clamp(limited, -CHANGE_LIMIT, CHANGE_LIMIT), chroma_out);
 }
 
+// The pyramid's [1 3 3 1]/8 kernel at stride 2 (look_pyramid_cs.hlsl, faces_cs.hlsl).
+static const float PYRAMID_KERNEL[4] = {0.125f, 0.375f, 0.375f, 0.125f};
+
 // The pyramid atlas (look::MakeAtlas): level k is ceil(image / 2^k), at x = the widths of levels 1..k-1.
 uint2 LevelSize(uint2 image, uint level) {
   return (image + (1u << level) - 1u) >> level;
