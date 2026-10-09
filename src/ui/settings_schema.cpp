@@ -24,6 +24,7 @@ constexpr std::array<std::string_view, 2> STATE_RESTORE_MODES = {"Full", "Minima
 constexpr std::array<std::string_view, 4> LOG_LEVELS = {"Error", "Warning", "Info", "Debug"};
 constexpr std::array<std::string_view, 2> NGX_HOOK_MODES = {"Auto", "Off (safe mode)"};
 constexpr std::array<std::string_view, 2> FOREIGN_NR_MODES = {"Yield", "Observe"};
+constexpr std::array<std::string_view, 3> VRAM_CHECKS = {"Careful", "Relaxed", "Off"};  // 2026-10-09
 constexpr std::array<std::string_view, 3> VULKAN_NR_MODES = {"Native", "Direct3D 12", "Helper"};  // Plan 19; T5: Helper
 constexpr std::array<std::string_view, 6> RESOLUTION_MODES = {"Full", "Quality (67 %)", "Balanced (58 %)",
                                                               "Performance (50 %)", "Match game", "Custom"};
@@ -892,11 +893,24 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
         .label = "VRAM margin (MiB, 0 = automatic)",
-        .tooltip = "Video memory NR always leaves free for the game.",
+        .tooltip = "Video memory NR always leaves free for the game. 0 = automatic, 512 MiB.",
         .min = 0.0,
         .max = 65536.0,
         .get = [](const Settings& s) { return static_cast<double>(s.budget_margin_mb); },
         .set = [](Settings& s, double v) { s.budget_margin_mb = static_cast<uint32_t>(v); },
+    },
+    {
+        // 2026-10-09 (owner): a Budget input, applied at once with no NR reload.
+        .key = "VramCheck",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::ADVANCED,
+        .label = "Video memory check",
+        .tooltip = "Careful leaves the game its budget and pauses NR when the game needs the memory back. Relaxed lets NR go about 1 GB past the "
+                   "game's budget. Off never checks, like other DLSS-NR add-ons. Relaxed and Off can stutter in games that really use all their "
+                   "video memory.",
+        .choices = VRAM_CHECKS,
+        .get = [](const Settings& s) { return Index(s.vram_check); },
+        .set = [](Settings& s, double v) { s.vram_check = FromIndex<nr::VramCheck>(v); },
     },
     {
         .key = "AutoResume",

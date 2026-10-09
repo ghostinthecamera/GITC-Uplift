@@ -180,6 +180,7 @@ SessionOptions ToSessionOptions(const Settings& settings) {
       .auto_resume = settings.auto_resume,
       .margin_override_bytes = (settings.budget_margin_mb == 0u ? std::nullopt
                                                                 : std::optional<uint64_t>(uint64_t{settings.budget_margin_mb} << 20u)),
+      .vram_check = settings.vram_check,
       .auto_retry = settings.auto_retry,
   };
 }

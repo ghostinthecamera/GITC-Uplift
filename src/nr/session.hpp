@@ -97,6 +97,7 @@ class Session {
   void SetGrace(std::chrono::milliseconds grace) { config_.grace = grace; }
   void SetAutoResume(bool auto_resume) { config_.auto_resume = auto_resume; }
   void SetMarginOverride(std::optional<uint64_t> margin_bytes) { budget_.SetMarginOverride(margin_bytes); }
+  void SetVramCheck(VramCheck check) { budget_.SetVramCheck(check); }
   void SetAutoRetry(bool auto_retry) { config_.auto_retry = auto_retry; }
   // Plan 6 (D11): "Retry now". A FAILED session reloads at the next Tick once its failed teardown has finished; the
   // automatic backoff starts over.

@@ -801,6 +801,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
         .skip_reason = ipc::TextOf(status->skip_reason),
         .skip_from_session = (status->skip_from_session != 0u),
         .working_line = view->status_line,
+        .vram_check = settings.vram_check,
         .addon_file = addon_file_,
     });
   } else if (settings.enabled && has_client && owner && remote->Running()) {

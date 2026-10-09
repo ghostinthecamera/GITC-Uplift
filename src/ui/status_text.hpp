@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "color/encoding.hpp"
+#include "nr/budget.hpp"
 #include "nr/session_status.hpp"
 #include "nr/types.hpp"
 #include "ui/settings.hpp"
@@ -272,6 +273,7 @@ struct CardFacts {
   std::string_view skip_reason;
   bool skip_from_session = false;
   std::string_view working_line;  // FormatStatusLine, for a working card
+  nr::VramCheck vram_check = nr::VramCheck::CAREFUL;  // 2026-10-09: the video memory cards offer the looser checks there are
   // Plan 9: the add-on's own file name, for the RUNTIME card's fix ("next to gitc-uplift.addon64 or the game").
   std::string_view addon_file = "gitc-uplift.addon64";
 };

@@ -112,6 +112,7 @@ The card at the top of the Uplift tab tells you what's wrong. The usual ones:
 | "Uplift's 64-bit helper stopped" | Copy `gitc-uplift-helper64.exe` from the same release next to the add-ons, then press **Retry now**. |
 | "The GPU device was removed" | Press **Retry now** if the card has it; otherwise restart the game. After a stop, some video memory (1 GB or more at 4K) stays in use until you restart the game. If it happens twice, restart the game, and please report it with `ReShade.log`. |
 | "NR needs at least 640x360" | Raise the game's resolution or window size. |
+| "NR skipped: needs 1.2 GB, 0.6 GB free" | The game is using most of the video memory. Lower **VRAM margin**, or set **Video memory check** to **Relaxed** or **Off** (both in Advanced). |
 | A Vulkan game crashes while starting, with Uplift | Start it again: Uplift turns off its additions to the game's Vulkan device by itself. If it keeps crashing, set **Vulkan NR at Present** (Advanced) to **Helper**. |
 | NR costs a lot at a very low resolution | Set **Pass count** to 1. Below about 720p, NR's cost hardly shrinks with the image, so **Resolution** helps little there. |
 | At **Present** with **Motion vectors** on DLSS, the image shimmers when the camera moves | The game keeps its images upside down (many Unity games do). Set `RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN` to 1 in ReShade's global preprocessor definitions, as for depth effects: Uplift then turns DLSS's motion vectors the right way up. |
@@ -193,6 +194,7 @@ Settings live in the game's `ReShade.ini`, under `[Uplift]`. Most are in the Upl
 | `AutoExposureMode` | `0` | **Auto exposure** (Fixes, with **Input exposure** Auto): `0` Blend mixes the game's exposure with Uplift's meter; `1` Switch uses the game's own. A broken game exposure always falls back to the meter. |
 | `AutoExposureBlend` | `0.8` | **Blend (game → meter)** (Fixes), 0 to 1, shown as 0-100 %: `0` is the game's exposure, `1` the meter's. Lower stays closer to the game's look; higher is more even between scenes. |
 | `GraceSeconds` | `5` | **Grace (seconds)** (Advanced): how long NR keeps its memory after you switch it off, so a quick toggle doesn't reload it. |
+| `VramCheck` | `0` | **Video memory check** (Advanced): `0` Careful leaves the game its budget and pauses NR when the game needs the memory back; `1` Relaxed lets NR go about 1 GB past the game's budget; `2` Off never checks, like other DLSS-NR add-ons. Relaxed and Off can stutter in games that really use all their video memory. |
 | `KeepFaces` | `0` | **Keep faces** (Look): `1` keeps NR's lighting and shading on characters, but stops NR reshaping their faces. NR runs one more time per frame, and needs about 1 GB more video memory at 4K. |
 | `FaceProtection` | `0` | **Face protection** (Look), 0 to 1: how much of NR's fine structure faces still get. `0` leaves faces as the game drew them; `1` lets NR's structure through. |
 | `LightingScale` | `2.5` | **Lighting scale (% of height)** (Look), 0.5 to 10: on characters, NR's change broader than this counts as lighting and is kept. Larger keeps only the broadest lighting; smaller keeps more of NR's change on faces. |
@@ -212,8 +214,8 @@ Settings live in the game's `ReShade.ini`, under `[Uplift]`. Most are in the Upl
 
 - **"... does not match the Uplift add-on next to it":** the add-on and `gitc-uplift-helper64.exe` come from different releases. Copy both
   from one.
-- **"Not enough video memory for NR"** or **"Paused: the game needs video memory":** lower **Resolution** or **Pass count**, or close
-  other GPU programs.
+- **"Not enough video memory for NR"** or **"Paused: the game needs video memory":** lower **Resolution** or **Pass count**, close
+  other GPU programs, or set **Video memory check** (Advanced) to **Relaxed** or **Off**.
 - **"Keep faces paused"**: there isn't enough video memory for its extra NR run. NR keeps going without it, and Keep faces comes back by
   itself when there is room. Lower **Resolution** or **Pass count** to make room.
 - **"Keep faces stopped"**: its extra NR run failed, and NR keeps going without it. Untick and tick **Keep faces** to try again.

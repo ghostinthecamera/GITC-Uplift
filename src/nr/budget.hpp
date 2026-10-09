@@ -13,6 +13,13 @@ struct MemoryInfo {
   uint64_t usage = 0u;   // DXGI local-segment CurrentUsage (whole process)
 };
 
+// 2026-10-09 (owner): the `VramCheck` setting, stored as its index. A Budget input, applied at once.
+enum class VramCheck : uint32_t {
+  CAREFUL = 0u,  // NR stays inside the game's budget less the margin, and yields when the game needs the memory back
+  RELAXED = 1u,  // the same rules against a budget BudgetConfig::relaxed_allowance_bytes larger: the game is trusted to shrink its cache
+  OFF = 2u,      // never refuses, yields or holds a resume for video memory, like other DLSS-NR add-ons; allocation failures still fail
+};
+
 // Defaults measured on the RTX 4090 with DLSS-NR 310.8 (spikes E6/E10).
 struct BudgetConfig {
   uint64_t feature_fixed_bytes = 163ull << 20u;       // per-feature intercept
@@ -21,8 +28,8 @@ struct BudgetConfig {
   uint64_t max_bytes_per_megapixel = 240ull << 20u;
   uint64_t first_use_bytes = 165ull << 20u;           // one-time per device, never returned
   uint64_t stats_overcount_bytes = 147'719'680ull;    // weight heap the stats count per feature
-  uint64_t min_margin_bytes = 512ull << 20u;
-  double margin_fraction = 0.05;
+  uint64_t automatic_margin_bytes = 512ull << 20u;   // `BudgetMarginMB` 0, on every card (owner, 2026-10-09)
+  uint64_t relaxed_allowance_bytes = 1ull << 30u;    // VramCheck::RELAXED: how much larger the game's budget counts
   uint32_t yield_samples = 2u;
   std::chrono::seconds resume_hold{10};
 };
@@ -44,9 +51,11 @@ class Budget {
   explicit Budget(BudgetConfig config = {});
 
   [[nodiscard]] uint64_t FeatureBytes(Size size) const;
-  [[nodiscard]] uint64_t Margin(const MemoryInfo& info) const;
-  // Spec §12 `BudgetMarginMB`: a fixed margin instead of max(512 MiB, 5% of budget); nullopt restores that.
+  [[nodiscard]] uint64_t Margin() const;
+  // Spec §12 `BudgetMarginMB`: a fixed margin instead of the automatic 512 MiB; nullopt restores that.
   void SetMarginOverride(std::optional<uint64_t> margin_bytes) { margin_override_ = margin_bytes; }
+  // Fit, Sample and ResumeReady read it at their next call: no reload, and a switch back to Careful yields by the usual streak.
+  void SetVramCheck(VramCheck check) { vram_check_ = check; }
   // v2 design §3.21: need = passes × FeatureBytes(work) + `surface_bytes` (every surface the caller
   // holds for this chain, each at its own size) + the first-use cost while it is pending.
   // `held_bytes`: allocations that stay part of the plan and are already inside info.usage (live
@@ -72,6 +81,7 @@ class Budget {
   [[nodiscard]] uint64_t BytesPerMegapixel() const { return bytes_per_megapixel_; }
 
  private:
+  [[nodiscard]] uint64_t CheckedBudget(const MemoryInfo& info) const;  // info.budget, plus the allowance under Relaxed
   [[nodiscard]] uint64_t Available(const MemoryInfo& info) const;
 
   BudgetConfig config_;
@@ -79,6 +89,7 @@ class Budget {
   uint32_t over_samples_ = 0u;
   std::optional<std::chrono::steady_clock::time_point> resume_since_;
   std::optional<uint64_t> margin_override_;
+  VramCheck vram_check_ = VramCheck::CAREFUL;
 };
 
 }  // namespace uplift::nr

@@ -2908,6 +2908,7 @@ ui::StatusCard CardFor(const AddonState& state, const DeviceEntry& entry, const 
       .skip_reason = status->skip_reason,
       .skip_from_session = status->skip_from_session,
       .working_line = working_line,
+      .vram_check = state.settings.vram_check,
   });
 }
 

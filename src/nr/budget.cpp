@@ -1,6 +1,7 @@
 #include "nr/budget.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace uplift::nr {
 
@@ -11,15 +12,21 @@ uint64_t Budget::FeatureBytes(Size size) const {
   return config_.feature_fixed_bytes + (size.Pixels() * bytes_per_megapixel_) / 1'000'000ull;
 }
 
-uint64_t Budget::Margin(const MemoryInfo& info) const {
-  if (margin_override_) return *margin_override_;
-  const auto fraction = static_cast<uint64_t>(static_cast<double>(info.budget) * config_.margin_fraction);
-  return std::max(config_.min_margin_bytes, fraction);
+uint64_t Budget::Margin() const {
+  return margin_override_.value_or(config_.automatic_margin_bytes);
+}
+
+uint64_t Budget::CheckedBudget(const MemoryInfo& info) const {
+  if (vram_check_ != VramCheck::RELAXED) return info.budget;
+  // Saturating: RealHost reports an unlimited budget as UINT64_MAX.
+  const uint64_t allowance = std::min(config_.relaxed_allowance_bytes, std::numeric_limits<uint64_t>::max() - info.budget);
+  return info.budget + allowance;
 }
 
 uint64_t Budget::Available(const MemoryInfo& info) const {
-  const uint64_t reserved = info.usage + Margin(info);
-  return info.budget > reserved ? info.budget - reserved : 0u;
+  const uint64_t budget = CheckedBudget(info);
+  const uint64_t reserved = info.usage + Margin();
+  return budget > reserved ? budget - reserved : 0u;
 }
 
 FitResult Budget::Fit(Size work, uint32_t requested_passes, uint64_t surface_bytes, const MemoryInfo& info,
@@ -29,7 +36,8 @@ FitResult Budget::Fit(Size work, uint32_t requested_passes, uint64_t surface_byt
   const uint64_t feature = FeatureBytes(work);
   for (uint32_t passes = requested_passes; passes >= 1u; --passes) {
     const uint64_t need = passes * feature + fixed;
-    if (need <= available) return {passes, need, available};
+    // Off takes every requested pass; `available` stays what Careful would see, for the log and the card.
+    if (need <= available || vram_check_ == VramCheck::OFF) return {passes, need, available};
   }
   return {0u, feature + fixed, available};
 }
@@ -41,8 +49,13 @@ void Budget::Calibrate(Size size, uint64_t measured_feature_bytes) {
 }
 
 YieldAction Budget::Sample(const MemoryInfo& info, uint32_t active_passes) {
-  const uint64_t half_margin = Margin(info) / 2u;
-  const uint64_t threshold = info.budget > half_margin ? info.budget - half_margin : 0u;
+  if (vram_check_ == VramCheck::OFF) {
+    over_samples_ = 0u;  // a switch back to Careful starts a fresh streak
+    return YieldAction::NONE;
+  }
+  const uint64_t half_margin = Margin() / 2u;
+  const uint64_t budget = CheckedBudget(info);
+  const uint64_t threshold = budget > half_margin ? budget - half_margin : 0u;
   over_samples_ = info.usage > threshold ? over_samples_ + 1u : 0u;
   if (over_samples_ < config_.yield_samples) return YieldAction::NONE;
   over_samples_ = 0u;
@@ -50,7 +63,11 @@ YieldAction Budget::Sample(const MemoryInfo& info, uint32_t active_passes) {
 }
 
 bool Budget::ResumeReady(const MemoryInfo& info, uint64_t need_bytes, std::chrono::steady_clock::time_point now) {
-  if (Available(info) < need_bytes + Margin(info)) {
+  if (vram_check_ == VramCheck::OFF) {
+    resume_since_.reset();
+    return true;
+  }
+  if (Available(info) < need_bytes + Margin()) {
     resume_since_.reset();
     return false;
   }

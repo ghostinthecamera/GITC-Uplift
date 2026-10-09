@@ -11,6 +11,7 @@
 
 #include "color/encoding.hpp"
 #include "look/look_math.hpp"
+#include "nr/budget.hpp"
 #include "nr/log.hpp"
 #include "nr/types.hpp"
 
@@ -203,7 +204,8 @@ struct Settings {
   uint32_t preset = 1u;       // forwarded; no effect in NR 310.8
   uint32_t performance = 3u;  // forwarded; no effect in NR 310.8
   float grace_seconds = 5.f;
-  uint32_t budget_margin_mb = 0u;  // 0 = automatic (spec §6.5)
+  uint32_t budget_margin_mb = 0u;  // 0 = automatic (spec §6.5): 512 MiB
+  nr::VramCheck vram_check = nr::VramCheck::CAREFUL;  // 2026-10-09 (owner)
   bool auto_resume = true;
   bool show_nv_indicator = false;
   nr::LogLevel log_level = nr::LogLevel::INFO;
@@ -278,6 +280,7 @@ struct SessionOptions {
   std::chrono::milliseconds grace{5000};
   bool auto_resume = true;
   std::optional<uint64_t> margin_override_bytes;
+  nr::VramCheck vram_check = nr::VramCheck::CAREFUL;
   bool auto_retry = true;
 };
 

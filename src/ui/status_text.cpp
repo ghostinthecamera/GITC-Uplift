@@ -463,10 +463,18 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
                                                     : std::string("Retry now, or change a setting."));
     return card(CardStage::SESSION, "NR failed", session.message, {std::move(next)}, CardButton::RETRY_NOW);
   }
+  // 2026-10-09 (owner): the video memory cards also offer the looser Video memory checks there are.
+  std::string_view looser_checks;
+  switch (facts.vram_check) {
+    case nr::VramCheck::CAREFUL: looser_checks = "Relaxed or Off"; break;
+    case nr::VramCheck::RELAXED: looser_checks = "Off"; break;
+    case nr::VramCheck::OFF:     break;
+  }
   if (session.suspended) {
+    std::string need_less = (looser_checks.empty() ? std::string("Lower Resolution or Pass count to need less.")
+                             : std::format("Lower Resolution or Pass count to need less, or set Video memory check to {} (Advanced).", looser_checks));
     return card(CardStage::SESSION, "Paused: the game needs video memory", session.message,
-                {"NR resumes when memory frees up (Resume when VRAM frees up).", "Lower Resolution or Pass count to need less."},
-                CardButton::NONE);
+                {"NR resumes when memory frees up (Resume when VRAM frees up).", std::move(need_less)}, CardButton::NONE);
   }
   if (!facts.output_problem.empty()) {
     return card(CardStage::PLACEMENT, "NR cannot run on this image", facts.output_problem, {}, CardButton::NONE);
@@ -496,8 +504,10 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
     const std::string_view reason =
         (facts.skip_from_session && !session.message.empty() ? std::string_view(session.message) : facts.skip_reason);
     if (facts.skip_reason == "budget") {
-      return card(CardStage::BUDGET, "Not enough video memory for NR", reason,
-                  {"Lower Resolution or Pass count, or close other GPU programs."}, CardButton::NONE);
+      std::string need_less =
+          (looser_checks.empty() ? std::string("Lower Resolution or Pass count, or close other GPU programs.")
+           : std::format("Lower Resolution or Pass count, close other GPU programs, or set Video memory check to {} (Advanced).", looser_checks));
+      return card(CardStage::BUDGET, "Not enough video memory for NR", reason, {std::move(need_less)}, CardButton::NONE);
     }
     if (facts.skip_reason == "frame too small" || facts.skip_reason == "resizing") {
       return card(CardStage::FRAME, "Waiting for a usable frame", reason, {"NR needs at least " UPLIFT_NR_FLOOR_TEXT "."}, CardButton::NONE);
