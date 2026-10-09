@@ -162,8 +162,9 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   NotePlacementChange();
   const bool dlss_placement =
       (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
-  if (!dlss_placement) {
-    // The Present path reports each frame afresh; the DLSS paths keep their last evaluate's result.
+  if (!dlss_placement && !ran_since_present_) {
+    // The Present path reports each frame afresh; the DLSS paths keep their last evaluate's result. 1.2.4: so does a Present-path Run that came
+    // before this present (effects rendered mid-frame by another add-on), or the card would read "Waiting for a frame" while NR runs.
     nr_applied_ = false;
     passes_run_ = 0u;
     skip_reason_ = {};
@@ -172,6 +173,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
     motion_scale_x_ = 1.f;
     motion_scale_y_ = 1.f;
   }
+  ran_since_present_ = false;
   // Minor 4 (fix round 4): the Present motion copies are only useful with Source = Present and
   // MotionVectors wanting them; release them (through the Timeline, like any other intermediate) as
   // soon as either stops holding, rather than waiting for the Session to next go OFF. A no-op once
@@ -257,6 +259,7 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
                                           nr::Rect dlss_motion_region) {
   if (point == TriggerPoint::NONE || !frame_ready_) return {};
   frame_ready_ = false;
+  ran_since_present_ = true;
   // Spec §11: on the Present path NR would also run on generated frames.
   if (frame_generation_.State().active && !config_.present_with_frame_gen) {
     skip_reason_ = "frame generation is on";

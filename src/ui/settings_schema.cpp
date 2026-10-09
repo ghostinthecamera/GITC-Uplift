@@ -680,7 +680,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "AutoExposureBlend",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::FIXES_COLOR,
-        .label = "Blend (game → meter)",
+        .label = "Blend (game to meter)",
         .tooltip = "0 % is the game's exposure, 100 % Uplift's meter. Lower stays closer to the game's own look; higher "
                    "is more even between scenes. A broken game exposure always falls back to the meter.",
         .min = 0.0,

@@ -419,6 +419,9 @@ class DeviceContext {
   // vectors" reason. Stale between evaluates is harmless: it is read only while motion_source_ == NONE.
   bool last_motion_vectors_missing_ = false;
   bool frame_ready_ = false;
+  // 1.2.4: a Present-path Run since the last BeginFrame. NR can run before the present itself, when an add-on renders ReShade's effects mid-frame
+  // (S.T.A.L.K.E.R. Anomaly's, before the HUD): BeginFrame then keeps that frame's result for the card instead of clearing it.
+  bool ran_since_present_ = false;
   std::atomic<bool> device_lost_{false};  // also read by StampThread on game threads
   bool torn_down_ = false;
   bool dlss_seen_ = false;
