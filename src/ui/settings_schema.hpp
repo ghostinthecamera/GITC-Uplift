@@ -87,5 +87,8 @@ void RestoreAllDefaults(Settings* settings);
 [[nodiscard]] std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settings& settings);
 // The largest valid value: `max`, or the last choice index for a CHOICE.
 [[nodiscard]] double DescriptorMax(const SettingDescriptor& descriptor);
+// The colour fixes' exposure rows the overlay hides (ui-review.md §3 rule 1) while `settings`' Input exposure makes them moot: Adaptation and its rates unless
+// Metered or Auto; 2026-10-09: Auto exposure unless Auto, and Blend unless Auto's Blend.
+[[nodiscard]] bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings);
 
 }  // namespace uplift::ui

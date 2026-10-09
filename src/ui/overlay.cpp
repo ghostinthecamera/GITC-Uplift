@@ -11,7 +11,6 @@
 #include <utility>
 
 #include "addon/reshade_api.hpp"
-#include "color/encoding.hpp"
 #include "ui/settings_schema.hpp"
 
 namespace uplift::ui {
@@ -95,11 +94,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                             && descriptor.key != "ShapeResult" && !settings->look.enabled);
   const bool stabilize_off = ((descriptor.key == "StabilizeMs" || descriptor.key == "StabilizeDetail")
                               && settings->look.stabilize == look::StabilizeMode::OFF);
-  // Plan 17: the Adaptation rows matter wherever the meter can be used: Metered, and Auto (the default), which meters when the game's exposure is missing or off.
-  const bool not_metered = ((descriptor.key == "ExposureAdapt" || descriptor.key == "AdaptBrighterStops"
-                             || descriptor.key == "AdaptDarkerStops")
-                            && settings->input_exposure != color::InputExposure::AUTO
-                            && settings->input_exposure != color::InputExposure::METERED);
+  // Plan 17: the Adaptation rows only where the meter can be used; 2026-10-09: Auto's own rows only under Auto.
+  const bool exposure_hidden = ExposureRowHidden(descriptor, *settings);
   const bool resolution_scale_hidden =
       (descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM);
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && settings->resolution_mode == ResolutionMode::FULL);
@@ -111,7 +107,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const bool fill_off = ((descriptor.key == "FaceFillRadius" || descriptor.key == "FaceFillTolerance") && !settings->face_tuning.fill_skin);
   // ui-review.md §3 rule 1: these rows matter only after a choice in the row just above them, so they
   // are hidden -- not merely greyed -- until that choice is made.
-  if (pass_follows || shaping_off || stabilize_off || not_metered || resolution_scale_hidden || upsampling_hidden || keep_faces_off || fill_off) {
+  if (pass_follows || shaping_off || stabilize_off || exposure_hidden || resolution_scale_hidden || upsampling_hidden || keep_faces_off || fill_off) {
     return false;
   }
 
@@ -208,14 +204,17 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         break;
       }
       case SettingKind::FLOAT: {
-        float value = static_cast<float>(descriptor.get(*settings));
-        const float high = static_cast<float>(descriptor.ui_max > 0.0 ? descriptor.ui_max : descriptor.max);
+        // 2026-10-09: AutoExposureBlend is stored 0..1 and shown as 0-100 %.
+        const float shown_scale = (descriptor.key == "AutoExposureBlend" ? 100.f : 1.f);
+        float value = static_cast<float>(descriptor.get(*settings)) * shown_scale;
+        const float high = static_cast<float>(descriptor.ui_max > 0.0 ? descriptor.ui_max : descriptor.max) * shown_scale;
         const char* const format = (descriptor.key == "GraceSeconds" ? "%.1f"
-                                    : descriptor.key == "ResolutionScale" ? "%.0f %%"
-                                    : descriptor.key == "StabilizeMs"     ? "%.0f ms"
-                                                                          : "%.2f");
-        if (ImGui::SliderFloat(label.c_str(), &value, static_cast<float>(descriptor.min), high, format)) {
-          descriptor.set(*settings, static_cast<double>(value));
+                                    : descriptor.key == "ResolutionScale"   ? "%.0f %%"
+                                    : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
+                                    : descriptor.key == "StabilizeMs"       ? "%.0f ms"
+                                                                            : "%.2f");
+        if (ImGui::SliderFloat(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format)) {
+          descriptor.set(*settings, static_cast<double>(value / shown_scale));
           changed = true;
         }
         const bool active = ImGui::IsItemActive();

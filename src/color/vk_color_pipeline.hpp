@@ -159,6 +159,7 @@ struct VkMeterPass {
   bool probe = false;
   VkSampledView game_exposure;
   float game_exposure_factor = 1.f;
+  float game_weight = 0.f;  // 2026-10-09, Auto's Blend (with `probe`), as Direct3D 12's MeterPass
 };
 
 // Plan 14 Task 10 (v2 design §3.10): pass n's own Transfer and Colour strength, applied to its raw output in place. Every image GENERAL.

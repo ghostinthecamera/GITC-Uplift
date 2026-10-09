@@ -264,8 +264,12 @@ class VkNrPipeline final : private nr::PassResolver {
   struct ExposureChoice {
     color::VkSampledView view;
     float factor = 1.f;
-    bool metered = false;
-    bool probe = false;  // Plan 17: the game's exposure is used, and the meter runs beside it for Auto's check
+    bool metered = false;  // `view` is the meter's state
+    bool probe = false;    // Plan 17: the meter runs beside the game's exposure for Auto's check
+    // With `probe`: the game's exposure as the meter reads it, and (2026-10-09, Auto's Blend) its share of the state's multiplier in stops.
+    color::VkSampledView game_view;
+    float game_factor = 1.f;
+    float game_weight = 0.f;
   };
   // Plan 17: Auto's check, as Direct3D 12's: the state's two texels copied into a host-visible ring after the meter, read once the GPU has passed them.
   static constexpr uint32_t CHECK_SLOTS = 4u;

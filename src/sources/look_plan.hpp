@@ -22,6 +22,9 @@ struct ColorFixes {
   color::Primaries primaries = color::Primaries::AUTO;
   float linear_unit_nits = 0.f;  // 0 = automatic
   color::InputExposure input_exposure = color::InputExposure::GAME;
+  // 2026-10-09: Auto with a valid game exposure. Switch here keeps Plan 17's Auto (the settings' default is Blend); `auto_blend` is 0 the game's, 1 the meter's.
+  color::AutoExposureMode auto_mode = color::AutoExposureMode::SWITCH;
+  float auto_blend = 0.5f;
   bool smooth_adapt = true;      // ExposureAdapt = Smooth
   float adapt_brighter = 2.f;    // stops per second
   float adapt_darker = 0.7f;

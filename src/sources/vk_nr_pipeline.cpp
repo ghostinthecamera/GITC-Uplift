@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <string_view>
 #include <utility>
@@ -378,9 +379,12 @@ void VkNrPipeline::PollExposureChecks() {
     check_.pending[index] = false;
     std::array<float, 8> texels = {};  // (2^E, E, the anchor, set), (the game's texel, its factor, the game's exposure, the meter's target)
     std::memcpy(texels.data(), check_.mapped + index * CHECK_STRIDE, sizeof(texels));
-    const ExposureSample sample = {.texture_value = texels[4], .factor = texels[5], .game = texels[6], .metered_stops = texels[1], .target_stops = texels[7]};
+    const ExposureSample sample = {.texture_value = texels[4], .factor = texels[5], .game = texels[6], .metered_stops = texels[1], .target_stops = texels[7],
+                                   .anchor_stops = texels[2]};
     if (auto_exposure_.Observe(sample, seconds)) {
-      nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, auto_exposure_.StopsOff()));
+      nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, auto_exposure_));
+    } else if (!auto_exposure_.Latched() && std::isfinite(AutoExposure::OutsideSpan(sample)) && auto_exposure_.DebugDue(seconds)) {
+      nr::Log(nr::LogLevel::TRACE, AutoDebugMessage(sample, config_.fixes.auto_mode, config_.fixes.auto_blend, auto_exposure_.HeldThroughMove()));  // 2026-10-09: once a second
     }
   }
 }
@@ -572,14 +576,19 @@ VkNrPipeline::ExposureChoice VkNrPipeline::ChooseExposure(color::Encoding encodi
   bool use_game = false;
   bool metered = false;
   bool probe = false;
+  bool blend = false;
   switch (config_.fixes.input_exposure) {
     case color::InputExposure::AUTO:
-      // Plan 17: Direct3D 12's rule. The game's exposure while it agrees with the meter (which runs beside it), the meter once it has not for a sustained
-      // second, the meter without one, and the game's where the meter cannot run.
+      // Plan 17: Direct3D 12's rule. The game's exposure while it is valid against the meter (which runs beside it), the meter once it has not been for a
+      // sustained second, the meter without one, and the game's where the meter cannot run. 2026-10-09: Blend, the blend of the two in the meter's state.
       if (!game_exposure) {
         metered = true;
       } else if (can_meter && auto_exposure_.Latched()) {
         metered = true;
+      } else if (can_meter && config_.fixes.auto_mode == color::AutoExposureMode::BLEND) {
+        metered = true;
+        probe = true;
+        blend = true;
       } else {
         use_game = true;
         probe = can_meter;
@@ -601,14 +610,24 @@ VkNrPipeline::ExposureChoice VkNrPipeline::ChooseExposure(color::Encoding encodi
     }
   }
   const bool have_state = (exposure_.state.image != VK_NULL_HANDLE);
-  if (metered && have_state) {
-    exposure_report_ = {.use = ExposureUse::METERED,
-                        .stops_off = ((automatic && game_exposure && auto_exposure_.Latched()) ? std::optional<float>(auto_exposure_.StopsOff()) : std::nullopt)};
-    return {.view = {.view = exposure_.state.view, .layout = VK_IMAGE_LAYOUT_GENERAL}, .factor = 1.f, .metered = true};
+  const bool probing = (probe && have_state);
+  const color::VkSampledView state_view = {.view = exposure_.state.view, .layout = VK_IMAGE_LAYOUT_GENERAL};
+  if (blend && have_state) {
+    exposure_report_ = {.use = ExposureUse::BLEND, .blend = config_.fixes.auto_blend, .gap = auto_exposure_.LastGap()};
+    return {.view = state_view, .factor = 1.f, .metered = true, .probe = true, .game_view = GameExposureView(game_texture), .game_factor = game_factor,
+            .game_weight = 1.f - std::clamp(config_.fixes.auto_blend, 0.f, 1.f)};
   }
-  if (use_game) {
+  if (metered && have_state) {
+    const bool latched = (automatic && game_exposure && auto_exposure_.Latched());
+    exposure_report_ = {.use = ExposureUse::METERED,
+                        .stops_off = (latched ? std::optional<float>(auto_exposure_.StopsOff()) : std::nullopt),
+                        .latch = (latched ? auto_exposure_.Reason() : AutoLatch::NONE)};
+    return {.view = state_view, .factor = 1.f, .metered = true};
+  }
+  if (use_game || blend) {  // Blend without its state: the game's
     exposure_report_ = {.use = (game_exposure ? ExposureUse::GAME : ExposureUse::NONE)};
-    return {.view = GameExposureView(game_texture), .factor = game_factor, .probe = (probe && have_state)};
+    const color::VkSampledView game_view = GameExposureView(game_texture);
+    return {.view = game_view, .factor = game_factor, .probe = probing, .game_view = game_view, .game_factor = game_factor};
   }
   exposure_report_ = {};
   return {};
@@ -622,8 +641,9 @@ bool VkNrPipeline::RecordMeter(VkCommandBuffer buffer, uint32_t slot, color::VkM
   pass.darker_rate = config_.fixes.adapt_darker;
   pass.frame_seconds = config_.frame_seconds;
   pass.probe = exposure.probe;
-  pass.game_exposure = (exposure.probe ? exposure.view : color::VkSampledView{});
-  pass.game_exposure_factor = (exposure.probe ? exposure.factor : 1.f);
+  pass.game_exposure = (exposure.probe ? exposure.game_view : color::VkSampledView{});
+  pass.game_exposure_factor = (exposure.probe ? exposure.game_factor : 1.f);
+  pass.game_weight = (exposure.probe ? exposure.game_weight : 0.f);
   exposure_.last_use = slot_marks_[slot];
   if (!color_.RecordMeter(buffer, slot, pass)) return false;
   Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);  // the encode reads the state (and Auto's check copies it)

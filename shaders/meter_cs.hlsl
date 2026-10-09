@@ -21,7 +21,7 @@ cbuffer MeterConstants : register(b0) {
   uint probe;            // Plan 17: write texel (1, 0)
   uint has_game_texture;  // the game's ExposureTexture is bound at t2
   float game_factor;     // DLSS.Exposure.Scale ÷ DLSS.Pre.Exposure
-  uint reserved3;
+  float game_weight;     // 2026-10-09, Auto's Blend with `probe`: the game's share, in stops, of the multiplier at (0, 0).x (1 − AutoExposureBlend); 0 the meter alone
 };
 
 // Plan 14: on Vulkan's After DLSS the source is DLSS's output, read in place from its storage view (u2), as the encode reads it.
@@ -89,10 +89,15 @@ void main(uint3 group_thread : SV_GroupThreadID) {
     const float seconds = clamp(frame_seconds, 0.001f, 0.1f);
     exposure += clamp(target - exposure, -brighter_rate * seconds, darker_rate * seconds);
   }
-  state_texture[uint2(0, 0)] = float4(exp2(exposure), exposure, anchor, 1.f);
+  // 2026-10-09: x is what the encode and the decode multiply by; y stays the governor's E, which the next frame moves on from.
+  float multiplier_stops = exposure;
   if (probe != 0u) {
     // Plan 17: (the game's texel, its factor, what the encode would multiply by, the meter's target in stops).
     const float texel = (has_game_texture != 0u ? exposure_texture.Load(int3(0, 0, 0)) : 1.f);
-    state_texture[uint2(1, 0)] = float4(texel, game_factor, GameExposure(has_game_texture, texel, game_factor), target);
+    const float game = GameExposure(has_game_texture, texel, game_factor);
+    state_texture[uint2(1, 0)] = float4(texel, game_factor, game, target);
+    // 2026-10-09, Blend: game + w · (E − game) in stops, written as E + (1 − w) · (game − E). GameExposure is finite and positive.
+    multiplier_stops += game_weight * (log2(game) - exposure);
   }
+  state_texture[uint2(0, 0)] = float4(exp2(multiplier_stops), exposure, anchor, 1.f);
 }

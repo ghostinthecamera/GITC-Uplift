@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <optional>
 #include <utility>
@@ -412,14 +413,20 @@ NrPipeline::ExposureChoice NrPipeline::ChooseExposure(color::Encoding encoding, 
   bool use_game = false;
   bool metered = false;
   bool probe = false;
+  bool blend = false;
   switch (config_.fixes.input_exposure) {
     case color::InputExposure::AUTO:
-      // Plan 17: the game's exposure while it agrees with the meter, which runs beside it (Auto's check), and the meter once it has not for a sustained
-      // second; the meter without one, and the game's where the meter cannot run.
+      // Plan 17: the game's exposure while it is valid against the meter, which runs beside it (Auto's check), and the meter once it has not been for a
+      // sustained second; the meter without one, and the game's where the meter cannot run. 2026-10-09: Blend has the meter write the blend of the two into
+      // its state, which the encode and the decode read as Metered's.
       if (!game_exposure) {
         metered = true;
       } else if (can_meter && auto_exposure_.Latched()) {
         metered = true;
+      } else if (can_meter && config_.fixes.auto_mode == color::AutoExposureMode::BLEND) {
+        metered = true;
+        probe = true;
+        blend = true;
       } else {
         use_game = true;
         probe = can_meter;
@@ -438,14 +445,23 @@ NrPipeline::ExposureChoice NrPipeline::ChooseExposure(color::Encoding encoding, 
                                     L"Uplift exposure state");
     exposure_.snap = true;  // undefined until the meter's first snap
   }
-  if (metered && exposure_.state) {
+  const bool have_state = static_cast<bool>(exposure_.state);
+  const bool probing = (probe && have_state);
+  if (blend && have_state) {
+    exposure_report_ = {.use = ExposureUse::BLEND, .blend = config_.fixes.auto_blend, .gap = auto_exposure_.LastGap()};
+    return {.texture = exposure_.state.Get(), .factor = 1.f, .metered = true, .probe = true, .game_texture = game_texture, .game_factor = game_factor,
+            .game_weight = 1.f - std::clamp(config_.fixes.auto_blend, 0.f, 1.f)};
+  }
+  if (metered && have_state) {
+    const bool latched = (automatic && game_exposure && auto_exposure_.Latched());
     exposure_report_ = {.use = ExposureUse::METERED,
-                        .stops_off = ((automatic && game_exposure && auto_exposure_.Latched()) ? std::optional<float>(auto_exposure_.StopsOff()) : std::nullopt)};
+                        .stops_off = (latched ? std::optional<float>(auto_exposure_.StopsOff()) : std::nullopt),
+                        .latch = (latched ? auto_exposure_.Reason() : AutoLatch::NONE)};
     return {.texture = exposure_.state.Get(), .factor = 1.f, .metered = true};
   }
-  if (use_game) {
+  if (use_game || blend) {  // Blend without its state: the game's
     exposure_report_ = {.use = (game_exposure ? ExposureUse::GAME : ExposureUse::NONE)};
-    return {.texture = game_texture, .factor = game_factor, .probe = (probe && exposure_.state)};
+    return {.texture = game_texture, .factor = game_factor, .probe = probing, .game_texture = game_texture, .game_factor = game_factor};
   }
   exposure_report_ = {};
   return {};
@@ -465,9 +481,12 @@ void NrPipeline::PollExposureChecks() {
     std::memcpy(texels.data(), static_cast<const std::byte*>(mapped) + read.Begin, sizeof(texels));
     const D3D12_RANGE written = {.Begin = 0u, .End = 0u};
     check_.readback->Unmap(0u, &written);
-    const ExposureSample sample = {.texture_value = texels[4], .factor = texels[5], .game = texels[6], .metered_stops = texels[1], .target_stops = texels[7]};
+    const ExposureSample sample = {.texture_value = texels[4], .factor = texels[5], .game = texels[6], .metered_stops = texels[1], .target_stops = texels[7],
+                                   .anchor_stops = texels[2]};
     if (auto_exposure_.Observe(sample, seconds)) {
-      nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, auto_exposure_.StopsOff()));
+      nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, auto_exposure_));
+    } else if (!auto_exposure_.Latched() && std::isfinite(AutoExposure::OutsideSpan(sample)) && auto_exposure_.DebugDue(seconds)) {
+      nr::Log(nr::LogLevel::TRACE, AutoDebugMessage(sample, config_.fixes.auto_mode, config_.fixes.auto_blend, auto_exposure_.HeldThroughMove()));  // 2026-10-09: once a second
     }
   }
 }
@@ -481,8 +500,9 @@ void NrPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, col
   pass.darker_rate = config_.fixes.adapt_darker;
   pass.frame_seconds = config_.frame_seconds;
   pass.probe = exposure.probe;
-  pass.game_exposure = (exposure.probe ? exposure.texture : nullptr);
-  pass.game_exposure_factor = (exposure.probe ? exposure.factor : 1.f);
+  pass.game_exposure = (exposure.probe ? exposure.game_texture : nullptr);
+  pass.game_exposure_factor = (exposure.probe ? exposure.game_factor : 1.f);
+  pass.game_weight = (exposure.probe ? exposure.game_weight : 0.f);
   Transition(list, state, PIXEL_AND_COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   color_.RecordMeter(list, slot, pass);
   Transition(list, state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, PIXEL_AND_COMPUTE_READ);

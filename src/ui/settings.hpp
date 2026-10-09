@@ -231,6 +231,8 @@ struct Settings {
   MaskMode mask = MaskMode::AUTO;
   UiCorrection ui_correction = UiCorrection::AUTO;
   color::InputExposure input_exposure = color::InputExposure::AUTO;  // Plan 17: Auto (the game's when it agrees with the meter); was Game, Plan 4's exposure
+  color::AutoExposureMode auto_exposure_mode = color::AutoExposureMode::BLEND;  // 2026-10-09: how Auto uses a valid game exposure
+  float auto_exposure_blend = 0.8f;                                             // 2026-10-09: Blend's point, 0 the game's, 1 the meter's
   ExposureAdapt exposure_adapt = ExposureAdapt::SMOOTH;
   float adapt_brighter_stops = 2.f;
   float adapt_darker_stops = 0.7f;

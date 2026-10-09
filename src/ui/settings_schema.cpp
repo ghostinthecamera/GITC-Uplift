@@ -32,6 +32,7 @@ constexpr std::array<std::string_view, 2> MASK_MODES = {"Auto (UPLIFT_MASK)", "O
 constexpr std::array<std::string_view, 3> UI_CORRECTION_MODES = {"Auto", "Off", "On"};
 constexpr std::array<std::string_view, 3> STABILIZE_MODES = {"Off", "Static", "Motion"};
 constexpr std::array<std::string_view, 4> INPUT_EXPOSURES = {"Auto", "Game", "Metered", "Manual"};
+constexpr std::array<std::string_view, 2> AUTO_EXPOSURE_MODES = {"Blend", "Switch"};  // 2026-10-09
 constexpr std::array<std::string_view, 2> ADAPT_MODES = {"Off", "Smooth"};
 constexpr std::array<std::string_view, 4> PRIMARIES = {"Auto", "BT.709", "BT.2020", "AP1 (ACEScg)"};
 constexpr std::array<std::string_view, 2> NEURAL_TRANSFERS = {"Bounded ratio", "Consistent"};
@@ -653,13 +654,38 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::FIXES_COLOR,
         .label = "Input exposure",
-        .tooltip = "Where NR's input brightness comes from on scene-linear images. Auto: the game's DLSS exposure while it "
-                   "agrees with Uplift's meter, else the meter (Details says which). Game: DLSS's exposure (none on the "
-                   "presented image). Metered: Uplift's own meter. Manual: Diffuse white alone. sRGB, scRGB and HDR10 "
-                   "images are never metered.",
+        .tooltip = "Where NR's input brightness comes from on scene-linear images. Auto: the game's DLSS exposure, or a blend "
+                   "of it with Uplift's meter, while it looks right, else the meter (Details says which). Game: DLSS's "
+                   "exposure (none on the presented image). Metered: Uplift's own meter. Manual: Diffuse white alone. sRGB, "
+                   "scRGB and HDR10 images are never metered.",
         .choices = INPUT_EXPOSURES,
         .get = [](const Settings& s) { return Index(s.input_exposure); },
         .set = [](Settings& s, double v) { s.input_exposure = FromIndex<color::InputExposure>(v); },
+    },
+    {
+        // 2026-10-09 (.superpowers/sdd/2026-10-09-auto-exposure): shown only while Input exposure is Auto.
+        .key = "AutoExposureMode",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::FIXES_COLOR,
+        .label = "Auto exposure",
+        .tooltip = "How Auto uses the game's exposure. Blend: a mix of the game's exposure and Uplift's meter, set by the "
+                   "slider below. Switch: the game's own exposure. A broken game exposure always falls back to the meter.",
+        .choices = AUTO_EXPOSURE_MODES,
+        .get = [](const Settings& s) { return Index(s.auto_exposure_mode); },
+        .set = [](Settings& s, double v) { s.auto_exposure_mode = FromIndex<color::AutoExposureMode>(v); },
+    },
+    {
+        // 2026-10-09: shown only for Auto's Blend. Stored 0..1, shown as a percentage.
+        .key = "AutoExposureBlend",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::FIXES_COLOR,
+        .label = "Blend (game → meter)",
+        .tooltip = "0 % is the game's exposure, 100 % Uplift's meter. Lower stays closer to the game's own look; higher "
+                   "is more even between scenes. A broken game exposure always falls back to the meter.",
+        .min = 0.0,
+        .max = 1.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.auto_exposure_blend); },
+        .set = [](Settings& s, double v) { s.auto_exposure_blend = static_cast<float>(v); },
     },
     {
         .key = "ExposureAdapt",
@@ -1443,10 +1469,22 @@ std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settin
       if (descriptor.special.has_value() && value == *descriptor.special) {
         return (value < 0.0 ? std::string("same as Structure") : std::string("automatic"));
       }
+      if (descriptor.key == "AutoExposureBlend") return std::format("{:.0f} %", value * 100.0);  // 2026-10-09: stored 0..1
       return std::format("{:.2f}", value);
     case SettingKind::TEXT: break;
   }
   return {};
+}
+
+bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings) {
+  const bool automatic = (settings.input_exposure == color::InputExposure::AUTO);
+  // Plan 17: the Adaptation rows matter wherever the meter can be used: Metered, and Auto, which meters when the game's exposure is missing, broken or blended.
+  if (descriptor.key == "ExposureAdapt" || descriptor.key == "AdaptBrighterStops" || descriptor.key == "AdaptDarkerStops") {
+    return (!automatic && settings.input_exposure != color::InputExposure::METERED);
+  }
+  if (descriptor.key == "AutoExposureMode") return !automatic;
+  if (descriptor.key == "AutoExposureBlend") return (!automatic || settings.auto_exposure_mode != color::AutoExposureMode::BLEND);
+  return false;
 }
 
 double DescriptorMax(const SettingDescriptor& descriptor) {

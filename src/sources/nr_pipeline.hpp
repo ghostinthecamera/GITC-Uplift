@@ -188,8 +188,12 @@ class NrPipeline final : private nr::PassResolver {
   struct ExposureChoice {
     ID3D12Resource* texture = nullptr;
     float factor = 1.f;
-    bool metered = false;
-    bool probe = false;  // Plan 17: the game's exposure is used, and the meter runs beside it for Auto's check
+    bool metered = false;  // `texture` is the meter's state
+    bool probe = false;    // Plan 17: the meter runs beside the game's exposure for Auto's check
+    // With `probe`: the game's exposure as the meter reads it, and (2026-10-09, Auto's Blend) its share of the state's multiplier in stops.
+    ID3D12Resource* game_texture = nullptr;
+    float game_factor = 1.f;
+    float game_weight = 0.f;
   };
   // Plan 17: Auto's check. The meter state's two texels are copied into a readback ring after the meter and read once the GPU has passed them: a few frames
   // late, never a wait. A busy ring skips the sample.

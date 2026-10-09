@@ -689,7 +689,7 @@ bool VkColorPipeline::RecordMeter(VkCommandBuffer buffer, uint32_t slot, const V
       (pass.probe ? 1u : 0u),
       (pass.probe && pass.game_exposure.view != VK_NULL_HANDLE ? 1u : 0u),
       Bits(pass.game_exposure_factor),
-      0u,
+      Bits(pass.probe ? pass.game_weight : 0.f),
   };
   Bindings bindings;
   bindings.sampled[0] = (in_place ? VkSampledView{} : VkSampledView{.view = pass.source, .layout = pass.source_layout});

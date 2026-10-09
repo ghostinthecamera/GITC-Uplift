@@ -128,6 +128,8 @@ struct MeterPass {
   bool probe = false;
   ID3D12Resource* game_exposure = nullptr;  // DLSS's ExposureTexture, NON_PIXEL_SHADER_RESOURCE, or null
   float game_exposure_factor = 1.f;
+  // 2026-10-09, Auto's Blend (with `probe`): the game's share of the state's multiplier, in stops (1 − AutoExposureBlend); 0 is the meter alone.
+  float game_weight = 0.f;
 };
 
 // Plan 5 (v2 design §3.12): the Gaussian pyramid of C and the max pyramid of ℓ_M, levels 1..K, in two atlases.

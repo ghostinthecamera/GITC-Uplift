@@ -416,7 +416,7 @@ bool ColorPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, 
       static_cast<uint32_t>(pass.encoding), pass.primaries, Bits(pass.input_scale), pass.region.x, pass.region.y,
       pass.region.width, pass.region.height, (pass.snap ? 1u : 0u), (pass.smooth ? 1u : 0u), Bits(pass.brighter_rate),
       Bits(pass.darker_rate), Bits(pass.frame_seconds), (pass.probe ? 1u : 0u), (pass.probe && pass.game_exposure != nullptr ? 1u : 0u),
-      Bits(pass.game_exposure_factor), 0u,
+      Bits(pass.game_exposure_factor), Bits(pass.probe ? pass.game_weight : 0.f),
   };
   DispatchCompute(list, meter_pipeline_.Get(), constants, base, 1u, 1u);  // one group of 256 threads
   return true;

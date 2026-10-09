@@ -41,6 +41,13 @@ enum class InputExposure : uint32_t {
   MANUAL = 3u,   // DiffuseWhiteNits alone
 };
 
+// 2026-10-09 (.superpowers/sdd/2026-10-09-auto-exposure): the AutoExposureMode index, how Auto uses a valid game exposure. Either falls back to the meter
+// alone once the game's is found broken.
+enum class AutoExposureMode : uint32_t {
+  BLEND = 0u,   // the game's and the meter's, blended in stops by AutoExposureBlend
+  SWITCH = 1u,  // the game's (Plan 17's Auto)
+};
+
 // F15: the NeuralTransfer index.
 enum class NeuralTransfer : uint32_t {
   BOUNDED_RATIO = 0u,
