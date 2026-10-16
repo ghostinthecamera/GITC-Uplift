@@ -79,7 +79,7 @@ void MigrateSettings(Settings* settings) {
 
 void SaveSettings(const Settings& settings, ConfigStore* store) {
   for (const SettingDescriptor& descriptor : SettingsSchema()) {
-    // v2 design D6: a pass that follows pass 1 writes only its switch.
+    // v2 design D6: a pass that follows pass 1 writes only its switch, and (split chain, 2026-10-10) its Runs at: both are PASS_SWITCH rows.
     if (descriptor.pass != 0u && (descriptor.flags & setting_flags::PASS_SWITCH) == 0u
         && settings.passes[descriptor.pass - 2u].follow_pass1) {
       continue;

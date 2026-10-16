@@ -89,6 +89,9 @@ struct DlssHandoffInput {
   ID3D11Resource* motion = nullptr;    // DLSS's motion vectors, or null
   nr::Rect motion_region;              // inside `motion` (ResolveRegion11)
   ID3D11Resource* exposure = nullptr;  // the 1x1 exposure texture, or null
+  // Split chain (Task 4): the chain runs both DLSS stages (a Before + After split), so the other stage's shares stay. Otherwise a hand-off frees them, as the
+  // single share of before was re-made for whichever stage ran: one stage allocates exactly what it did.
+  bool keep_other_stage = false;
 };
 // What the recorder gets on the private device. Every texture is COMMON on entry and must be COMMON again on return (the mask: COPY_SOURCE, as
 // BridgeTargets::mask).
@@ -195,6 +198,13 @@ class D3D11Bridge {
   [[nodiscard]] bool Stopped() const { return !latch_.empty(); }    // Plan 8: the D3D10 bridge's one latch
   [[nodiscard]] std::string_view Latch() const { return latch_; }   // Plan 17: the card's reason; empty while it runs
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }  // Plan 8: the D3D10 bridge's status line
+  // Split chain (fix round 2, I2): a three-stage chain makes three private lists per frame (two mid-frame hand-offs and the present's): the allocator ring
+  // grows once from 8 to 12 (logged), and never shrinks. The default path keeps 8.
+  void GrowRingForSplit();
+  [[nodiscard]] size_t RingSize() const { return side_->RingSize(); }
+  // Split chain (Task 4): the shares the DLSS stages and the Present ring made so far (EnsureShared's), for the tests: a Before + After split makes none
+  // per evaluate once both stages hold theirs.
+  [[nodiscard]] uint64_t DlssSharesMade() const { return dlss_shares_made_; }
   // Plan 8: true once, after an object on the D3D11 device was released (a retired surface freed, or one dropped at
   // once) since the last call. D3D11 destroys a released object only at its context's next Flush, which a device with no
   // Present of its own (the D3D10 relay) must make itself.
@@ -265,11 +275,13 @@ class D3D11Bridge {
   std::optional<ShareFailure> color_failure_;
   std::optional<ShareFailure> mask_failure_;
   std::optional<ShareFailure> motion_failure_;
-  Shared dlss_image_;     // Plan 18: After DLSS's output region, or Before upscaling's whole colour
+  Shared dlss_image_;     // Plan 18: After DLSS's output region
+  Shared dlss_pre_image_;  // split chain (Task 4): Before upscaling's whole colour, its own share so a Before + After split re-makes neither per evaluate
   Shared dlss_motion_;    // the motion region
   Shared dlss_exposure_;  // 1x1
   Shared dlss_swap_;      // Before upscaling: RGBA16F at the colour's size, what DLSS reads
   std::optional<ShareFailure> dlss_image_failure_;
+  std::optional<ShareFailure> dlss_pre_image_failure_;
   std::optional<ShareFailure> dlss_motion_failure_;
   std::optional<ShareFailure> dlss_exposure_failure_;
   std::optional<ShareFailure> dlss_swap_failure_;
@@ -303,6 +315,8 @@ class D3D11Bridge {
   uint64_t waited12_ = 0u;    // the highest to12_ value the private queue was asked to wait for
   uint64_t waited11_ = 0u;    // the highest to11_ value a D3D11 wait was queued for
   uint64_t busy_skips_ = 0u;
+  bool ring_growth_failed_ = false;  // fix round 2 (I2): logged once
+  uint64_t dlss_shares_made_ = 0u;  // DlssSharesMade
   std::string problem_;                // the back buffer's problem, logged once per change
   std::string latch_;                  // set once: the bridge stopped for the session
   std::string label_ = "Direct3D 11";  // Plan 8: Create's label

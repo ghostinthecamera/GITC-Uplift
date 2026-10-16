@@ -45,11 +45,12 @@ void LogDrain(LogRing* ring, const std::function<void(std::string_view line)>& s
 [[nodiscard]] bool HeaderMatches(const ControlBlock& block, std::string_view build_id, std::string* why);
 
 // ui::DragState, bit i = its i-th field in declaration order.
-inline constexpr uint32_t DRAG_FIELDS = 6u;
+inline constexpr uint32_t DRAG_FIELDS = 8u;
 static_assert(sizeof(ui::DragState) == DRAG_FIELDS, "ui::DragState changed: update DragBits and DragFrom");
 [[nodiscard]] inline uint32_t DragBits(const ui::DragState& drag) {
   return (drag.local_structure ? 1u : 0u) | (drag.local_tone ? 2u : 0u) | (drag.skin_structure ? 4u : 0u)
-         | (drag.resolution_scale ? 8u : 0u) | (drag.pass_slider ? 16u : 0u) | (drag.face_protection ? 32u : 0u);
+         | (drag.resolution_scale ? 8u : 0u) | (drag.pass_slider ? 16u : 0u) | (drag.face_protection ? 32u : 0u)
+         | (drag.resolution_scale_after_dlss ? 64u : 0u) | (drag.resolution_scale_present ? 128u : 0u);
 }
 [[nodiscard]] inline ui::DragState DragFrom(uint32_t bits) {
   return {
@@ -59,6 +60,8 @@ static_assert(sizeof(ui::DragState) == DRAG_FIELDS, "ui::DragState changed: upda
       .resolution_scale = (bits & 8u) != 0u,
       .pass_slider = (bits & 16u) != 0u,
       .face_protection = (bits & 32u) != 0u,
+      .resolution_scale_after_dlss = (bits & 64u) != 0u,
+      .resolution_scale_present = (bits & 128u) != 0u,
   };
 }
 

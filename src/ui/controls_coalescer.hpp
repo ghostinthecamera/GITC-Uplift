@@ -17,6 +17,8 @@ struct DragState {
   bool resolution_scale = false;
   bool pass_slider = false;  // any pass's history-resetting slider
   bool face_protection = false;  // Keep faces (2026-10-08)
+  bool resolution_scale_after_dlss = false;  // split chain (Task 3): a later stage group's Custom scale, held as Setup's
+  bool resolution_scale_present = false;
 };
 
 // Spec §12 slider policy. Controls that reset NR history apply live, but a dragged slider

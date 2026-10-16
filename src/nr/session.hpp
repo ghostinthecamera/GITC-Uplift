@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -16,6 +17,17 @@
 #include "nr/timeline.hpp"
 
 namespace uplift::nr {
+
+inline constexpr uint32_t MAX_PASSES = 10u;
+
+// Split chain (2026-10-10, design 3.2): the passes [first, first + count), 0-based and global, that one stage of the frame runs. `stage` (below
+// SESSION_STAGES; addon::Stage's order: Before upscaling, After DLSS, Present) keys that stage's own sizes, resets and Keep faces twin. The default is every
+// pass at one stage: the single chain of before the split.
+struct StageSlice {
+  uint8_t stage = 0u;
+  uint32_t first = 0u;
+  uint32_t count = MAX_PASSES;
+};
 
 struct SessionConfig {
   std::chrono::milliseconds grace{5000};
@@ -49,6 +61,7 @@ class PassResolver {
 
 // Keep faces (2026-10-08): pass 1's twin, a second NR feature evaluated on pass 1's input with its own temporal history. `wanted` false: Keep faces is
 // off, and no twin feature lives (one that did is released). Fix round 1: while Session::FacesPaused() the caller frees its surfaces and passes no `output`.
+// Split chain (decision Q5a): one twin per stage, run on the first pass of the slice it comes with; `wanted` says whether that stage is protected.
 struct FaceTwin {
   bool wanted = false;
   // RGBA16F at the canvas, NON_PIXEL_SHADER_RESOURCE on entry and on return. Null while `wanted`: no twin this frame (paused, or its surfaces could not be
@@ -112,12 +125,22 @@ class Session {
   // LOADING when the size changes (spec §6.3, §13). Evaluate calls this itself, first; a caller
   // that only reaches Evaluate while ACTIVE (spec §8.1's DeviceContext) should call this every
   // frame regardless of state, or the FAILED-retry and resume_size_ updates never happen.
+  // Split chain (design 3.2): each stage keeps its own size; this form is pass 1's stage.
   void NoteFrameSize(Size size);
+  void NoteFrameSize(uint8_t stage, Size size);
+  // Split chain (design 3.2): the frame's stage groups, in chain order (groups[0] holds pass 1), once per frame before any Evaluate. A pass whose stage
+  // changed restarts its history when it next runs; no pass's feature is retired here (a feature that no longer fits its stage rebuilds them all in
+  // Evaluate). Pass 1's group moving to a stage the chain did not use (a placement switch) takes its stage's state along; a stage that leaves the chain
+  // retires its Keep faces twin. The budget reads it: a pass drop removes the last group's passes first, a restored pass and a resume cost each pass at its
+  // stage's size, and a fit reserves the earlier groups' missing passes. Without a call, every pass is at stage 0.
+  void SetChain(std::span<const StageSlice> groups);
+  // Whether any pass of `slice` runs: false when the budget cut its group to 0 (or the Defaults view shows fewer passes), so its stage is skipped.
+  [[nodiscard]] bool SliceRuns(const StageSlice& slice) const;
   // Once per presented frame, after Timeline::BeginFrame. Never blocks.
   void Tick();
-  // Records NR passes on `list`. Never blocks.
+  // Records `slice`'s NR passes on `list`, on `chain` (that stage's canvas and surfaces). Never blocks. The default slice is every pass.
   EvaluateResult Evaluate(ID3D12GraphicsCommandList* list, const PassChain& chain,
-                          const FrameInputs& inputs, const Controls& controls);
+                          const FrameInputs& inputs, const Controls& controls, StageSlice slice = {});
   // Device destruction: bounded synchronous teardown.
   void OnDeviceDestroyed();
   // Device removal: drops every feature and retired entry without releasing
@@ -130,10 +153,14 @@ class Session {
 
   [[nodiscard]] SessionState State() const { return state_; }
   // Keep faces fix round 1 (I3): the twin is paused (the budget yielded it, a fit had no room for it, or it failed): its caller frees the twin's surfaces.
-  [[nodiscard]] bool FacesPaused() const { return faces_pause_ != FacesPause::NONE; }
+  // Split chain: per stage; this form is pass 1's stage.
+  [[nodiscard]] bool FacesPaused() const;
+  [[nodiscard]] bool FacesPaused(uint8_t stage) const;
   // Keep faces fix round 2 (4): whether Keep faces is on, every frame, before any Evaluate (which a skipped frame never reaches). Off ends a pause and the
-  // failure latch at once, so a quick off and on while NR skips frames starts the twin afresh.
+  // failure latch at once, so a quick off and on while NR skips frames starts the twin afresh. Split chain: this form is Keep faces itself, for every
+  // stage; the two-argument form is one stage's own protection (decision Q5a).
   void NoteFacesWanted(bool wanted);
+  void NoteFacesWanted(uint8_t stage, bool wanted);
   [[nodiscard]] SessionStatus Status() const;
 
  private:
@@ -149,6 +176,21 @@ class Session {
     UNFIT,            // a fit had no room for the twin beside the passes
     FAILED_CREATE,    // its creation failed
     FAILED_EVALUATE,  // its evaluate failed
+  };
+  // Split chain (design 3.2): one stage's own state. With every pass at one stage only that stage's is used, exactly as the single chain's was.
+  struct StageState {
+    Size last_size;
+    Size resume_size;             // latest non-empty frame size noted for this stage, in any state
+    uint64_t surface_bytes = 0u;  // the latest chain's surfaces, for TryResume
+    std::optional<std::chrono::steady_clock::time_point> small_since;
+    uint32_t evaluated_end = 0u;  // the end (global) of the passes the last successful Evaluate here ran: a pass at or past it restarts its history
+    bool reset_pending = true;
+    // Keep faces (2026-10-08): the stage's twin, live only while Keep faces asks for it here. Under the budget it yields before any pass drops.
+    std::unique_ptr<FeatureInterface> face_feature;
+    FacesPause faces_pause = FacesPause::NONE;
+    bool faces_requested = false;       // the latest Evaluate wanted the twin (Status's faces_note)
+    uint64_t faces_surface_bytes = 0u;  // the latest FaceTwin::surface_bytes
+    bool faces_evaluated = false;       // the latest successful Evaluate ran the twin
   };
 
   // Shared by SetEnabled's OFF->LOADING path, the FinishTeardown retry and
@@ -166,13 +208,20 @@ class Session {
   void Drop(std::string_view message);
   void SampleBudget(std::chrono::steady_clock::time_point now);
   void TryResume(std::chrono::steady_clock::time_point now);
-  // `faces_wanted`: Keep faces asks for pass 1's twin this frame; `faces_ready`: its surfaces exist this frame.
-  bool EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& chain, bool faces_wanted, bool faces_ready, std::string_view* reason);
+  // `faces_wanted`: Keep faces asks for the slice's twin this frame; `faces_ready`: its surfaces exist this frame.
+  bool EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& chain, const StageSlice& slice, bool faces_wanted, bool faces_ready,
+                      std::string_view* reason);
   void RetireFeature(size_t index);
-  void RetireFaceFeature();
+  void RetireFaceFeature(StageState* stage);
   void RetireAllFeatures();
   void ReleaseDueRetired();
-  [[nodiscard]] uint64_t LiveFeatureBytes() const;
+  // The live features of `slice`'s passes, and its stage's twin.
+  [[nodiscard]] uint64_t LiveFeatureBytes(const StageSlice& slice) const;
+  [[nodiscard]] uint32_t LiveFeatureCount() const;
+  // Every stage restarts its history: a load, a re-enable, a rebuild.
+  void ResetAllStages();
+  // Pass 1's stage: the first group's.
+  [[nodiscard]] uint8_t FirstStage() const { return groups_[0].stage; }
 
   Host& host_;
   Timeline& timeline_;
@@ -185,7 +234,6 @@ class Session {
   bool teardown_pending_ = false;
   bool draining_from_failure_ = false;  // this DRAINING must not shortcut back to ACTIVE
   bool device_lost_ = false;  // OnDeviceLost (or Plan 15's Abandon) ran: permanently inert, never loads again
-  bool reset_pending_ = true;
   bool first_use_paid_ = false;  // the one-time per-device NR cost has been paid
   bool create_failed_ = false;  // Plan 19: SessionStatus::create_failed
   uint32_t create_result_ = 0u;  // Plan 19 T6: SessionStatus::create_result
@@ -197,27 +245,22 @@ class Session {
   uint32_t retry_attempts_ = 0u;  // automatic retries since the last recovery, settings change or Retry now
   bool retry_requested_ = false;  // RetryNow: reload at the next Tick that may
   uint32_t pass_view_limit_ = 0u;
-  size_t passes_evaluated_ = 0u;  // how many passes the last successful Evaluate ran
   std::optional<std::chrono::steady_clock::time_point> failed_at_;
   std::optional<std::chrono::steady_clock::time_point> active_since_;
   Mark last_use_mark_;
   Mark teardown_mark_;
-  Size last_size_;
-  Size resume_size_;  // latest non-empty frame size passed to Evaluate in any state
-  uint64_t resume_surface_bytes_ = 0u;  // the latest chain's surfaces, for TryResume
   // Grace-regression round: summed at the clock's own resolution. Whole milliseconds per tick lost every sub-millisecond frame, so a game running faster
   // than 1000 fps (a native Vulkan game with NR off) never left GRACE.
   std::chrono::steady_clock::duration grace_elapsed_{0};
   std::optional<std::chrono::steady_clock::time_point> last_tick_;
   std::optional<std::chrono::steady_clock::time_point> last_sample_;
-  std::optional<std::chrono::steady_clock::time_point> small_since_;
-  std::vector<std::unique_ptr<FeatureInterface>> features_;
-  // Keep faces (2026-10-08): pass 1's twin, live only while Keep faces asks for it. Under the budget it yields before any pass drops.
-  std::unique_ptr<FeatureInterface> face_feature_;
-  FacesPause faces_pause_ = FacesPause::NONE;
-  bool faces_requested_ = false;       // the latest Evaluate wanted the twin (Status's faces_note)
-  uint64_t faces_surface_bytes_ = 0u;  // the latest FaceTwin::surface_bytes
-  bool faces_evaluated_ = false;       // the latest successful Evaluate ran the twin
+  // Split chain (design 3.2): indexed by pass, global; a pass whose stage has not run yet leaves a hole. Each live feature's capacity is its stage's size.
+  std::array<std::unique_ptr<FeatureInterface>, MAX_PASSES> features_;
+  std::array<StageState, SESSION_STAGES> stages_;
+  std::array<StageSlice, SESSION_STAGES> groups_ = {StageSlice{}};  // SetChain's, in chain order
+  uint32_t group_count_ = 1u;
+  std::array<uint8_t, MAX_PASSES> pass_stages_ = {};       // each pass's stage in the latest SetChain
+  std::array<bool, MAX_PASSES> stage_reset_owed_ = {};     // the pass's stage changed since it last ran
   std::vector<Retired> retired_;
   std::optional<uint64_t> runtime_bytes_;
   std::string message_;

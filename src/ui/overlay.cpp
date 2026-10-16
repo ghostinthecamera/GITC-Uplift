@@ -96,13 +96,24 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                               && settings->look.stabilize == look::StabilizeMode::OFF);
   // Plan 17: the Adaptation rows only where the meter can be used; 2026-10-09: Auto's own rows only under Auto.
   const bool exposure_hidden = ExposureRowHidden(descriptor, *settings);
+  // Split chain (Task 3): a later stage group's Custom scale as Setup's, and Upsampling also while a later group works below Full.
   const bool resolution_scale_hidden =
-      (descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM);
-  const bool upsampling_hidden = (descriptor.key == "Upsampling" && settings->resolution_mode == ResolutionMode::FULL);
+      ((descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM)
+       || (descriptor.key == "ResolutionScaleAfterDlss" && settings->resolution_mode_after_dlss != ResolutionMode::CUSTOM)
+       || (descriptor.key == "ResolutionScalePresent" && settings->resolution_mode_present != ResolutionMode::CUSTOM));
+  const auto later_group_scaled = [settings](const PassStageRow& row) {
+    return row.starts_group && ((row.runs == SourcePick::AFTER_DLSS && settings->resolution_mode_after_dlss != ResolutionMode::FULL)
+                                || (row.runs == SourcePick::PRESENT && settings->resolution_mode_present != ResolutionMode::FULL));
+  };
+  const bool upsampling_hidden = (descriptor.key == "Upsampling" && settings->resolution_mode == ResolutionMode::FULL
+                                  && std::ranges::none_of(view.setup.pass_stages, later_group_scaled));
   // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
   const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
                                  || descriptor.key == "FaceLightingDensity" || descriptor.key == "FaceSpeckSize";
-  const bool keep_faces_off = ((descriptor.key == "FaceProtection" || descriptor.key == "LightingScale" || keep_faces_tuning) && !settings->keep_faces);
+  // Split chain (Task 3, decision Q5a): a later stage's Keep faces here too.
+  const bool keep_faces_here = (descriptor.key == "KeepFacesAfterDlss" || descriptor.key == "KeepFacesPresent");
+  const bool keep_faces_off =
+      ((descriptor.key == "FaceProtection" || descriptor.key == "LightingScale" || keep_faces_tuning || keep_faces_here) && !settings->keep_faces);
   // Round 5: the fill's radius and tolerance only while it is on.
   const bool fill_off = ((descriptor.key == "FaceFillRadius" || descriptor.key == "FaceFillTolerance") && !settings->face_tuning.fill_skin);
   // ui-review.md §3 rule 1: these rows matter only after a choice in the row just above them, so they
@@ -118,7 +129,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   // Plan 19: the VulkanNr row likewise, everywhere but a 64-bit Vulkan game.
   // Keep faces (2026-10-08): its rows where it cannot run, and the face mask's view (in Advanced, far from the switch) while it is off.
   const bool keep_faces_row = (descriptor.key == "KeepFaces" || descriptor.key == "FaceProtection" || descriptor.key == "LightingScale"
-                               || descriptor.key == "ShowFaceMask" || keep_faces_tuning);
+                               || descriptor.key == "ShowFaceMask" || keep_faces_tuning || keep_faces_here);
   const std::string_view disabled_reason =
       (descriptor.key == "StateRestore" && !view.dlss_unavailable.empty())     ? std::string_view(view.dlss_unavailable)
       : (descriptor.key == "UseD3D9Ex" && !view.d3d9ex_unavailable.empty())    ? std::string_view(view.d3d9ex_unavailable)
@@ -208,8 +219,10 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         const float shown_scale = (descriptor.key == "AutoExposureBlend" ? 100.f : 1.f);
         float value = static_cast<float>(descriptor.get(*settings)) * shown_scale;
         const float high = static_cast<float>(descriptor.ui_max > 0.0 ? descriptor.ui_max : descriptor.max) * shown_scale;
+        const bool resolution_scale = (descriptor.key == "ResolutionScale" || descriptor.key == "ResolutionScaleAfterDlss"
+                                       || descriptor.key == "ResolutionScalePresent");
         const char* const format = (descriptor.key == "GraceSeconds" ? "%.1f"
-                                    : descriptor.key == "ResolutionScale"   ? "%.0f %%"
+                                    : resolution_scale                      ? "%.0f %%"
                                     : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
                                     : descriptor.key == "StabilizeMs"       ? "%.0f ms"
                                                                             : "%.2f");
@@ -224,6 +237,10 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           state->drag.local_tone = active;
         } else if (descriptor.key == "ResolutionScale") {
           state->drag.resolution_scale = active;
+        } else if (descriptor.key == "ResolutionScaleAfterDlss") {
+          state->drag.resolution_scale_after_dlss = active;  // split chain (Task 3): the work size waits for the release, as Setup's
+        } else if (descriptor.key == "ResolutionScalePresent") {
+          state->drag.resolution_scale_present = active;
         } else if (descriptor.key == "FaceProtection") {
           state->drag.face_protection = active;
         }
@@ -262,25 +279,32 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
             descriptor.set(*settings, static_cast<double>(clicked));
             changed = true;
           }
-        } else if (descriptor.key == "ResolutionMode") {
+        } else if (descriptor.key == "ResolutionMode" || descriptor.key == "ResolutionAfterDlss" || descriptor.key == "ResolutionPresent") {
           // Plan 14 (the user's decision 1): the entries that cannot run now are greyed, each with its reason, and the preview is the mode that runs.
+          // Split chain (Task 3): a later stage group's Resolution greys the same entries (Match game reads the same DLSS render size); its preview is its
+          // stored mode, since Setup's highlight is pass 1's.
+          const bool setup_row = (descriptor.key == "ResolutionMode");
           std::array<const char*, 6> labels = {};
           for (size_t index = 0u; index < labels.size(); ++index) {
             labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
           }
-          const size_t shown = static_cast<size_t>(view.setup.resolution);
-          const size_t stored_index = std::min(static_cast<size_t>(settings->resolution_mode), labels.size() - 1u);
+          const size_t stored_index = std::min(static_cast<size_t>(value), labels.size() - 1u);
+          const size_t shown = (setup_row ? static_cast<size_t>(view.setup.resolution) : stored_index);
           const OptionState& stored = view.setup.resolution_options[stored_index];
-          if (view.setup.resolution != settings->resolution_mode && (stored.why.empty() || stored.temporary)) {  // a fixed cause never clears: no promise
+          if (shown != stored_index && (stored.why.empty() || stored.temporary)) {  // a fixed cause never clears: no promise
             saved_note = SavedNote(labels[stored_index]);
           }
           if (ImGui::BeginCombo(label.c_str(), labels[shown])) {
             for (size_t index = 0u; index < labels.size(); ++index) {
               const OptionState& option = view.setup.resolution_options[index];
-              ImGui::BeginDisabled(!option.why.empty());
+              // Fix round 1 (M5): Setup's row greys every entry that cannot run, its highlight included (as before the split chain); a later stage's row
+              // keeps its stored mode selectable, since its preview is that mode and not what runs.
+              ImGui::BeginDisabled(!option.why.empty() && (setup_row || index != shown));
               if (ImGui::Selectable(labels[index], shown == index)) {
                 descriptor.set(*settings, static_cast<double>(index));
-                state->setup_settle.Clicked(SetupRow::RESOLUTION, static_cast<uint32_t>(index));
+                if (setup_row) {
+                  state->setup_settle.Clicked(SetupRow::RESOLUTION, static_cast<uint32_t>(index));
+                }
                 changed = true;
               }
               ImGui::EndDisabled();
@@ -373,8 +397,7 @@ bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* st
   ImGui::PushID("Source");
   static constexpr std::array<const char*, 3> OPTIONS = {"Before upscaling", "After DLSS", "Present"};
   const std::array<std::string_view, 3> direct3d_tips = {
-      "NR works on the game's render-size image, and the game's DLSS upscales the result. Cheaper. "
-      "Experimental. With Ray Reconstruction NR stays after DLSS.",
+      "NR works on the game's render-size image, and the game's DLSS upscales the result. Cheaper. Experimental.",
       "NR works on DLSS's output inside the game's frame, before the HUD, post-processing and frame "
       "generation. Runs on Present until the game runs DLSS.",
       "NR works on the finished frame, HUD included. Works in every game. Uplift.fx's Uplift technique "
@@ -382,13 +405,19 @@ bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* st
   };
   // Plan 13 (the user's decision 1): on Vulkan the DLSS placements are explicit choices, and their tips name what stays after the first use.
   const std::array<std::string_view, 3> vulkan_tips = {
-      "NR works on the game's render-size image, natively on the game's Vulkan device, and the game's DLSS upscales the result. Experimental. With Ray "
-      "Reconstruction NR stays after DLSS. About 0.6 GB of VRAM stays with the game's device after the first use, until the game exits.",
+      "NR works on the game's render-size image, natively on the game's Vulkan device, and the game's DLSS upscales the result. Experimental. About "
+      "0.6 GB of VRAM stays with the game's device after the first use, until the game exits.",
       "NR works on DLSS's output inside the game's frame, natively on the game's Vulkan device, before the HUD and post-processing. Runs on "
       "Present until the game runs DLSS. About 0.6 GB of VRAM stays with the game's device after the first use, until the game exits.",
       "NR works on the finished frame, HUD included. The default on Vulkan. Uplift.fx's Uplift technique sets where among your effects.",
   };
   std::array<std::string_view, 3> tips = (view.dlss_explicit ? vulkan_tips : direct3d_tips);
+  // Split-chain design 11 (the owner, 2026-10-15): with Ray Reconstruction, Before upscaling works on RR's input.
+  std::string before_tip;
+  if (view.setup.before_upscaling_on_rr) {
+    before_tip = std::format("{}\nThe game's DLSS is Ray Reconstruction: NR works on its input, before it denoises and upscales it.", tips[0]);
+    tips[0] = before_tip;
+  }
   std::array<std::string_view, 3> why = {};
   for (size_t index = 0u; index < why.size(); ++index) {
     why[index] = view.setup.stage_options[index].why;
@@ -430,6 +459,58 @@ bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* st
       changed = true;
     }
   }
+  ImGui::PopID();
+  return changed;
+}
+
+// Split chain (Task 3, design 6.2): pass n's Runs at row, as the NR stage row but a combo (four long choices): a choice that cannot run is greyed with why,
+// the preview is where the pass runs, and the stored pick is named while it runs elsewhere. Where every pass runs at one stage the whole row is greyed.
+// Not folded into DrawRow: its choices' states come from Setup's pass rows, not from the schema.
+bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings) {
+  const size_t later = descriptor.pass - 2u;
+  const PassStageRow& row = view.setup.pass_stages[later];
+  const std::string label(descriptor.label);
+  ImGui::PushID(label.c_str());
+  ImGui::BeginDisabled(!view.setup.split_capable || view.setup.stopped);  // fix round 1 (M5): greyed with Setup's other rows once NR stopped (Plan 15)
+  const auto stored = static_cast<size_t>(settings->passes[later].stage);
+  const auto shown = static_cast<size_t>(row.shown);
+  bool changed = false;
+  if (ImGui::BeginCombo(label.c_str(), descriptor.choices[shown].data())) {  // literals and static strings: NUL-terminated
+    for (size_t index = 0u; index < row.options.size(); ++index) {
+      const PassStageOption& option = row.options[index];
+      ImGui::BeginDisabled(!option.why.empty());
+      if (ImGui::Selectable(descriptor.choices[index].data(), shown == index) && index != stored) {
+        descriptor.set(*settings, static_cast<double>(index));
+        changed = true;
+      }
+      ImGui::EndDisabled();
+      if (!option.why.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Unavailable here: %s", option.why.c_str());
+      }
+    }
+    ImGui::EndCombo();
+  }
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    std::string tooltip(descriptor.tooltip);
+    if (!view.setup.split_capable) {
+      tooltip = std::format("Greyed: {}\n{}", ONE_STAGE_REASON, descriptor.tooltip);
+    } else if (shown != stored && (row.options[stored].why.empty() || row.options[stored].temporary)) {  // a fixed cause never clears: no promise
+      tooltip += "\n" + SavedNote(descriptor.choices[stored]);
+    }
+    ImGui::SetTooltip("%s", tooltip.c_str());
+  }
+  if (!IsDefault(*settings, descriptor)) {
+    ImGui::SameLine();
+    const bool reset_clicked = ImGui::SmallButton("<");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::SetTooltip("Reset to default (%s)", descriptor.choices[0].data());
+    }
+    if (reset_clicked) {
+      ResetSetting(settings, descriptor);
+      changed = true;
+    }
+  }
+  ImGui::EndDisabled();
   ImGui::PopID();
   return changed;
 }
@@ -734,13 +815,37 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   changed |= draw_rows(SettingSection::LOOK);
   // Plan 5: pass 2..pass_count, each its own collapsible tree (P4-P13), so the per-pass rows do not
   // flood the panel for the common one-pass case. ui-review.md §5: the tree's own label shows its state.
+  // Split chain (Task 3, design 6.2): Runs at first; on the first pass of a later stage group, that stage's Resolution (and Custom scale) and, while Keep
+  // faces is on, its Keep faces here; while the chain is split the tree's label names where the pass runs.
   for (uint32_t pass = 2u; pass <= settings->pass_count; ++pass) {
     const bool follows = settings->passes[pass - 2u].follow_pass1;
+    const PassStageRow& stage_row = view.setup.pass_stages[pass - 2u];
+    std::string_view runs_at;
+    if (view.setup.chain_split) {
+      switch (stage_row.runs) {
+        case SourcePick::BEFORE_UPSCALING: runs_at = " - Before upscaling"; break;
+        case SourcePick::AFTER_DLSS:       runs_at = " - After DLSS"; break;
+        case SourcePick::PRESENT:          runs_at = " - At Present"; break;
+      }
+    }
     const std::string tree_label =
-        std::format("Pass {}{}###pass{}", pass, (follows ? " (same as pass 1)" : ""), pass);
+        std::format("Pass {}{}{}###pass{}", pass, (follows ? " (same as pass 1)" : ""), runs_at, pass);
     if (ImGui::TreeNode(tree_label.c_str())) {
+      const auto is_stage_row = [](const SettingDescriptor& descriptor) { return (descriptor.flags & setting_flags::PASS_STAGE) != 0u; };
       for (const SettingDescriptor& descriptor : SettingsSchema()) {
-        if (descriptor.pass == pass) {
+        if (descriptor.pass == pass && is_stage_row(descriptor)) {
+          changed |= DrawPassStageRow(descriptor, view, settings);
+        }
+      }
+      if (stage_row.starts_group && stage_row.runs != SourcePick::BEFORE_UPSCALING) {  // Before upscaling is always pass 1's stage
+        const bool after_dlss = (stage_row.runs == SourcePick::AFTER_DLSS);
+        for (const std::string_view key : {(after_dlss ? "ResolutionAfterDlss" : "ResolutionPresent"), (after_dlss ? "ResolutionScaleAfterDlss" : "ResolutionScalePresent"),
+                                           (after_dlss ? "KeepFacesAfterDlss" : "KeepFacesPresent")}) {
+          changed |= DrawRow(*FindSetting(key), view, settings, state);
+        }
+      }
+      for (const SettingDescriptor& descriptor : SettingsSchema()) {
+        if (descriptor.pass == pass && !is_stage_row(descriptor)) {
           changed |= DrawRow(descriptor, view, settings, state);
         }
       }
@@ -801,7 +906,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   if (ImGui::CollapsingHeader("Details")) {
     ImGui::TextUnformatted(view.status_line.c_str());
     // Plan 14: the engine's own lines, which the rows no longer show under themselves.
-    for (const std::string* line : {&view.placement_line, &view.motion_line, &view.work_line, &view.exposure_line}) {
+    for (const std::string* line : {&view.placement_line, &view.chain_line, &view.motion_line, &view.work_line, &view.exposure_line}) {
       if (!line->empty()) {
         ImGui::TextUnformatted(line->c_str());
       }

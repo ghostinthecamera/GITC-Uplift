@@ -29,6 +29,17 @@ PlacementChoice ChoosePlacement(ui::PlacementSource source, std::string_view dls
   return {.placement = ((dlss_available && dlss_seen && !dlss_off && stage) ? *stage : Placement::PRESENT)};
 }
 
+bool PreSrFeatureAllowed(NVSDK_NGX_Feature feature, ngx_hooks::NgxApi api) {
+  switch (feature) {
+    case NVSDK_NGX_Feature_SuperSampling:
+      return true;
+    case NVSDK_NGX_Feature_RayReconstruction:
+      return (api == ngx_hooks::NgxApi::D3D12 || api == ngx_hooks::NgxApi::VULKAN);
+    default:
+      return false;
+  }
+}
+
 std::string DlssOnAgainLine(const PlacementChoice& resumed) {
   constexpr std::string_view LEAD = "DLSS is on again on this device: ";
   switch (resumed.placement) {
@@ -55,8 +66,9 @@ bool PresentMotionWanted(const PresentMotionGates& gates) {
     // gates are read before the present's BeginFrame loads it); otherwise that load would start without them and reload for them.
     nr_on = true;
   }
-  return gates.enabled && nr_on && (gates.bridge_gpu_ordered || gates.native_present) && gates.same_queue && !gates.native_wants_nr && gates.native_can_copy
-         && !gates.problem && gates.dlss_motion && gates.upscaler_created;
+  // Split chain (Task 5): a native DLSS stage binds DLSS's vectors directly, unless its chain also has a later group at Present, which takes these copies.
+  return gates.enabled && nr_on && (gates.bridge_gpu_ordered || gates.native_present) && gates.same_queue && (!gates.native_wants_nr || gates.native_present_group)
+         && gates.native_can_copy && !gates.problem && gates.dlss_motion && gates.upscaler_created;
 }
 
 VkStageDecision DecideVkStages(const VkStageFacts& facts) {

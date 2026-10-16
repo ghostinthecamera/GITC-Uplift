@@ -117,7 +117,9 @@ Timeline::Timeline(Timeline&& other) noexcept
       switch_barrier_(other.switch_barrier_),
       reexecutions_(std::move(other.reexecutions_)),
       stuck_warned_(other.stuck_warned_.load()),
-      token_probe_(std::move(other.token_probe_)) {}
+      token_probe_(std::move(other.token_probe_)),
+      stage_queues_(std::move(other.stage_queues_)),
+      stage_lists_(std::move(other.stage_lists_)) {}
 
 Timeline::~Timeline() {
   if (event_ != nullptr) {
@@ -333,6 +335,7 @@ void Timeline::Submit(std::span<const uint64_t> tokens, ID3D12CommandQueue* queu
   for (const uint64_t id : tokens) {
     const auto found = tokens_.find(id);
     if (found == tokens_.end() || found->second.state != Token::State::RECORDED) continue;
+    const bool stage = found->second.stage;
     found->second = {
         .state = Token::State::SUBMITTED,
         .queue = queue,
@@ -340,8 +343,19 @@ void Timeline::Submit(std::span<const uint64_t> tokens, ID3D12CommandQueue* queu
         .issue_time = found->second.issue_time,  // preserve: this replaces the whole Token
         .submit_frame = CurrentFrame(),
         .submit_time = now,
+        .stage = stage,
     };
     unstamped_.fetch_add(1u);
+    if (stage && std::ranges::find(stage_queues_, queue) == stage_queues_.end()) {
+      stage_queues_.push_back(queue);
+    }
+    if (stage && std::ranges::find(stage_lists_, tokens.front()) == stage_lists_.end()) {
+      // Split chain (fix round 2, m1): this list carries DLSS-stage NR, so an execution of it again without a reset (Resubmit) is DLSS-stage NR too.
+      stage_lists_.push_back(tokens.front());
+      if (stage_lists_.size() > STAGE_LISTS) {
+        stage_lists_.erase(stage_lists_.begin());
+      }
+    }
   }
 }
 
@@ -357,6 +371,13 @@ uint64_t Timeline::Resubmit(uint64_t first_token, ID3D12CommandQueue* queue, uin
     unstamped_.fetch_add(1u);
   }
   reexecutions_.push_back({.first_token = first_token, .fresh_token = fresh});
+  // Split chain (fix round 2, m1): a list carrying DLSS-stage NR, executed again: its fresh token is DLSS-stage NR on `queue` (the latch and StageWorkDone).
+  if (std::ranges::find(stage_lists_, first_token) != stage_lists_.end()) {
+    tokens_.at(fresh).stage = true;
+    if (std::ranges::find(stage_queues_, queue) == stage_queues_.end()) {
+      stage_queues_.push_back(queue);
+    }
+  }
   return fresh;
 }
 
@@ -420,6 +441,46 @@ void Timeline::ForgetQueue(ID3D12CommandQueue* queue) {
 size_t Timeline::OutstandingTokens() const {
   const std::shared_lock lock(tokens_mutex_);
   return tokens_.size();
+}
+
+void Timeline::MarkStageToken(uint64_t token) {
+  const std::unique_lock lock(tokens_mutex_);
+  if (const auto found = tokens_.find(token); found != tokens_.end()) {
+    found->second.stage = true;
+    // Split chain (fix round 2, I1): a recording marked after its list was submitted (the frame the chain splits) names its queue at once.
+    if (found->second.state != Token::State::RECORDED && std::ranges::find(stage_queues_, found->second.queue) == stage_queues_.end()) {
+      stage_queues_.push_back(found->second.queue);
+    }
+  }
+}
+
+ID3D12CommandQueue* Timeline::StageQueueOtherThan(ID3D12CommandQueue* queue) const {
+  const std::shared_lock lock(tokens_mutex_);
+  const auto other = std::ranges::find_if(stage_queues_, [queue](ID3D12CommandQueue* seen) { return seen != queue; });
+  return (other == stage_queues_.end() ? nullptr : *other);
+}
+
+bool Timeline::StageWorkDone(uint64_t through, ID3D12CommandQueue* queue) const {
+  const std::shared_lock lock(tokens_mutex_);
+  for (const auto& [id, token] : tokens_) {
+    if (id > through) break;
+    if (!token.stage) continue;
+    // A list not submitted yet is not on the GPU. Until some DLSS-stage list has been seen submitted, though, where it will go is unknown: wait for it.
+    if (token.state == Token::State::RECORDED && stage_queues_.empty()) return false;
+    if (token.state == Token::State::RECORDED || token.queue == queue) continue;
+    // Submitted to another queue: done only once its stamp has passed there (a token pruned by Poll is complete too).
+    if (token.state != Token::State::STAMPED || fences_ == nullptr || fences_->Completed(token.queue) < token.fence_value) return false;
+  }
+  return true;
+}
+
+bool Timeline::TokenComplete(uint64_t token) const {
+  const std::shared_lock lock(tokens_mutex_);
+  const auto found = tokens_.find(token);
+  if (found == tokens_.end()) return true;
+  if (token_probe_ && token_probe_(token)) return true;
+  const Token& entry = found->second;
+  return entry.state == Token::State::STAMPED && fences_ != nullptr && fences_->Completed(entry.queue) >= entry.fence_value;
 }
 
 uint64_t Timeline::LastToken() const {

@@ -29,6 +29,8 @@ constexpr std::array<std::string_view, 3> VULKAN_NR_MODES = {"Native", "Direct3D
 constexpr std::array<std::string_view, 6> RESOLUTION_MODES = {"Full", "Quality (67 %)", "Balanced (58 %)",
                                                               "Performance (50 %)", "Match game", "Custom"};
 constexpr std::array<std::string_view, 2> UPSAMPLING_MODES = {"Classic", "Edge-aware"};
+// Split chain (2026-10-10): a pass's Runs at after its first choice, "Same as pass n-1" (PassStageChoices), in stored-index order.
+constexpr std::array<std::string_view, 3> PASS_STAGES = {"Before upscaling", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 2> MASK_MODES = {"Auto (UPLIFT_MASK)", "Off"};
 constexpr std::array<std::string_view, 3> UI_CORRECTION_MODES = {"Auto", "Off", "On"};
 constexpr std::array<std::string_view, 3> STABILIZE_MODES = {"Off", "Static", "Motion"};
@@ -44,6 +46,7 @@ using setting_flags::BOOKKEEPING;
 using setting_flags::GREYED;
 using setting_flags::NEXT_DLSS_CREATE;
 using setting_flags::NEXT_START;
+using setting_flags::PASS_STAGE;
 using setting_flags::PASS_SWITCH;
 using setting_flags::RESTARTS_HISTORY;
 
@@ -174,7 +177,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::LOOK,
         .label = "Keep faces",
         .tooltip = "Keeps NR's lighting and shading on characters, but stops NR reshaping their faces. NR runs one more time per frame for "
-                   "this (a little more GPU time and video memory), whatever the pass count.",
+                   "this (a little more GPU time and video memory), whatever the pass count. With passes at several stages it protects pass 1's "
+                   "stage; a later stage has its own Keep faces here.",
         .get = [](const Settings& s) { return Flag(s.keep_faces); },
         .set = [](Settings& s, double v) { s.keep_faces = (v != 0.0); },
     },
@@ -232,7 +236,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::RESULT,
         .label = "Shape result",
-        .tooltip = "Reshapes NR's result live, without restarting its history. Off leaves NR's output exactly as it is.",
+        .tooltip = "Reshapes NR's result live, without restarting its history. Off leaves NR's output exactly as it is. With passes at "
+                   "several stages it shapes only what the last stage changes; earlier stages' changes pass through as they are.",
         .get = [](const Settings& s) { return Flag(s.look.enabled); },
         .set = [](Settings& s, double v) { s.look.enabled = (v != 0.0); },
     },
@@ -450,8 +455,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::PLACEMENT,
         .label = "Before upscaling (pre-SR)",
-        .tooltip = "NR enhances the game's render-resolution image, and the game's DLSS-SR upscales the result. Ray "
-                   "Reconstruction keeps NR after DLSS. A render below " UPLIFT_NR_FLOOR_TEXT " is padded, so NR never runs below that size.",
+        .tooltip = "NR enhances the game's render-resolution image, and the game's DLSS upscales the result. With Ray Reconstruction, NR works "
+                   "on its input, before it denoises and upscales it. A render below " UPLIFT_NR_FLOOR_TEXT " is padded, so NR never runs below that size.",
         .get = [](const Settings& s) { return Flag(s.pre_upscale); },
         .set = [](Settings& s, double v) { s.pre_upscale = (v != 0.0); },
     },
@@ -476,6 +481,72 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .choices = UPSAMPLING_MODES,
         .get = [](const Settings& s) { return Index(s.upsampling); },
         .set = [](Settings& s, double v) { s.upsampling = FromIndex<color::Upsampling>(v); },
+    },
+    {
+        // Split chain (2026-10-10, design 4): a later stage group's own size, keyed by stage so moving a boundary pass keeps each stage's size.
+        .key = "ResolutionAfterDlss",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::PLACEMENT,
+        .label = "Resolution at After DLSS",
+        .tooltip = "The size NR works at for the passes at After DLSS. Setup's Resolution sets pass 1's stage. Lower it if these passes cost "
+                   "too much. A change restarts NR.",
+        .choices = RESOLUTION_MODES,
+        .flags = RESTARTS_HISTORY,
+        .get = [](const Settings& s) { return Index(s.resolution_mode_after_dlss); },
+        .set = [](Settings& s, double v) { s.resolution_mode_after_dlss = FromIndex<ResolutionMode>(v); },
+    },
+    {
+        .key = "ResolutionScaleAfterDlss",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Custom scale at After DLSS (%)",
+        .tooltip = "The work size for Resolution at After DLSS = Custom, in percent of the output. Applies when the slider is released.",
+        .min = 25.0,
+        .max = 100.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale_after_dlss); },
+        .set = [](Settings& s, double v) { s.resolution_scale_after_dlss = static_cast<float>(v); },
+    },
+    {
+        .key = "ResolutionPresent",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::PLACEMENT,
+        .label = "Resolution at Present",
+        .tooltip = "The size NR works at for the passes at Present. Setup's Resolution sets pass 1's stage. Lower it if these passes cost "
+                   "too much. A change restarts NR.",
+        .choices = RESOLUTION_MODES,
+        .flags = RESTARTS_HISTORY,
+        .get = [](const Settings& s) { return Index(s.resolution_mode_present); },
+        .set = [](Settings& s, double v) { s.resolution_mode_present = FromIndex<ResolutionMode>(v); },
+    },
+    {
+        .key = "ResolutionScalePresent",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Custom scale at Present (%)",
+        .tooltip = "The work size for Resolution at Present = Custom, in percent of the output. Applies when the slider is released.",
+        .min = 25.0,
+        .max = 100.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale_present); },
+        .set = [](Settings& s, double v) { s.resolution_scale_present = static_cast<float>(v); },
+    },
+    {
+        // Split chain, owner's decision Q5a: a later stage group's own Keep faces, default off. Pass 1's group follows Keep faces itself.
+        .key = "KeepFacesAfterDlss",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::PLACEMENT,
+        .label = "Keep faces here",
+        .tooltip = "Also protects faces in the passes at After DLSS. Costs one more NR run per frame.",
+        .get = [](const Settings& s) { return Flag(s.keep_faces_after_dlss); },
+        .set = [](Settings& s, double v) { s.keep_faces_after_dlss = (v != 0.0); },
+    },
+    {
+        .key = "KeepFacesPresent",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::PLACEMENT,
+        .label = "Keep faces here",
+        .tooltip = "Also protects faces in the passes at Present. Costs one more NR run per frame.",
+        .get = [](const Settings& s) { return Flag(s.keep_faces_present); },
+        .set = [](Settings& s, double v) { s.keep_faces_present = (v != 0.0); },
     },
     {
         .key = "MotionVectors",
@@ -1217,6 +1288,8 @@ double PassGet(const Settings& s) {
   using Field = std::remove_cvref_t<decltype(std::declval<PassSettings&>().*Member)>;
   if constexpr (std::is_same_v<Field, bool>) {
     return Flag(s.passes[Index].*Member);
+  } else if constexpr (std::is_enum_v<Field>) {
+    return static_cast<double>(static_cast<uint32_t>(s.passes[Index].*Member));
   } else {
     return static_cast<double>(s.passes[Index].*Member);
   }
@@ -1227,21 +1300,23 @@ void PassSet(Settings& s, double v) {
   using Field = std::remove_cvref_t<decltype(std::declval<PassSettings&>().*Member)>;
   if constexpr (std::is_same_v<Field, bool>) {
     s.passes[Index].*Member = (v != 0.0);
+  } else if constexpr (std::is_enum_v<Field>) {
+    s.passes[Index].*Member = FromIndex<Field>(v);
   } else {
     s.passes[Index].*Member = static_cast<Field>(v);
   }
 }
 
-constexpr size_t PASS_ROW_COUNT = 9u;
+constexpr size_t PASS_ROW_COUNT = 10u;
 constexpr size_t LATER_PASS_COUNT = MAX_PASSES - 1u;
 
-// The 81 per-pass keys ("Pass2FollowPass1".."Pass10ColorStrength"), built once: every per-pass
+// The 90 per-pass keys ("Pass2FollowPass1".."Pass10Stage"), built once: every per-pass
 // SettingDescriptor::key points into this array, which must outlive them (function-local static).
 const std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT>& PassKeyStrings() {
   static const std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT> keys = [] {
     constexpr std::array<std::string_view, PASS_ROW_COUNT> SUFFIXES = {
         "FollowPass1", "Intensity", "Style", "LocalTone", "LocalStructure", "SkinStructure", "AutoMask",
-        "TransferStrength", "ColorStrength",
+        "TransferStrength", "ColorStrength", "Stage",
     };
     std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT> result;
     for (size_t index = 0u; index < LATER_PASS_COUNT; ++index) {
@@ -1254,7 +1329,27 @@ const std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT>& PassKeyStrings
   return keys;
 }
 
-// Pass n = Index + 2's nine rows, in the order settings.cpp's SaveSettings and the overlay's Pass tree expect.
+// Split chain (2026-10-10): pass n's Runs at choices, its first "Same as pass n-1", built once like PassKeyStrings (SettingDescriptor::choices points
+// into it).
+const std::array<std::array<std::string_view, 4>, LATER_PASS_COUNT>& PassStageChoices() {
+  static const std::array<std::string, LATER_PASS_COUNT> same_labels = [] {
+    std::array<std::string, LATER_PASS_COUNT> result;
+    for (size_t index = 0u; index < LATER_PASS_COUNT; ++index) {
+      result[index] = std::format("Same as pass {}", index + 1u);
+    }
+    return result;
+  }();
+  static const std::array<std::array<std::string_view, 4>, LATER_PASS_COUNT> choices = [] {
+    std::array<std::array<std::string_view, 4>, LATER_PASS_COUNT> result;
+    for (size_t index = 0u; index < LATER_PASS_COUNT; ++index) {
+      result[index] = {same_labels[index], PASS_STAGES[0], PASS_STAGES[1], PASS_STAGES[2]};
+    }
+    return result;
+  }();
+  return choices;
+}
+
+// Pass n = Index + 2's ten rows, in the order settings.cpp's SaveSettings and the overlay's Pass tree expect.
 template <size_t Index>
 std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
   constexpr auto PASS = static_cast<uint8_t>(Index + 2u);
@@ -1372,6 +1467,21 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .set = &PassSet<Index, &PassSettings::color_strength>,
           .pass = PASS,
       },
+      {
+          // Split chain (2026-10-10, design 6.2): written and shown whether or not the pass follows pass 1, and kept by the Defaults view.
+          .key = key(9),
+          .kind = SettingKind::CHOICE,
+          .section = SettingSection::PASSES,
+          .label = "Runs at",
+          .tooltip = "Where in the game's frame this pass runs. Before upscaling is cheapest: NR works at the game's render size, and DLSS "
+                     "upscales the result. After DLSS and Present work on the upscaled image (Present with the HUD). A pass never runs before "
+                     "the pass before it.",
+          .choices = PassStageChoices()[Index],
+          .flags = PASS_SWITCH | PASS_STAGE,
+          .get = &PassGet<Index, &PassSettings::stage>,
+          .set = &PassSet<Index, &PassSettings::stage>,
+          .pass = PASS,
+      },
   });
 }
 
@@ -1439,6 +1549,7 @@ void ResetSection(Settings* settings, SettingSection section) {
 }
 
 bool InDefaultsView(const SettingDescriptor& descriptor) {
+  if ((descriptor.flags & setting_flags::PASS_STAGE) != 0u) return false;
   switch (descriptor.section) {
     case SettingSection::LOOK:
     case SettingSection::RESULT:

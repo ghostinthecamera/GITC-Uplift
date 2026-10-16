@@ -86,6 +86,24 @@ std::string_view StreamName(VkNrStream stream) {
   return "no placement";
 }
 
+// Split chain (Task 5): a set of streams in chain order, "Before upscaling (the game's command buffers) + Present (Uplift's own command buffers)"; a set of
+// one reads as StreamName.
+std::string StreamsName(VkStreamSet streams) {
+  std::string name;
+  for (const VkNrStream stream : {VkNrStream::BEFORE_UPSCALING, VkNrStream::AFTER_DLSS, VkNrStream::OWN_BUFFERS}) {
+    if ((streams & VkStreamBit(stream)) != 0u) {
+      name += std::format("{}{}", (name.empty() ? "" : " + "), StreamName(stream));
+    }
+  }
+  return (name.empty() ? std::string(StreamName(VkNrStream::NONE)) : name);
+}
+
+// Split chain (fix round 1, I1, as Direct3D 12's): why a later group cannot run at Present while the game's DLSS-stage NR goes to another queue than the
+// effect queue's.
+constexpr std::string_view OTHER_QUEUE_REASON = "the game's DLSS runs on another queue";
+// Decision Q6: native NR at Present fell back off Native (to the private Direct3D 12 device or the helper), which hold one stage only.
+constexpr std::string_view NOT_NATIVE_PRESENT_REASON = "NR at Present does not run natively on this device now";
+
 // T6 (M-2): the format the swap-chain image's bits are copied raw into: the bridge's shared format, with an sRGB one (a swap chain ReShade did not make
 // mutable reports its own sRGB format) taken to its UNORM sibling, so the RGBA16F blit never linearises the stored values.
 DXGI_FORMAT PresentCopyFormat(DXGI_FORMAT reported) {
@@ -261,6 +279,9 @@ TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& c
   timeline.StampAged(now);                          // on Vulkan only the stuck-token warning: nothing is stamped
   completion_->DropStale(now, timeline.CurrentFrame());
   pipeline_->FreeFinished();  // final review C-1: the retired copy slots and mask copies whose marks the GPU has passed
+  // Split chain (Task 5): the Present group's queue; the DLSS-stage recordings on it, or complete, no longer hold a later Present group back.
+  effect_queue_ = present_queue;
+  stage_work_.Prune(effect_queue_, [&timeline](uint64_t token) { return timeline.TokenComplete(token); });
 
   // Plan 18 Task 12: the game switched its DLSS off after this context saw it run (it released its last DLSS feature; fix round 1, I-2: and that held for
   // DLSS_IDLE_MINIMUM and two presents): the DLSS placement falls back to Present (the bridge's, through NrClaim's hand-off) until the next main evaluate
@@ -282,9 +303,18 @@ TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& c
   if (placement_.placement != Placement::AFTER_DLSS && placement_.placement != Placement::BEFORE_UPSCALING) {
     ResetFrameStatus();  // the DLSS placements keep their last evaluate's result
   }
-  // Plan 19: the frame native NR at Present runs on, resolved before the Session hears its size. In-game round 1: Uplift's own command buffers are made
-  // again when Present comes back after a DLSS stage released them.
-  if (NativePresent() && ring_ == nullptr && queue_family_ != UINT32_MAX && !ring_failed_) {
+  // Plan 19: the frame native NR at Present runs on, resolved before the Session hears its size. Split chain (design 6.1): and before the chain, which
+  // reads whether a later group can run at Present (only while some pass is stored at another stage, so the default path reads nothing more).
+  if (config_.vk_native_present && (placement_.placement == Placement::PRESENT || SplitStored())) {
+    ResolvePresentFrame();
+  } else {
+    present_encoding_.reset();
+    SetPresentProblem({});
+  }
+  UpdateChain();
+  // Plan 19, in-game round 1: Uplift's own command buffers are made again when Present comes back after a DLSS stage released them (split chain: a later
+  // Present group's too).
+  if (PresentGroupNative() && ring_ == nullptr && queue_family_ != UINT32_MAX && !ring_failed_) {
     std::string error;
     ring_ = vk::CommandRing::Create(functions_, device_, queue_family_, &error);
     if (!ring_) {
@@ -292,11 +322,8 @@ TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& c
       nr::Logf(nr::LogLevel::ERR, "Vulkan: {}; NR at Present cannot run natively here", error);
     }
   }
-  if (NativePresent()) {
-    ResolvePresentFrame(now);
-  } else {
-    present_encoding_.reset();
-    SetPresentProblem({});
+  if (PresentGroupNative() && present_encoding_.has_value()) {
+    present_layout_ = SettleLayout(present_frame_.back_buffer.size, Stage::PRESENT, now);  // the Session hears the canvas
   }
 
   const ui::SessionOptions& options = config.session;
@@ -307,6 +334,10 @@ TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& c
   session_->SetCreateOptions(options.preset, options.performance);
   session_->SetPassCount(options.pass_count);
   session_->NoteFacesWanted(config.look.keep_faces.enabled);  // Keep faces fix round 2 (4): its off edge, even on a frame NR then skips
+  for (uint32_t group = 1u; group < chain_.group_count; ++group) {
+    const Stage stage = chain_.groups[group].stage;  // decision Q5a: a later group's own "Keep faces here"
+    session_->NoteFacesWanted(static_cast<uint8_t>(stage), config.look.keep_faces.enabled && LaterStageKeepsFaces(stage));
+  }
   session_->SetAutoRetry(options.auto_retry);
   session_->SetPassViewLimit(config.pass_view_limit);
   if (config.settings_generation != settings_generation_) {
@@ -328,22 +359,29 @@ TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& c
     present_motion_logged_ = false;
     present_motion_counters_ = {};  // fix round 1 (M2): the next window starts when the copies are asked for again
   }
-  // Batch 2 carry: the Session hears the frame size every frame, in every state (its FAILED retry and the resume size depend on it).
+  // Batch 2 carry: the Session hears the frame size every frame, in every state (its FAILED retry and the resume size depend on it). Split chain: each later
+  // group's stage hears its own canvas.
   if (const nr::Size frame_size = SessionFrameSize(); !frame_size.Empty()) {
     session_->NoteFrameSize(frame_size);
   }
+  for (uint32_t group = 1u; group < chain_.group_count; ++group) {
+    const Stage stage = chain_.groups[group].stage;
+    if (const nr::Size canvas = stages_[static_cast<size_t>(stage)].canvas; !canvas.Empty()) {
+      session_->NoteFrameSize(static_cast<uint8_t>(stage), canvas);
+    }
+  }
   UpdateSession(now);
-  if (dropped_ || !NativePresent()) return TriggerPoint::NONE;  // In-game round 1: a switch whose old GPU work did not finish drops NR
+  if (dropped_ || !PresentGroupNative()) return TriggerPoint::NONE;  // In-game round 1: a switch whose old GPU work did not finish drops NR
   // Plan 19: as DeviceContext's Present path: a recording is readied only while NR runs and the frame can take it.
   frame_ready_ = (session_->State() == nr::SessionState::ACTIVE && ring_ != nullptr && present_problem_.empty() && present_encoding_.has_value()
                   && present.back_buffer.image != VK_NULL_HANDLE);
   return trigger_.OnPresent(present.marker_expected, config.effects_on);
 }
 
-void VkDlssContext::ResolvePresentFrame(std::chrono::steady_clock::time_point now) {
+void VkDlssContext::ResolvePresentFrame() {
   const vk::ImageInfo& image = present_frame_.back_buffer;
   present_encoding_.reset();
-  if (image.image == VK_NULL_HANDLE) return;  // no frame this present: nothing to say
+  if (image.image == VK_NULL_HANDLE) return;  // no frame this present: nothing to say (the last problem stands, so a later group never flips for it)
   // The bridge's rules for what reaches NR (copy access, one sample, a format Uplift processes), without its sharing extension.
   std::string problem = vk::BackBufferProblem(image, true);
   const DXGI_FORMAT copy_format = PresentCopyFormat(image.format);
@@ -361,7 +399,6 @@ void VkDlssContext::ResolvePresentFrame(std::chrono::steady_clock::time_point no
   SetPresentProblem(std::move(problem));
   if (!present_encoding_) return;
   present_diffuse_white_nits_ = (config_.diffuse_white_nits > 0.f ? config_.diffuse_white_nits : color::DefaultDiffuseWhiteNits(*present_encoding_));
-  present_layout_ = SettleLayout(image.size, false, now);  // the Session hears the canvas
 }
 
 void VkDlssContext::SetPresentProblem(std::string problem) {
@@ -390,26 +427,36 @@ bool VkDlssContext::Blittable(VkFormat copy_format) {
   return blit_supported_;
 }
 
-std::string_view VkDlssContext::CheckMotion(const VkMotionShape& shape) {
-  switch (VkMotionCheck(session_motion_, shape, motion_mismatches_)) {
+std::string_view VkDlssContext::CheckMotion(Stage stage, const VkMotionShape& shape) {
+  StageState& state = stages_[static_cast<size_t>(stage)];
+  switch (VkMotionCheck(state.motion, shape, state.motion_mismatches)) {
     case VkMotionVerdict::RUN:
-      session_motion_ = shape;
-      motion_mismatches_ = 0u;
+      state.motion = shape;
+      state.motion_mismatches = 0u;
       return {};
     case VkMotionVerdict::SKIP:
-      ++motion_mismatches_;
+      ++state.motion_mismatches;
       return "the motion vectors changed (NR reloads if that lasts)";
     case VkMotionVerdict::RELOAD:
-      ++motion_mismatches_;
+      ++state.motion_mismatches;
       if (input_reload_reason_.empty()) {
-        input_reload_reason_ = std::format("its motion vectors changed from {} to {}", DescribeMotion(*session_motion_), DescribeMotion(shape));
+        input_reload_reason_ = std::format("its motion vectors changed from {} to {}", DescribeMotion(*state.motion), DescribeMotion(shape));
       }
       return "the motion vectors changed: NR reloads";
   }
   return {};
 }
 
-sources::PipelineResult VkDlssContext::SkipPresent(std::string_view reason) {
+sources::PipelineResult VkDlssContext::SkipPresent(std::string_view reason, uint32_t group) {
+  StageState& stage = stages_[static_cast<size_t>(Stage::PRESENT)];
+  stage.nr_applied = false;
+  stage.passes_run = 0u;
+  stage.skip_reason = reason;
+  stage.motion_source = sources::MotionSource::NONE;
+  if (group > 0u) {
+    present_reset_owed_ = true;  // split chain: the Session never saw this frame: the group's next recording restarts its history
+    return {.reason = reason};
+  }
   nr_applied_ = false;
   passes_run_ = 0u;
   skip_reason_ = reason;
@@ -422,8 +469,15 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   if (point == TriggerPoint::NONE || !frame_ready_) return {};
   frame_ready_ = false;
   if (torn_down_ || dropped_ || core_shut_down_ || ring_ == nullptr || queues.queue == VK_NULL_HANDLE || !present_encoding_) return {};
+  // Split chain (Task 5): the Present group is pass 1's (group 0, the single chain of before) or a later one, whose result only Status's groups report.
+  const uint32_t group = GroupAt(Stage::PRESENT).value_or(0u);
   // Spec §11: on the Present path NR would also run on generated frames.
-  if (config_.ngx_frame_generation > 0u && !config_.present_with_frame_gen) return SkipPresent("frame generation is on");
+  if (config_.ngx_frame_generation > 0u && !config_.present_with_frame_gen) return SkipPresent("frame generation is on", group);
+  // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before anything is recorded. No GPU waits (fix round 1, I1):
+  // DLSS-stage NR on another queue keeps Present off for later groups (UpdateChain); until that shows, a later Present group runs only once every earlier
+  // DLSS-stage recording off the effect queue has completed, else it skips this frame. On the effect queue itself the queue's order keeps them apart.
+  if (group > 0u && !session_->SliceRuns(slices_[group])) return SkipPresent(SliceSkipReason(group), group);
+  if (group > 0u && !StageWorkDone()) return SkipPresent("waiting for the earlier stages' NR", group);
   const auto log_failure = [this](std::string_view what) {
     if (!std::exchange(present_failure_logged_, true)) {
       nr::Logf(nr::LogLevel::WARN, "Vulkan: {}; NR skips such frames at Present", what);
@@ -437,20 +491,20 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
       case vk::CommandRing::Status::READY:
         present_queue_timeouts_ = 0u;
         break;
-      case vk::CommandRing::Status::BUSY: return SkipPresent("the game's present queue is still busy");  // the last timeout's fence is still pending
+      case vk::CommandRing::Status::BUSY: return SkipPresent("the game's present queue is still busy", group);  // the last timeout's fence is still pending
       case vk::CommandRing::Status::TIMEOUT:
         log_failure("the game's present queue did not finish within 2 s");
         // T6 (I-2): three in a row, as the bridge latches: no more waits here; the add-on moves NR at Present along the chain (PresentStopped).
         if (++present_queue_timeouts_ >= PRESENT_QUEUE_TIMEOUT_LIMIT && present_stopped_.empty()) {
           present_stopped_ = "the game's present queue did not finish within 2 s three times in a row";
         }
-        return SkipPresent("the game's present queue is still busy");
+        return SkipPresent("the game's present queue is still busy", group);
       case vk::CommandRing::Status::LOST:
         NoteDeviceLost(now);
         return {};
       case vk::CommandRing::Status::FAILED:
         log_failure("a submission on the game's present queue failed");
-        return SkipPresent("a submission on the game's present queue failed");
+        return SkipPresent("a submission on the game's present queue failed", group);
     }
   }
   VkCommandBuffer buffer = VK_NULL_HANDLE;
@@ -461,15 +515,15 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
       if (busy_skips_++ == 0u) {
         nr::Log(nr::LogLevel::INFO, "Vulkan: a frame went without NR at Present: Uplift's command buffers were all still on the GPU (counted in Details)");
       }
-      return SkipPresent("Uplift's command buffers are busy");
+      return SkipPresent("Uplift's command buffers are busy", group);
     case vk::CommandRing::Status::LOST:
       NoteDeviceLost(now);
       return {};
     case vk::CommandRing::Status::FAILED:
       log_failure("Uplift's command buffer could not be begun");
-      return SkipPresent("Uplift's command buffer could not be begun");
+      return SkipPresent("Uplift's command buffer could not be begun", group);
   }
-  ApplyLookConfig(now);
+  ApplyLookConfig(now, group);
   // As DeviceContext::Run: DLSS's copy for this present while MotionVectors wants DLSS's (it stamps the copy's use), else Launchpad's UPLIFT_MV.
   const vk::NrImage dlss_motion = ((config_.motion_vectors && config_.present_motion_copy) ? PresentMotion() : vk::NrImage{});
   const bool launchpad_wanted = (config_.launchpad_motion && launchpad.view != VK_NULL_HANDLE);
@@ -491,7 +545,7 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
     motion_shape = {.kind = VkMotionKind::PRESENT_COPY, .format = VK_FORMAT_R16G16_SFLOAT,
                     .low_res = (copy_size.width < present_canvas.width || copy_size.height < present_canvas.height)};
   }
-  if (const std::string_view motion_skip = CheckMotion(motion_shape); !motion_skip.empty()) return SkipPresent(motion_skip);
+  if (const std::string_view motion_skip = CheckMotion(Stage::PRESENT, motion_shape); !motion_skip.empty()) return SkipPresent(motion_skip, group);
   const sources::VkPresentTarget target = {
       .image = present_frame_.back_buffer.image,
       .layout = LayoutOf(usage),
@@ -510,7 +564,8 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
       .motion_scale_x = config_.motion_scale_x,
       .motion_scale_y = config_.motion_scale_y,
   };
-  const sources::PipelineResult result = pipeline_->RecordPresent(buffer, target, controls_, false, present_layout_);
+  const sources::PipelineResult result =
+      pipeline_->RecordPresent(buffer, target, controls_, (group > 0u && present_reset_owed_), present_layout_, {.slice = slices_[group], .set = group});
   if (result.reason == "create failed" && present_create_failure_.empty()) {
     // T6 (M-4): a creation that failed at Present, not for want of memory (the Session's retry and budget handle that), ends native Present for the session.
     const nr::SessionStatus status = session_->Status();
@@ -527,17 +582,23 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
         return {};
       }
       log_failure(std::format("Uplift's command buffer could not be submitted (VkResult {})", static_cast<int>(submitted)));
-      return SkipPresent("Uplift's command buffer could not be submitted");
+      return SkipPresent("Uplift's command buffer could not be submitted", group);
     }
     last_present_submission_ = now;  // T6 (I-4): a device loss soon after this latches native NR off
   }
-  nr_applied_ = result.nr_applied;
-  passes_run_ = result.passes_run;
-  skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
-  skip_from_session_ = (result.nr_applied ? false : result.from_session);
-  motion_source_ = result.motion_source;
-  motion_scale_x_ = 1.f;
-  motion_scale_y_ = 1.f;
+  NoteGroupResult(Stage::PRESENT, result);
+  if (group > 0u) {
+    present_reset_owed_ = (present_reset_owed_ && !result.nr_applied);
+  } else {
+    // The status follows pass 1's group: one NR frame per frame.
+    nr_applied_ = result.nr_applied;
+    passes_run_ = result.passes_run;
+    skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
+    skip_from_session_ = (result.nr_applied ? false : result.from_session);
+    motion_source_ = result.motion_source;
+    motion_scale_x_ = 1.f;
+    motion_scale_y_ = 1.f;
+  }
   if (result.nr_applied) {
     trigger_used_ = point;
     if (point != logged_trigger_) {
@@ -561,18 +622,30 @@ nr::Size VkDlssContext::SessionFrameSize() const {
   return ((dlss_placement && !canvas_size_.Empty()) ? canvas_size_ : output_size_);
 }
 
-sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, bool before_upscaling, std::chrono::steady_clock::time_point now) {
+sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now) {
   // As DeviceContext::SettleLayout (v2 design §3.8): the Resolution mode's share of `output`, settled; Match game takes DLSS's create-time render size (Before
-  // upscaling already works at the render size; until DLSS's create is seen, Full).
+  // upscaling already works at the render size; until DLSS's create is seen, Full). Split chain (design 4): pass 1's group works at Setup's Resolution, a
+  // later group at its stage's own (Before upscaling is always pass 1's).
+  const bool pass1 = (chain_.group_count == 0u || chain_.groups[0].stage == stage);
+  ui::ResolutionMode mode = config_.resolution;
+  float custom_scale = config_.resolution_scale;
+  bool slider_held = config_.resolution_slider_held;
+  if (!pass1) {
+    const FrameConfig::StageResolution& own = config_.stage_resolution[(stage == Stage::AFTER_DLSS ? 0u : 1u)];
+    mode = own.mode;
+    custom_scale = own.scale;
+    slider_held = own.slider_held;
+  }
+  const bool before_upscaling = (stage == Stage::BEFORE_UPSCALING);
   double target_width = output.width;
   double target_height = output.height;
   double scale = 1.0;
-  switch (config_.resolution) {
+  switch (mode) {
     case ui::ResolutionMode::FULL:        break;
     case ui::ResolutionMode::QUALITY:     scale = sources::QUALITY_SCALE; break;
     case ui::ResolutionMode::BALANCED:    scale = sources::BALANCED_SCALE; break;
     case ui::ResolutionMode::PERFORMANCE: scale = sources::PERFORMANCE_SCALE; break;
-    case ui::ResolutionMode::CUSTOM:      scale = config_.resolution_scale / 100.0; break;
+    case ui::ResolutionMode::CUSTOM:      scale = custom_scale / 100.0; break;
     case ui::ResolutionMode::MATCH_GAME:
       if (main_snapshot_ && !main_snapshot_->render.Empty() && !before_upscaling && !dlss_off_.Off()) {  // Plan 18 Task 12 (fix round 1, M-1): Full while off
         target_width = main_snapshot_->render.width;
@@ -580,12 +653,16 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, bool before_ups
       }
       break;
   }
-  const nr::Size image =
-      settle_.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, config_.resolution_slider_held);
+  StageState& state = stages_[static_cast<size_t>(stage)];
+  const nr::Size image = state.settle.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, slider_held);
   const nr::Size canvas = ((before_upscaling && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);
-  work_size_ = image;
-  canvas_size_ = canvas;
-  session_->NoteFrameSize(canvas);
+  state.work = image;
+  state.canvas = canvas;
+  if (pass1) {
+    work_size_ = image;
+    canvas_size_ = canvas;
+  }
+  session_->NoteFrameSize(static_cast<uint8_t>(stage), canvas);
   return {.image = image, .canvas = canvas, .upsampling = config_.upsampling};
 }
 
@@ -594,18 +671,35 @@ void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
   dlss_idle_ = (dlss_placement && last_main_evaluate_.has_value()
                 && now - *last_main_evaluate_ > std::max(2 * config_.session.grace, DLSS_IDLE_MINIMUM));
   dlss_paused_ = (last_main_evaluate_.has_value() && now - *last_main_evaluate_ > DLSS_IDLE_MINIMUM);
+  // Split chain (design 3.4, 6.1): a later Present group runs on while the game's DLSS idles (a menu), so the DLSS idle drain waits for none then; the DLSS
+  // groups skip those frames and restart their history when DLSS returns.
+  const bool later_present = (dlss_placement && PresentGroupNative());
+  if (chain_.Split() && dlss_paused_) {
+    for (const Stage stage : {Stage::BEFORE_UPSCALING, Stage::AFTER_DLSS}) {
+      StageState& state = stages_[static_cast<size_t>(stage)];
+      state.reset_owed = true;
+      state.nr_applied = false;  // fix round 2 (m2): the card counts the passes that run; the DLSS groups run none while DLSS is paused
+      state.passes_run = 0u;
+    }
+  }
   // A problem with the surface the placement works on (DLSS's output for After DLSS, the game's Color for Before upscaling: its format, its pipelines) keeps
   // the Session off, so a game that can never run NR pays nothing for it.
   const bool before_upscaling = (placement_.placement == Placement::BEFORE_UPSCALING);
   bool placement_ready = ((placement_.placement == Placement::AFTER_DLSS || before_upscaling) && !dlss_idle_ && output_message_.empty());
+  bool later_present_ready = false;
   const bool allowed = (config_.session.enabled && config_.nr_allowed && blocked_reason_.empty());
   // Plan 19: native NR at Present loads once the frame can take it (its encoding resolved) and the RGBA16F intermediate's pipelines are built, here, as the
-  // DLSS placements' are.
-  if (NativePresent() && ring_ != nullptr && present_problem_.empty() && present_encoding_.has_value()) {
-    placement_ready = true;
+  // DLSS placements' are. Split chain: a later Present group's frame too, which keeps NR loaded while the game's DLSS idles.
+  if (PresentGroupNative() && ring_ != nullptr && present_problem_.empty() && present_encoding_.has_value()) {
+    bool present_ready = true;
     if (allowed && !pipeline_->Prepare(VK_FORMAT_R16G16B16A16_SFLOAT)) {
       SetPresentProblem("The Vulkan colour pipelines for NR at Present could not be built");
-      placement_ready = false;
+      present_ready = false;
+    }
+    if (NativePresent()) {
+      placement_ready = present_ready;
+    } else {
+      later_present_ready = present_ready;
     }
   }
   // Batch 2 review (minor 3): the pipelines the placement needs are built here, in the present, when NR is about to load: the first compile (a few ms, once
@@ -614,25 +708,29 @@ void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
     pre_sr_unbuildable_ = true;
     SetOutputProblem("The Vulkan colour pipelines for Before upscaling could not be built");
     placement_ready = false;
-  } else if (placement_ready && allowed && !before_upscaling && output_format_ != VK_FORMAT_UNDEFINED && !pipeline_->Prepare(output_format_)) {
+  } else if (placement_ready && allowed && (!before_upscaling || GroupAt(Stage::AFTER_DLSS).has_value()) && output_format_ != VK_FORMAT_UNDEFINED
+             && !pipeline_->Prepare(output_format_)) {
+    // Split chain: an After DLSS group behind Before upscaling needs DLSS's output pipelines too.
     unbuildable_formats_.push_back(output_format_);
     SetOutputProblem(std::format("The Vulkan colour pipeline for DLSS's output format (VkFormat {}) could not be built", static_cast<int>(output_format_)));
     placement_ready = false;
   }
-  bool want = (allowed && placement_ready);
+  bool want = (allowed && (placement_ready || later_present_ready));
   // In-game round 1 (bug A): NR's Session belongs to the command buffers it was loaded for. A placement that moves between native Present (Uplift's own
   // buffers) and a DLSS stage (the game's) reloads it from OFF: the old path's GPU work finished first (the ring's fences, capped; the DLSS stage's through the
   // Session's own teardown marks), NGX's features, A, B and the Present surfaces released, and the new path creates its features afresh, as from cold.
   // Review 97f99e3 (Important 2): After DLSS and Before upscaling are streams of their own, and a lasting change of the motion input reloads too.
-  const VkNrStream wanted_stream = (NativePresent()  ? VkNrStream::OWN_BUFFERS
-                                    : before_upscaling ? VkNrStream::BEFORE_UPSCALING
-                                    : dlss_placement   ? VkNrStream::AFTER_DLSS
-                                                       : VkNrStream::NONE);
+  // Split chain (decision Q3): the chain's set of streams; any change of it reloads, and so does a pass moving to another stage while the set stays (its
+  // feature would be evaluated in another stream). Never a warm per-group rebuild.
+  const VkStreamSet wanted_streams = ChainStreams();
+  constexpr VkStreamSet OWN = VkStreamBit(VkNrStream::OWN_BUFFERS);
   if (session_->State() == nr::SessionState::OFF) {
-    session_stream_ = VkNrStream::NONE;
+    session_streams_ = 0u;
     own_drain_waited_ = false;
-    session_motion_.reset();
-    motion_mismatches_ = 0u;
+    for (StageState& stage : stages_) {
+      stage.motion.reset();
+      stage.motion_mismatches = 0u;
+    }
     input_reload_reason_.clear();
   }
   if (!stream_reload_ && !input_reload_reason_.empty()) {
@@ -640,10 +738,17 @@ void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
     nr::Logf(nr::LogLevel::INFO, "Vulkan: NR reloads from off: {}", input_reload_reason_);
     input_reload_reason_.clear();
   }
-  if (!stream_reload_ && VkStreamNeedsReload(session_stream_, wanted_stream, session_->State() == nr::SessionState::OFF)) {
+  const bool streams_change = VkStreamsNeedReload(session_streams_, wanted_streams, session_->State() == nr::SessionState::OFF);
+  const bool passes_move =
+      (chain_passes_moved_ && session_streams_ != 0u && wanted_streams == session_streams_ && session_->State() != nr::SessionState::OFF);
+  if (!stream_reload_ && (streams_change || passes_move)) {
     stream_reload_ = true;
-    nr::Logf(nr::LogLevel::INFO, "Vulkan: NR moves from {} to {}: it reloads from off", StreamName(session_stream_), StreamName(wanted_stream));
-    if (session_stream_ == VkNrStream::OWN_BUFFERS && ring_ && !std::exchange(own_drain_waited_, true) && !ring_->WaitIdle(RING_SWITCH_WAIT)) {
+    if (streams_change) {
+      nr::Logf(nr::LogLevel::INFO, "Vulkan: NR moves from {} to {}: it reloads from off", StreamsName(session_streams_), StreamsName(wanted_streams));
+    } else {
+      nr::Logf(nr::LogLevel::INFO, "Vulkan: NR's passes move between its stages ({}): it reloads from off", FormatChainLine(chain_, {}));
+    }
+    if ((session_streams_ & OWN) != 0u && ring_ && !std::exchange(own_drain_waited_, true) && !ring_->WaitIdle(RING_SWITCH_WAIT)) {
       nr::Log(nr::LogLevel::WARN, "Vulkan: Uplift's command buffers did not finish within 2 s of leaving Present; NR stays off on this device until the game exits");
       Drop(false);  // no NGX call: the GPU may still run them
       return;
@@ -651,7 +756,7 @@ void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
   }
   // Transitions: a hand-over to another owner (the add-on sets no grace then) drains NR loaded for Present here at once; Uplift's own command buffers finish
   // first (capped), as at a stage change. A drain with the configured grace (NR off by the user) needs no wait: its marks come long after.
-  if (!want && session_stream_ == VkNrStream::OWN_BUFFERS && session_->State() != nr::SessionState::OFF && config_.session.grace.count() == 0 && ring_
+  if (!want && (session_streams_ & OWN) != 0u && session_->State() != nr::SessionState::OFF && config_.session.grace.count() == 0 && ring_
       && !std::exchange(own_drain_waited_, true) && !ring_->WaitIdle(RING_SWITCH_WAIT)) {
     nr::Log(nr::LogLevel::WARN, "Vulkan: Uplift's command buffers did not finish within 2 s of leaving Present; NR stays off on this device until the game exits");
     Drop(false);
@@ -666,7 +771,7 @@ void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
     }
   }
   // As DeviceContext (fix round 2, Important 1): skip SetEnabled(false) only when the DLSS idle is the sole reason and the Session is suspended.
-  const bool idle_only = (allowed && dlss_placement && dlss_idle_);
+  const bool idle_only = (allowed && dlss_placement && dlss_idle_ && !later_present);
   if (!(idle_only && session_->Status().suspended)) {
     session_->SetEnabled(want);
   }
@@ -680,30 +785,197 @@ void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
     trace_frames_ = TRACE_FRAMES;
   };
   note_state();
-  if (session_->State() == nr::SessionState::LOADING && NativePresent() && before_present_load_) {
+  if (session_->State() == nr::SessionState::LOADING && PresentGroupNative() && before_present_load_) {
     before_present_load_();  // T6 fix round (M-1): the crash marker goes on disk before NGX initialises on the game's device
   }
   session_->Tick();
   note_state();
-  if (session_->State() != nr::SessionState::OFF && session_stream_ == VkNrStream::NONE) {
-    session_stream_ = wanted_stream;  // In-game round 1: the buffers this load is for
+  if (session_->State() != nr::SessionState::OFF && session_streams_ == 0u) {
+    session_streams_ = wanted_streams;  // In-game round 1: the buffers this load is for
   }
   // Batch 2 review (minor 7), the VRAM release after a disable: A, B and the zero motion go with NR.
   if (session_->State() == nr::SessionState::OFF || session_->State() == nr::SessionState::FAILED) {
     pipeline_->ReleaseIntermediates();
     // In-game round 1 (bug A): off Present, Uplift's own command buffers go too, once their fences say the GPU is done (made again for Present).
-    if (ring_ && !NativePresent() && ring_->WaitIdle(std::chrono::milliseconds(0))) {
+    if (ring_ && !PresentGroupNative() && ring_->WaitIdle(std::chrono::milliseconds(0))) {
       ring_->Destroy();
       ring_.reset();
     }
   }
 }
 
+void VkDlssContext::UpdateChain() {
+  // Design 6.1: why each stage cannot run now. A DLSS pause is a wait, never a cause (decision Q4): its groups skip those frames.
+  std::string_view dlss_cause;
+  if (!dlss_unavailable_reason_.empty()) {
+    dlss_cause = dlss_unavailable_reason_;
+  } else if (!dlss_seen_) {
+    dlss_cause = "DLSS has not run yet";
+  } else if (dlss_off_.Off()) {
+    dlss_cause = "the game's DLSS is off";
+  }
+  ChainFacts facts = {
+      .pass1 = placement_.placement,
+      .passes = config_.session.pass_count,
+      .stored = config_.pass_stages,
+      .split_capable = config_.split_capable,
+  };
+  std::string_view before_cause = dlss_cause;
+  if (before_cause.empty()) {
+    before_cause = (pre_sr_unbuildable_ ? std::string_view("The Vulkan colour pipelines for Before upscaling could not be built")
+                    : BeforeUpscaling() ? std::string_view()
+                                        : std::string_view("Before upscaling is off"));
+  }
+  facts.cannot[static_cast<size_t>(Stage::BEFORE_UPSCALING)] = before_cause;
+  facts.cannot[static_cast<size_t>(Stage::AFTER_DLSS)] = dlss_cause;
+  // Fix round 1 (I1), as Direct3D 12's: DLSS-stage NR of a split seen on another queue than the effect queue (where a later Present group records) keeps
+  // Present off for later groups: their passes join the DLSS stage, so NR never runs on two queues at once (no GPU wait can order them safely). Checked only
+  // while a split is stored.
+  if (effect_queue_ != nullptr && SplitStored()) {
+    const void* const other_queue = stage_work_.OtherQueue(effect_queue_);
+    if (other_queue != other_dlss_queue_) {
+      if (other_queue != nullptr) {
+        nr::Logf(nr::LogLevel::INFO, "Vulkan: the game's DLSS runs on another queue ({}) than ReShade's effects ({}): passes stored at Present run at the DLSS "
+                 "stage", other_queue, effect_queue_);
+      } else {
+        nr::Log(nr::LogLevel::INFO, "Vulkan: the game's DLSS-stage NR runs on ReShade's effect queue again: passes stored at Present run there again");
+      }
+      other_dlss_queue_ = other_queue;
+    }
+  }
+  std::string_view present_cause;
+  if (!config_.vk_native_present) {
+    present_cause = NOT_NATIVE_PRESENT_REASON;  // decision Q6: the bridge and the helper hold one stage only
+  } else if (!present_problem_.empty()) {
+    present_cause = present_problem_;  // the back buffer cannot take NR (ResolvePresentFrame): a lasting cause, never one frame's missing image
+  } else if (config_.ngx_frame_generation > 0u && !config_.present_with_frame_gen) {
+    present_cause = "frame generation is on";
+  } else if (other_dlss_queue_ != nullptr) {
+    present_cause = OTHER_QUEUE_REASON;
+  }
+  facts.cannot[static_cast<size_t>(Stage::PRESENT)] = present_cause;
+  ChainPlan chain = DecideChain(facts);
+
+  const auto same_groups = [](const ChainPlan& first, const ChainPlan& second) {
+    if (first.group_count != second.group_count) return false;
+    for (uint32_t index = 0u; index < first.group_count; ++index) {
+      const StageGroup& a = first.groups[index];
+      const StageGroup& b = second.groups[index];
+      if (a.stage != b.stage || a.first != b.first || a.count != b.count) return false;
+    }
+    return true;
+  };
+  // Decision Q3 (bug A's rule): a pass that moves to another stage while the chain's streams stay would have its feature evaluated in another stream; the
+  // Session reloads from OFF then, as for a stream change (UpdateSession).
+  chain_passes_moved_ = false;
+  if (!same_groups(chain, chain_)) {
+    // Logged only around a split, so a one-group chain logs exactly what the placement line already says.
+    if (chain.Split()) {
+      nr::Logf(nr::LogLevel::INFO, "NR chain: {}", FormatChainLine(chain, {}));
+    } else if (chain_.Split()) {
+      nr::Log(nr::LogLevel::INFO, "NR chain: every pass at one stage");
+    }
+    const auto passes_of = [](const ChainPlan& plan) {
+      return (plan.group_count == 0u ? 0u : plan.groups[plan.group_count - 1u].first + plan.groups[plan.group_count - 1u].count);
+    };
+    const uint32_t common = std::min(passes_of(chain), passes_of(chain_));
+    for (uint32_t pass = 0u; pass < common; ++pass) {
+      chain_passes_moved_ = (chain_passes_moved_ || chain.effective[pass] != chain_.effective[pass]);
+    }
+    for (size_t stage = 0u; stage < STAGE_COUNT; ++stage) {
+      const auto uses = [stage](const ChainPlan& plan) {
+        return std::ranges::any_of(std::span(plan.groups).first(plan.group_count),
+                                   [stage](const StageGroup& group) { return static_cast<size_t>(group.stage) == stage; });
+      };
+      if (!uses(chain) || !uses(chain_)) {
+        stages_[stage] = {};  // a stage that joins the chain works at its own size at once, and reports nothing stale from an earlier time
+      }
+    }
+  }
+  if (chain.note != chain_.note && !chain.note.empty()) {
+    nr::Logf(nr::LogLevel::INFO, "NR chain: {}", chain.note);
+  }
+  chain_ = std::move(chain);
+  for (uint32_t index = 0u; index < chain_.group_count; ++index) {
+    const StageGroup& group = chain_.groups[index];
+    const bool last = (index + 1u == chain_.group_count);
+    slices_[index] = {.stage = static_cast<uint8_t>(group.stage), .first = group.first, .count = (last ? nr::MAX_PASSES - group.first : group.count)};
+  }
+  if (chain_.group_count > 0u) {
+    session_->SetChain(std::span(slices_).first(chain_.group_count));
+  }
+  // Design 3.3: a group the chain no longer has frees its set behind its last use; set 0 stays, as the single set always did.
+  pipeline_->RetireSetsFrom(std::max(chain_.group_count, 1u));
+  if (!chain_.Split()) {
+    stage_work_.Clear();  // no later Present group waits for them
+  }
+}
+
+std::optional<uint32_t> VkDlssContext::GroupAt(Stage stage) const {
+  for (uint32_t index = 0u; index < chain_.group_count; ++index) {
+    if (chain_.groups[index].stage == stage) return index;
+  }
+  return std::nullopt;
+}
+
+bool VkDlssContext::LaterStageKeepsFaces(Stage stage) const {
+  switch (stage) {
+    case Stage::AFTER_DLSS:       return config_.stage_keep_faces[0];
+    case Stage::PRESENT:          return config_.stage_keep_faces[1];
+    case Stage::BEFORE_UPSCALING: break;  // always pass 1's group
+  }
+  return false;
+}
+
+bool VkDlssContext::SplitStored() const {
+  if (!config_.split_capable) return false;
+  const uint32_t later = std::min(config_.session.pass_count, ui::MAX_PASSES) - std::min(config_.session.pass_count, 1u);
+  return std::any_of(config_.pass_stages.begin(), config_.pass_stages.begin() + later, [](ui::PassStage stage) { return stage != ui::PassStage::SAME; });
+}
+
+std::string_view VkDlssContext::SliceSkipReason(uint32_t group) const {
+  // As Session::Evaluate says it: the Defaults view hides a pass without a reason; a budget cut is "budget".
+  const bool hidden_by_view = (config_.pass_view_limit != 0u && slices_[group].first >= config_.pass_view_limit);
+  return (hidden_by_view ? std::string_view() : std::string_view("budget"));
+}
+
+VkStreamSet VkDlssContext::ChainStreams() const {
+  VkStreamSet streams = 0u;
+  for (uint32_t index = 0u; index < chain_.group_count; ++index) {
+    switch (chain_.groups[index].stage) {
+      case Stage::BEFORE_UPSCALING: streams |= VkStreamBit(VkNrStream::BEFORE_UPSCALING); break;
+      case Stage::AFTER_DLSS:       streams |= VkStreamBit(VkNrStream::AFTER_DLSS); break;
+      case Stage::PRESENT:          streams |= (config_.vk_native_present ? VkStreamBit(VkNrStream::OWN_BUFFERS) : VkStreamSet{0u}); break;
+    }
+  }
+  return streams;
+}
+
+bool VkDlssContext::StageWorkDone() const {
+  const nr::Timeline& timeline = completion_->Timeline();
+  return stage_work_.Done(effect_queue_, [&timeline](uint64_t token) { return timeline.TokenComplete(token); });
+}
+
+void VkDlssContext::NoteGroupResult(Stage stage, const sources::PipelineResult& result) {
+  StageState& state = stages_[static_cast<size_t>(stage)];
+  state.nr_applied = result.nr_applied;
+  state.passes_run = result.passes_run;
+  state.skip_reason = (result.nr_applied ? std::string_view() : result.reason);
+  state.motion_source = result.motion_source;
+  stage_recordings_[static_cast<size_t>(stage)] += (result.nr_applied ? 1u : 0u);
+}
+
 void VkDlssContext::NotePlacementChange() {
   if (logged_placement_ && *logged_placement_ == placement_.placement) return;
   logged_placement_ = placement_.placement;
   nr::Log(nr::LogLevel::INFO, FormatPlacementLine(placement_, main_snapshot_, true));
-  settle_.Reset();  // a new placement's work size applies at once
+  // A new placement's work size applies at once.
+  switch (placement_.placement) {
+    case Placement::BEFORE_UPSCALING: stages_[static_cast<size_t>(Stage::BEFORE_UPSCALING)].settle.Reset(); break;
+    case Placement::AFTER_DLSS:       stages_[static_cast<size_t>(Stage::AFTER_DLSS)].settle.Reset(); break;
+    case Placement::PRESENT:          stages_[static_cast<size_t>(Stage::PRESENT)].settle.Reset(); break;
+    case Placement::NONE:             break;
+  }
 }
 
 void VkDlssContext::SetOutputProblem(std::string problem) {
@@ -721,6 +993,7 @@ void VkDlssContext::SetOutputProblem(std::string problem) {
 
 sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, const ngx_hooks::DlssFrame& frame, const ngx_hooks::VkDlssResources& copies,
                                                       VkListState& list, std::chrono::steady_clock::time_point now) {
+  const std::optional<bool> before_reset = std::exchange(before_reset_, std::nullopt);  // split chain: this evaluate's, from BeforeDlssEvaluate
   // After a device loss Uplift never records in a game command buffer or calls the snippet again.
   if (!torn_down_ && !dropped_ && completion_->PollDeviceLost()) {
     NoteDeviceLost(now);
@@ -748,48 +1021,56 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
   const bool image = (frame.output != nullptr && copies.output.Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW);
   output_format_ = (image ? copies.output.Resource.ImageViewInfo.Format : VK_FORMAT_UNDEFINED);
   // N10: the Session hears the size NR works at in every state. After DLSS (Plan 14): the settled work canvas of the output region at the Resolution mode.
+  // Split chain: the After DLSS group's, pass 1's or a later one behind Before upscaling (at its stage's own Resolution).
+  const std::optional<uint32_t> after_group = GroupAt(Stage::AFTER_DLSS);
   sources::WorkLayout layout;
-  if (placement_.placement == Placement::AFTER_DLSS && !dlss_idle_ && !output_size_.Empty()) {
-    layout = SettleLayout(output_size_, false, now);
+  if (after_group && !dlss_idle_ && !output_size_.Empty()) {
+    layout = SettleLayout(output_size_, Stage::AFTER_DLSS, now);
   } else {
     session_->NoteFrameSize(SessionFrameSize());
   }
   // What keeps NR off for this output (Before upscaling: for the game's Color), before anything is recorded (and before NR ever loads for it).
   const std::optional<uint32_t> variant = color::VkColorPipeline::OutputVariantOf(output_format_);
-  std::string_view skip;
-  std::string problem;
+  std::string_view color_skip;
+  std::string color_problem;
   if (BeforeUpscaling()) {
     // The padded canvas takes any render size: only the Color's own format can keep NR off.
     const bool color_image = (frame.color != nullptr && copies.color.Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW);
     const VkFormat color_format = (color_image ? copies.color.Resource.ImageViewInfo.Format : VK_FORMAT_UNDEFINED);
     if (!color_image) {
-      skip = "invalid input";
-      problem = "DLSS's colour input is not an image view";
+      color_skip = "invalid input";
+      color_problem = "DLSS's colour input is not an image view";
     } else if (!sources::VkNrPipeline::PreSrColorFormatSupported(color_format)) {
-      skip = "unsupported format";
-      problem = std::format("Unsupported DLSS colour format on Vulkan (VkFormat {})", static_cast<int>(color_format));
+      color_skip = "unsupported format";
+      color_problem = std::format("Unsupported DLSS colour format on Vulkan (VkFormat {})", static_cast<int>(color_format));
     } else if (pre_sr_unbuildable_) {
-      skip = "unsupported format";
-      problem = "The Vulkan colour pipelines for Before upscaling could not be built";
+      color_skip = "unsupported format";
+      color_problem = "The Vulkan colour pipelines for Before upscaling could not be built";
     }
-  } else if (!image) {
-    skip = "invalid input";
-    problem = "DLSS's output is not an image view";
-  } else if (!nr::MeetsNrFloor(output_size_)) {
-    skip = "frame too small";
-    problem = std::format("NR needs a frame of at least {}x{} (DLSS's output region is {}x{})", nr::MIN_NR_LONG_SIDE, nr::MIN_NR_SHORT_SIDE,
-                          output_size_.width, output_size_.height);
-  } else if (!variant) {
-    skip = "unsupported format";
-    problem = std::format("Unsupported DLSS output format on Vulkan (VkFormat {})", static_cast<int>(output_format_));
-  } else if (!storage_formats_[*variant]) {
-    skip = "unsupported format";
-    problem = std::format("DLSS's output format (VkFormat {}) is not a storage format on this GPU's Vulkan driver", static_cast<int>(output_format_));
-  } else if (std::ranges::find(unbuildable_formats_, output_format_) != unbuildable_formats_.end()) {
-    skip = "unsupported format";
-    problem = std::format("The Vulkan colour pipeline for DLSS's output format (VkFormat {}) could not be built", static_cast<int>(output_format_));
   }
-  SetOutputProblem(std::move(problem));
+  // DLSS's output, for After DLSS (pass 1's, or split chain: a later group behind Before upscaling).
+  std::string_view skip;
+  std::string problem;
+  if (!BeforeUpscaling() || after_group) {
+    if (!image) {
+      skip = "invalid input";
+      problem = "DLSS's output is not an image view";
+    } else if (!nr::MeetsNrFloor(output_size_)) {
+      skip = "frame too small";
+      problem = std::format("NR needs a frame of at least {}x{} (DLSS's output region is {}x{})", nr::MIN_NR_LONG_SIDE, nr::MIN_NR_SHORT_SIDE,
+                            output_size_.width, output_size_.height);
+    } else if (!variant) {
+      skip = "unsupported format";
+      problem = std::format("Unsupported DLSS output format on Vulkan (VkFormat {})", static_cast<int>(output_format_));
+    } else if (!storage_formats_[*variant]) {
+      skip = "unsupported format";
+      problem = std::format("DLSS's output format (VkFormat {}) is not a storage format on this GPU's Vulkan driver", static_cast<int>(output_format_));
+    } else if (std::ranges::find(unbuildable_formats_, output_format_) != unbuildable_formats_.end()) {
+      skip = "unsupported format";
+      problem = std::format("The Vulkan colour pipeline for DLSS's output format (VkFormat {}) could not be built", static_cast<int>(output_format_));
+    }
+  }
+  SetOutputProblem((BeforeUpscaling() && (!color_problem.empty() || !after_group)) ? std::move(color_problem) : std::move(problem));
   // Plan 14 (design §2.3): whether this evaluate's vectors can be copied for the Present path. Final review, minor 6: noted at every evaluate the context sees,
   // and kept while it sees none (with the copies not asked for, the evaluate is a passthrough), so a game that passes no readable vectors keeps DLSS's vectors
   // greyed at Present instead of offering them again after a pick away from them.
@@ -805,9 +1086,14 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
   if (readable) {
     dlss_motion_size_ = {motion_region.width, motion_region.height};  // stress round: the Present copies' shape, for a present that misses its copy
   }
-  if (placement_.placement == Placement::PRESENT && config_.present_motion_copy) {
-    // NR runs on the Present path (the bridge's) with DLSS's own motion vectors, copied here in the game's frame, right after DLSS read them, for the present
-    // that closes it. The Session never loads: nothing of NGX's is called on this device.
+  // NR runs on the Present path with DLSS's own motion vectors, copied here in the game's frame, right after DLSS read them, for the present that closes it:
+  // pass 1's (the Session never loads for the copy: nothing of NGX's is called on this device), or (split chain, Task 5) a later group's, which the
+  // After DLSS group's recording then follows on the same buffer (only for a Present group that runs, Direct3D 12's fix round 1, M4).
+  const bool pass1_present = (placement_.placement == Placement::PRESENT);
+  const std::optional<uint32_t> present_group = GroupAt(Stage::PRESENT);
+  const bool later_present_copy = (!pass1_present && present_group && session_->SliceRuns(slices_[*present_group]));
+  sources::PipelineResult motion_copy = {.reason = "not placed after DLSS"};
+  if (config_.present_motion_copy && (pass1_present || later_present_copy)) {
     PresentMotionCounters& counters = present_motion_counters_;
     ++counters.evaluates;
     const nr::Timeline& timeline = completion_->Timeline();
@@ -818,95 +1104,111 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
     counters.lag_max = std::max(counters.lag_max, lag);
     if (!readable) {
       ++counters.skipped_input;
-      return {.reason = "no readable motion vectors"};
-    }
-    const bool opened_here = OpenToken(list);
-    const sources::PresentMotionWrite write =
-        pipeline_->RecordPresentMotion(buffer, {.view = vectors.ImageView, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, motion_region,
-                                       frame.mv_scale_x * config_.motion_scale_x, frame.mv_scale_y * config_.motion_scale_y, current + 1u,
-                                       config_.dlss_motion_upside_down);  // a throw leaves the token open
-    const bool copied = (write == sources::PresentMotionWrite::WRITTEN);
-    switch (write) {
-      case sources::PresentMotionWrite::WRITTEN:   ++counters.copies; break;
-      case sources::PresentMotionWrite::NO_INPUT:  ++counters.skipped_input; break;
-      case sources::PresentMotionWrite::RING_BUSY: ++counters.skipped_ring; break;
-      case sources::PresentMotionWrite::SLOT_BUSY: ++counters.skipped_slot; break;
-    }
-    if (opened_here && !copied) {
-      DropOpenToken(list);
-    }
-    if (copied) {
-      last_game_list_recording_ = now;  // the latch window covers this recording too
-      if (!present_motion_logged_) {
-        present_motion_logged_ = true;
-        nr::Logf(nr::LogLevel::INFO, "Vulkan: DLSS's motion vectors copied for Present ({}x{})", motion_region.width, motion_region.height);
+      motion_copy = {.reason = "no readable motion vectors"};
+    } else {
+      const bool opened_here = OpenToken(list);
+      const sources::PresentMotionWrite write =
+          pipeline_->RecordPresentMotion(buffer, {.view = vectors.ImageView, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, motion_region,
+                                         frame.mv_scale_x * config_.motion_scale_x, frame.mv_scale_y * config_.motion_scale_y, current + 1u,
+                                         config_.dlss_motion_upside_down);  // a throw leaves the token open
+      const bool copied = (write == sources::PresentMotionWrite::WRITTEN);
+      switch (write) {
+        case sources::PresentMotionWrite::WRITTEN:   ++counters.copies; break;
+        case sources::PresentMotionWrite::NO_INPUT:  ++counters.skipped_input; break;
+        case sources::PresentMotionWrite::RING_BUSY: ++counters.skipped_ring; break;
+        case sources::PresentMotionWrite::SLOT_BUSY: ++counters.skipped_slot; break;
       }
+      if (opened_here && !copied) {
+        DropOpenToken(list);
+      }
+      if (copied) {
+        last_game_list_recording_ = now;  // the latch window covers this recording too
+        if (!present_motion_logged_) {
+          present_motion_logged_ = true;
+          nr::Logf(nr::LogLevel::INFO, "Vulkan: DLSS's motion vectors copied for Present ({}x{})", motion_region.width, motion_region.height);
+        }
+      }
+      motion_copy = {.recorded = copied, .reason = "not placed after DLSS"};
     }
-    return {.recorded = copied, .reason = "not placed after DLSS"};
   }
-  if (placement_.placement != Placement::AFTER_DLSS || dlss_idle_) return {.reason = "not placed after DLSS"};
-  if (!skip.empty()) {
-    nr_applied_ = false;
-    passes_run_ = 0u;
-    skip_reason_ = skip;
-    skip_from_session_ = false;
-    return {.reason = skip};
-  }
+  if (pass1_present) return motion_copy;
+  if (!after_group || dlss_idle_) return motion_copy;  // Before upscaling already ran in BeforeDlssEvaluate
+  const uint32_t group = *after_group;
+  StageState& stage = stages_[static_cast<size_t>(Stage::AFTER_DLSS)];
+  const auto skip_group = [&](std::string_view reason, bool owe_reset) -> sources::PipelineResult {
+    stage.nr_applied = false;
+    stage.passes_run = 0u;
+    stage.skip_reason = reason;
+    stage.motion_source = sources::MotionSource::NONE;
+    stage.reset_owed = (stage.reset_owed || owe_reset);
+    if (group == 0u) {
+      nr_applied_ = false;
+      passes_run_ = 0u;
+      skip_reason_ = reason;
+      skip_from_session_ = false;
+    }
+    return {.reason = reason};
+  };
+  if (!skip.empty()) return skip_group(skip, false);
   if (session_->State() != nr::SessionState::ACTIVE) {
-    nr_applied_ = false;
-    skip_reason_ = {};  // NR is off: nothing to explain
-    skip_from_session_ = false;
+    stage.nr_applied = false;
+    stage.skip_reason = {};
+    if (group == 0u) {
+      nr_applied_ = false;
+      skip_reason_ = {};  // NR is off: nothing to explain
+      skip_from_session_ = false;
+    }
     return {.reason = "NR is off"};
   }
+  // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before anything is recorded; its next recording starts afresh.
+  if (group > 0u && !session_->SliceRuns(slices_[group])) return skip_group(SliceSkipReason(group), true);
   // Batch 3 review, minor 5: DLSS's output changed format while NR runs (an HDR toggle). Its pipelines are built at the next present, never inside the
   // game's evaluate (a first compile takes milliseconds): this one frame keeps DLSS's own output, and NR's history starts afresh after it.
-  if (!pipeline_->Prepared(output_format_)) {
-    nr_applied_ = false;
-    passes_run_ = 0u;
-    skip_reason_ = "preparing the new format";
-    skip_from_session_ = false;
-    reset_owed_ = true;
-    return {.reason = skip_reason_};
-  }
+  if (!pipeline_->Prepared(output_format_)) return skip_group("preparing the new format", true);
   // Review 97f99e3 (Important 2): never a different motion input from the one this load's features were first evaluated with.
   if (const std::string_view motion_skip =
-          CheckMotion(MotionShapeOf(ReadDlssFrame(frame, copies, &copies.output, region, false).inputs, CanvasOf(layout, output_size_), false));
+          CheckMotion(Stage::AFTER_DLSS, MotionShapeOf(ReadDlssFrame(frame, copies, &copies.output, region, false).inputs, CanvasOf(layout, output_size_), false));
       !motion_skip.empty()) {
-    nr_applied_ = false;
-    passes_run_ = 0u;
-    skip_reason_ = motion_skip;
-    skip_from_session_ = false;
-    reset_owed_ = true;
-    return {.reason = skip_reason_};
+    return skip_group(motion_skip, true);
   }
 
   // Plan 3, Minor 4: pessimistic; only a frame that applies NR clears the owed reset.
-  const bool reset_was_owed = std::exchange(reset_owed_, true);
-  ApplyLookConfig(now);
-  const ReadFrame game = ReadDlssFrame(frame, copies, &copies.output, region, (reset_merger_.Filter(frame.reset, now) || reset_was_owed));
+  const bool reset_was_owed = std::exchange(stage.reset_owed, true);
+  ApplyLookConfig(now, group);
+  // The game's reset, filtered once per evaluate: behind a Before upscaling group (split chain), the answer that group's recording got.
+  const bool game_reset = (before_reset ? *before_reset : reset_merger_.Filter(frame.reset, now));
+  const ReadFrame game = ReadDlssFrame(frame, copies, &copies.output, region, (game_reset || reset_was_owed));
   // Key decision c: the token is issued before recording (every mark taken while recording includes it) and stays open on the list; EndEvaluate sets
-  // its event at the end of the hooked call, on every path. A token Before upscaling opened in this call is reused.
+  // its event at the end of the hooked call, on every path. A token Before upscaling (or the Present motion copy) opened in this call is reused.
   const bool opened_here = OpenToken(list);
-  const sources::PipelineResult result = pipeline_->RecordAfterDlss(buffer, game.target, game.inputs, controls_, layout);  // a throw leaves the token open
+  const sources::PipelineResult result =
+      pipeline_->RecordAfterDlss(buffer, game.target, game.inputs, controls_, layout, {.slice = slices_[group], .set = group});  // a throw leaves the token open
   if (opened_here && !result.recorded) {
     DropOpenToken(list);
   }
   if (result.recorded) {
     last_game_list_recording_ = now;
+    if (chain_.Split()) {
+      stage_work_.Note(list.open_token);  // fix round 1 (I1): where its buffer goes decides whether Present may run beside it
+    }
   }
   if (result.nr_applied) {
-    reset_owed_ = false;
+    stage.reset_owed = false;
   }
-  nr_applied_ = result.nr_applied;
-  passes_run_ = result.passes_run;
-  skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
-  skip_from_session_ = (result.nr_applied ? false : result.from_session);
-  motion_source_ = result.motion_source;
-  motion_scale_x_ = result.motion_scale_x;
-  motion_scale_y_ = result.motion_scale_y;
-  if (result.nr_applied && !logged_after_dlss_) {
-    logged_after_dlss_ = true;  // once per activation
-    nr::Log(nr::LogLevel::INFO, "NR trigger: after DLSS (Vulkan)");
+  NoteGroupResult(Stage::AFTER_DLSS, result);
+  if (group == 0u) {
+    // The status follows pass 1's group: one NR frame per frame.
+    nr_applied_ = result.nr_applied;
+    passes_run_ = result.passes_run;
+    skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
+    skip_from_session_ = (result.nr_applied ? false : result.from_session);
+    motion_source_ = result.motion_source;
+    motion_scale_x_ = result.motion_scale_x;
+    motion_scale_y_ = result.motion_scale_y;
+    if (result.nr_applied && !logged_after_dlss_) {
+      logged_after_dlss_ = true;  // once per activation
+      nr::Log(nr::LogLevel::INFO, "NR trigger: after DLSS (Vulkan)");
+    }
   }
   if (trace_frames_ > 0u) {
     --trace_frames_;
@@ -946,13 +1248,27 @@ VkDlssContext::ReadFrame VkDlssContext::ReadDlssFrame(const ngx_hooks::DlssFrame
   };
 }
 
-void VkDlssContext::ApplyLookConfig(std::chrono::steady_clock::time_point now) {
-  // As DeviceContext::ApplyLookConfig: the frame time since this context's last recording (look::StabilizeRate clamps it).
+void VkDlssContext::ApplyLookConfig(std::chrono::steady_clock::time_point now, uint32_t group) {
+  // As DeviceContext::ApplyLookConfig: the frame time since this group's last recording (look::StabilizeRate clamps it).
   sources::LookConfig look = config_.look;
-  if (last_look_recording_) {
-    look.frame_seconds = std::chrono::duration<float>(now - *last_look_recording_).count();
+  std::optional<std::chrono::steady_clock::time_point>& last_look_recording = last_look_recordings_[group];
+  if (last_look_recording) {
+    look.frame_seconds = std::chrono::duration<float>(now - *last_look_recording).count();
   }
-  last_look_recording_ = now;
+  last_look_recording = now;
+  // Decision Q5b: Result shaping acts on the last group's change only (shaping twice would double it); an earlier group's change passes through as it is.
+  // Fix round 1 (I2): the last group that runs, so a later group the budget cut (or the Defaults view hides) never takes the shaping away.
+  uint32_t shaped = (chain_.group_count > 0u ? chain_.group_count - 1u : 0u);
+  while (shaped > 0u && !session_->SliceRuns(slices_[shaped])) {
+    --shaped;
+  }
+  if (group != shaped) {
+    look.look.enabled = false;
+  }
+  // Decision Q5a: pass 1's group is protected whenever Keep faces is on, a later group only with its stage's "Keep faces here".
+  if (group > 0u && group < chain_.group_count) {
+    look.keep_faces.enabled = (look.keep_faces.enabled && LaterStageKeepsFaces(chain_.groups[group].stage));
+  }
   pipeline_->SetLookConfig(look);
 }
 
@@ -978,51 +1294,66 @@ void VkDlssContext::DropOpenToken(VkListState& list) {
 const NVSDK_NGX_Resource_VK* VkDlssContext::BeforeDlssEvaluate(VkCommandBuffer buffer, const ngx_hooks::DlssFrame& frame,
                                                                const ngx_hooks::VkDlssResources& copies, VkListState& list,
                                                                std::chrono::steady_clock::time_point now) {
+  before_reset_.reset();  // split chain: each evaluate's own, set only by this evaluate's Before upscaling recording
   // After a device loss Uplift never records in a game command buffer or calls the snippet again.
   if (!torn_down_ && !dropped_ && completion_->PollDeviceLost()) {
     NoteDeviceLost(now);
   }
   if (torn_down_ || dropped_ || core_shut_down_) return nullptr;
-  if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_) return nullptr;
+  if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_) return nullptr;  // Before upscaling is always pass 1's group
   // v2 design §3.8 (Plan 14): the work image is the settled size of the render region at the Resolution mode, and below the floor it is padded into the floor
   // canvas (§3.9). The set is keyed on it while the render region moves (the decode upsamples: R88). N10: the Session hears the canvas in every state.
   frame_size_ = {frame.color_region.width, frame.color_region.height};
-  const sources::WorkLayout layout = (frame_size_.Empty() ? sources::WorkLayout{} : SettleLayout(frame_size_, true, now));
+  const sources::WorkLayout layout = (frame_size_.Empty() ? sources::WorkLayout{} : SettleLayout(frame_size_, Stage::BEFORE_UPSCALING, now));
   if (session_->State() != nr::SessionState::ACTIVE) {
     nr_applied_ = false;
     skip_reason_ = {};  // NR is off: nothing to explain
     skip_from_session_ = false;
     return nullptr;
   }
+  StageState& stage = stages_[static_cast<size_t>(Stage::BEFORE_UPSCALING)];
   {
     // Review 97f99e3 (Important 2): as After DLSS's. In a padded canvas the game's vectors reach NGX as an RG16F canvas copy (or the zero image).
     const nr::FrameInputs probe = ReadDlssFrame(frame, copies, (frame.color != nullptr ? &copies.color : nullptr), frame.color_region, false).inputs;
     const nr::Size image = (layout.image.Empty() ? frame_size_ : layout.image);
     const nr::Size canvas = CanvasOf(layout, frame_size_);
-    if (const std::string_view motion_skip = CheckMotion(MotionShapeOf(probe, canvas, canvas != image)); !motion_skip.empty()) {
+    if (const std::string_view motion_skip = CheckMotion(Stage::BEFORE_UPSCALING, MotionShapeOf(probe, canvas, canvas != image)); !motion_skip.empty()) {
       nr_applied_ = false;
       passes_run_ = 0u;
       skip_reason_ = motion_skip;
       skip_from_session_ = false;
-      reset_owed_ = true;
+      stage.nr_applied = false;
+      stage.passes_run = 0u;
+      stage.skip_reason = motion_skip;
+      stage.reset_owed = true;
       return nullptr;
     }
   }
   // Plan 3, Minor 4: pessimistic; only a frame that applies NR clears the owed reset.
-  const bool reset_was_owed = std::exchange(reset_owed_, true);
-  ApplyLookConfig(now);
-  const ReadFrame game = ReadDlssFrame(frame, copies, (frame.color != nullptr ? &copies.color : nullptr), frame.color_region, (reset_merger_.Filter(frame.reset, now) || reset_was_owed));
+  const bool reset_was_owed = std::exchange(stage.reset_owed, true);
+  ApplyLookConfig(now, 0u);
+  const bool game_reset = reset_merger_.Filter(frame.reset, now);
+  if (chain_.Split()) {
+    before_reset_ = game_reset;  // the After DLSS group behind it in this evaluate takes the same answer
+  }
+  const ReadFrame game =
+      ReadDlssFrame(frame, copies, (frame.color != nullptr ? &copies.color : nullptr), frame.color_region, (game_reset || reset_was_owed));
   const bool opened_here = OpenToken(list);
-  const sources::PipelineResult result = pipeline_->RecordPreSr(buffer, game.target, game.inputs, controls_, layout);  // a throw leaves the token open
+  const sources::PipelineResult result =
+      pipeline_->RecordPreSr(buffer, game.target, game.inputs, controls_, layout, {.slice = slices_[0], .set = 0u});  // a throw leaves the token open
   if (opened_here && !result.recorded) {
     DropOpenToken(list);
   }
   if (result.recorded) {
     last_game_list_recording_ = now;  // the latch window covers pre-SR's recordings too
+    if (chain_.Split()) {
+      stage_work_.Note(list.open_token);  // fix round 1 (I1), as After DLSS's
+    }
   }
   if (result.nr_applied) {
-    reset_owed_ = false;
+    stage.reset_owed = false;
   }
+  NoteGroupResult(Stage::BEFORE_UPSCALING, result);
   nr_applied_ = result.nr_applied;
   passes_run_ = result.passes_run;
   skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
@@ -1045,7 +1376,8 @@ const NVSDK_NGX_Resource_VK* VkDlssContext::BeforeDlssEvaluate(VkCommandBuffer b
 VkImage VkDlssContext::PrepareMaskCopy(VkFormat format, nr::Size size, bool* first) {
   if (torn_down_ || dropped_ || core_shut_down_ || !pipeline_) return VK_NULL_HANDLE;
   const bool dlss_placement = (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
-  const bool wanted = (config_.look.mask && (dlss_placement || NativePresent()) && session_->State() == nr::SessionState::ACTIVE);  // Plan 19: and native Present
+  // Plan 19: and native Present (split chain: a later group's too).
+  const bool wanted = (config_.look.mask && (dlss_placement || PresentGroupNative()) && session_->State() == nr::SessionState::ACTIVE);
   return pipeline_->PrepareMaskCopy((wanted ? format : VK_FORMAT_UNDEFINED), size, first);
 }
 
@@ -1079,19 +1411,24 @@ void VkDlssContext::EndEvaluate(VkCommandBuffer buffer, VkListState& list) {
   }
 }
 
-void VkDlssContext::Executed(std::span<const uint64_t> tokens) {
+void VkDlssContext::Executed(std::span<const uint64_t> tokens, void* queue) {
   if (torn_down_ || dropped_) return;
   completion_->Executed(tokens);
+  // Split chain (fix round 1, I1): where a split's DLSS-stage NR goes. A queue other than the effect queue keeps later groups off Present (UpdateChain).
+  stage_work_.Executed(tokens, queue);
 }
 
 void VkDlssContext::Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue) {
   if (torn_down_ || dropped_) return;
   completion_->Reexecuted(tokens, first_token, queue);
+  stage_work_.Executed(tokens, queue);  // submitted again, maybe elsewhere: the latch and the completed-work check hear of it
 }
 
 void VkDlssContext::Recycle(std::span<const uint64_t> tokens) {
   if (torn_down_ || dropped_) return;
   completion_->Recycle(tokens);
+  // By Vulkan's rules the buffer was not pending: its DLSS-stage recordings are complete, or never ran.
+  stage_work_.Recycled(tokens);
 }
 
 void VkDlssContext::NoteDeviceLost(std::chrono::steady_clock::time_point now) {
@@ -1303,7 +1640,8 @@ ContextStatus VkDlssContext::Status() const {
   const bool dlss_placement = (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
   const bool before_upscaling = (placement_.placement == Placement::BEFORE_UPSCALING);
   std::string placement_note = placement_.reason;
-  if (dlss_placement && dlss_idle_) {
+  // Split chain: a later Present group runs on while the game's DLSS idles, so NR is not waiting then.
+  if (dlss_placement && dlss_idle_ && !PresentGroupNative()) {
     placement_note = (status.session.state == nr::SessionState::OFF ? "Waiting for DLSS: NR memory released" : "Waiting for DLSS: releasing NR memory");
   }
   // Batch 3 review, minor 2: while this device's own Present path still holds NR, the native placement is taking it over (one grace period, design R86):
@@ -1327,6 +1665,16 @@ ContextStatus VkDlssContext::Status() const {
   });
   status.nr_applied = nr_applied_;
   status.passes_run = passes_run_;
+  if (chain_.Split()) {
+    // Split chain (as Direct3D 12's): the card and Details count every group's passes, a group whose latest recording skipped none, and a group's latest
+    // recording at most its own passes (it may predate a chain change).
+    status.passes_run = 0u;
+    for (uint32_t index = 0u; index < chain_.group_count; ++index) {
+      const StageGroup& group = chain_.groups[index];
+      const StageState& stage = stages_[static_cast<size_t>(group.stage)];
+      status.passes_run += (stage.nr_applied ? std::min(stage.passes_run, group.count) : 0u);
+    }
+  }
   status.frame = (before_upscaling ? frame_size_ : output_size_);  // Before upscaling: the render size NR works on, not DLSS's output
   if (native_present) {
     // Plan 19: as Direct3D 12's Present path reports itself.
@@ -1339,6 +1687,9 @@ ContextStatus VkDlssContext::Status() const {
   status.device_lost = device_lost_;
   status.placement = placement_.placement;
   status.placement_line = FormatPlacementLine(placement_, main_snapshot_, true);
+  if (before_upscaling && main_feature_ == NVSDK_NGX_Feature_RayReconstruction) {
+    status.placement_line += " (Ray Reconstruction's input)";  // split-chain design 11: NR runs before RR denoises and upscales
+  }
   status.dlss_seen = dlss_seen_;
   status.dlss_latch_tripped = dlss_latch_tripped_;
   status.work = work_size_;  // Plan 14: both placements settle a work size (SettleLayout)
@@ -1374,6 +1725,23 @@ ContextStatus VkDlssContext::Status() const {
   }
   if (nr_applied_ && pipeline_) {
     status.exposure_line = sources::ExposureLine(pipeline_->LastExposure());  // Plan 17
+  }
+  // Split chain (design 6.2): the chain line and note, and each group's latest recording.
+  std::array<nr::Size, STAGE_COUNT> canvases = {};
+  for (size_t stage = 0u; stage < STAGE_COUNT; ++stage) {
+    canvases[stage] = stages_[stage].canvas;
+  }
+  if (chain_.Split()) {
+    status.chain_line = std::format("Chain: {}", FormatChainLine(chain_, canvases));
+  }
+  status.chain_note = chain_.note;
+  status.group_count = chain_.group_count;
+  for (uint32_t index = 0u; index < chain_.group_count; ++index) {
+    const StageGroup& group = chain_.groups[index];
+    const StageState& stage = stages_[static_cast<size_t>(group.stage)];
+    status.groups[index] = {.stage = group.stage, .first = group.first, .count = group.count, .nr_applied = stage.nr_applied,
+                            .passes_run = stage.passes_run, .skip_reason = stage.skip_reason, .motion_source = stage.motion_source,
+                            .work = stage.work, .canvas = stage.canvas};
   }
   status.motion_source = motion_source_;
   if (native_present) {

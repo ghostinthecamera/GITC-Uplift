@@ -1,10 +1,19 @@
 #include "addon/live_facts.hpp"
 
+#include <algorithm>
+#include <array>
+
 #include "addon/placement_kind.hpp"
 #include "sources/motion_source.hpp"
 
 namespace uplift::addon {
 namespace {
+
+#if defined(_WIN64)
+static_assert(static_cast<uint32_t>(Stage::BEFORE_UPSCALING) == static_cast<uint32_t>(ui::SourcePick::BEFORE_UPSCALING)
+              && static_cast<uint32_t>(Stage::AFTER_DLSS) == static_cast<uint32_t>(ui::SourcePick::AFTER_DLSS)
+              && static_cast<uint32_t>(Stage::PRESENT) == static_cast<uint32_t>(ui::SourcePick::PRESENT));
+#endif
 
 // What the decided placement and the latest recording's provider say, for both overloads.
 void FillStageAndMotion(ui::SetupFacts* facts, Placement placement, sources::MotionSource motion_source, bool working) {
@@ -39,6 +48,10 @@ void FillPreference(ui::SetupFacts* facts, const ui::Settings& settings, bool ex
   facts->motion_auto = (settings.motion_vectors == ui::MotionVectorSource::AUTO);
   facts->preferred_resolution = settings.resolution_mode;
   facts->custom_scale = settings.resolution_scale;
+  facts->pass_count = settings.pass_count;
+  for (size_t index = 0u; index < settings.passes.size(); ++index) {
+    facts->stored_stages[index] = settings.passes[index].stage;
+  }
 }
 
 #if defined(_WIN64)
@@ -55,6 +68,19 @@ void FillRunning(ui::SetupFacts* facts, const ContextStatus& status, bool workin
   facts->frame = status.frame;
   facts->passes_run = status.passes_run;
   facts->passes_requested = status.session.passes_requested;
+  // Split chain (Task 3): where each pass runs, from the context's chain (Stage and SourcePick are both in chain order).
+  facts->chain.reset();
+  if (status.group_count > 0u) {
+    std::array<ui::SourcePick, ui::MAX_PASSES> chain = {};
+    for (uint32_t group = 0u; group < status.group_count; ++group) {
+      const ContextStatus::Group& stage_group = status.groups[group];
+      const auto end = (group + 1u == status.group_count ? ui::MAX_PASSES : std::min(stage_group.first + stage_group.count, ui::MAX_PASSES));
+      for (uint32_t pass = stage_group.first; pass < end; ++pass) {
+        chain[pass] = static_cast<ui::SourcePick>(stage_group.stage);
+      }
+    }
+    facts->chain = chain;
+  }
 }
 #endif
 

@@ -28,14 +28,18 @@ struct StageProblems {
 // v2 design §3.4. `dlss_unavailable_reason` is empty when a DLSS placement can run this session.
 // `dlss_seen`: an evaluate of a main handle reached this device. Auto stays with DLSS once seen (an
 // idle game drains instead of flipping back), and DLSS forced never falls back to Present.
-// `before_upscaling`: PreUpscale is on and the main handle is DLSS-SR (v2 design §3.9); every AFTER_DLSS
-// choice below becomes BEFORE_UPSCALING instead (Ray Reconstruction keeps NR after DLSS).
+// `before_upscaling`: PreUpscale is on and the main handle may run before upscaling (v2 design §3.9, PreSrFeatureAllowed); every AFTER_DLSS
+// choice below becomes BEFORE_UPSCALING instead (on the Direct3D 11 bridge Ray Reconstruction keeps NR after DLSS).
 // Plan 18: `problems`: a stage with a problem is never chosen; Before upscaling falls to After DLSS, Auto to Present, and DLSS forced says the problem.
 // Plan 18 Task 12: `dlss_off`: the game switched its DLSS off on this device after DLSS ran there (DlssOffLatch: it released its last DLSS feature, or on
 // Direct3D 11 shut NGX down): Auto and DLSS forced both run at Present (a pause keeps a live feature, so it still waits). A reason that makes the DLSS
 // placements unavailable says itself first.
 [[nodiscard]] PlacementChoice ChoosePlacement(ui::PlacementSource source, std::string_view dlss_unavailable_reason, bool dlss_seen,
                                               bool before_upscaling = false, const StageProblems& problems = {}, bool dlss_off = false);
+// Split-chain design 11 (the owner, 2026-10-15: always allowed, no switch): whether Before upscaling may run on a main DLSS feature. SuperSampling always;
+// Ray Reconstruction on Direct3D 12 and Vulkan (NR works on RR's colour input, before RR denoises and upscales it); the Direct3D 11 bridge keeps
+// SuperSampling only (decision Q7). Pure.
+[[nodiscard]] bool PreSrFeatureAllowed(NVSDK_NGX_Feature feature, ngx_hooks::NgxApi api);
 // Plan 18 Task 12: the DLSS-off fallback's INFO lines, one per fallback per device (fix round 1, M-6: only when a DLSS stage really fell back, never with
 // Source = Present): the off line, and the "on again" line with what `resumed` (the placement the preference returns to) runs: "DLSS is on again on this
 // device: After DLSS resumes" ("Before upscaling resumes", "NR stays at Present", or "NR stays off (why)").
@@ -98,6 +102,9 @@ struct PresentMotionGates {
   bool native_present = false;                        // Plan 19: NR at Present runs natively (no bridge involved), which binds the copies as the bridge does
   bool same_queue = false;                            // the game presents on the effect runtime's queue (else the bridge waits a GPU frame inside the present event)
   bool native_wants_nr = false;                       // the native context runs a DLSS placement, which binds DLSS's vectors directly
+  // Split chain (Task 5): the native context's chain also has a later group at Present (pass 1 at a DLSS stage), which binds these copies: they are
+  // wanted then, as for pass 1 at Present.
+  bool native_present_group = false;
   bool native_can_copy = true;                        // the native context, if there is one, has not been shut down, dropped or torn down
   bool problem = false;                               // a native problem, or a reason the DLSS placements are off
   bool dlss_motion = false;                           // the motion preference is DLSS (MotionVectors Auto or DLSS)
@@ -139,6 +146,15 @@ enum class VkNrStream : uint8_t {
 // True when the Session, loaded for `loaded_for` and not OFF, must go through OFF before NR runs for `wanted`. Pure.
 [[nodiscard]] inline bool VkStreamNeedsReload(VkNrStream loaded_for, VkNrStream wanted, bool session_off) {
   return !session_off && loaded_for != VkNrStream::NONE && wanted != VkNrStream::NONE && wanted != loaded_for;
+}
+// Split chain (Task 5, decision Q3): the streams a native chain records into, one bit per stream (NONE has none). A one-group chain's set is its one stream.
+using VkStreamSet = uint8_t;
+[[nodiscard]] constexpr VkStreamSet VkStreamBit(VkNrStream stream) {
+  return (stream == VkNrStream::NONE ? VkStreamSet{0u} : static_cast<VkStreamSet>(1u << static_cast<uint32_t>(stream)));
+}
+// VkStreamNeedsReload for the chain's set: any change of it (a stream joins or leaves) reloads the Session from OFF, never a warm per-group rebuild. Pure.
+[[nodiscard]] inline bool VkStreamsNeedReload(VkStreamSet loaded_for, VkStreamSet wanted, bool session_off) {
+  return !session_off && loaded_for != 0u && wanted != 0u && wanted != loaded_for;
 }
 // Review 97f99e3 (Important 2): NGX may set a feature up at its first evaluate from the motion input it is handed, so the live features never see a
 // different kind of motion input from the one they were first evaluated with: what NGX is handed as motion vectors, in kind, format and resolution.
@@ -247,6 +263,8 @@ struct VkRouteChoice {
 // stored, only while VulkanNr is Direct3D 12 or Helper, or a failure stops native NR inside the game's DLSS too (what the device lacks, the game's NGX
 // shutdown, a loss, an abandon). A failure of native Present alone (its command buffers, the present queue's timeouts, the VulkanNativeNr latch) moves
 // Present along the chain and leaves the DLSS stages native and selectable.
+// Split chain (Task 5): `dlss_stage_wanted` is the chain's: some group runs at a DLSS stage natively, which is pass 1's group (groups run in stage order, so
+// a chain with one at a DLSS stage has pass 1 there). Either native owner is the NATIVE holder: a split adds no hand-over.
 struct VkStageFacts {
   VkNrRoute route = VkNrRoute::NATIVE;                  // where NR at Present runs (never decides the stages: kept for the matrix)
   ui::VulkanNrMode setting = ui::VulkanNrMode::NATIVE;  // VulkanNr

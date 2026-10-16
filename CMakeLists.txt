@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(uplift VERSION 1.2.4 LANGUAGES C CXX)
+project(uplift VERSION 1.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -265,6 +265,7 @@ add_library(uplift_addon_core STATIC
   src/addon/device_context.cpp
   src/addon/frame_config.cpp
   src/addon/placement.cpp
+  src/addon/chain_plan.cpp
   src/addon/nr_claim.cpp
   src/addon/environment.cpp
   src/addon/swapchain_selector.cpp

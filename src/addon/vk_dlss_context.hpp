@@ -17,6 +17,7 @@
 
 #include "addon/device_context.hpp"
 #include "addon/placement.hpp"
+#include "addon/vk_stage_work.hpp"
 #include "ngx_hooks/dlss_capture.hpp"
 #include "nr/host.hpp"
 #include "nr/session.hpp"
@@ -168,8 +169,9 @@ class VkDlssContext {
   // Key decision c: the end of the hooked evaluate. vkCmdSetEvent(ALL_COMMANDS) for the token this call opened on `list`, if one is open.
   void EndEvaluate(VkCommandBuffer buffer, VkListState& list);
   // The command buffer's events (the add-on's lock): its first submission, a submission again without a reset (`tokens` in recording order), and its
-  // reset or destroy (also a stale VkListState replaced at init_command_list: batch 1 review, minor 3).
-  void Executed(std::span<const uint64_t> tokens);
+  // reset or destroy (also a stale VkListState replaced at init_command_list: batch 1 review, minor 3). Split chain (Task 5): `queue` is where the buffer
+  // goes, which decides whether a later Present group may run beside its DLSS-stage NR (no GPU waits).
+  void Executed(std::span<const uint64_t> tokens, void* queue);
   void Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue);
   void Recycle(std::span<const uint64_t> tokens);
   // Batch 3 review I-1: the game is about to shut the NGX core down for this device (NVSDK_NGX_VULKAN_Shutdown1, Streamline's slShutdown), which
@@ -194,6 +196,11 @@ class VkDlssContext {
 
   [[nodiscard]] ContextStatus Status() const;
   [[nodiscard]] nr::SessionState NrState() const { return (session_ ? session_->State() : nr::SessionState::OFF); }
+  // Split chain (Task 5): the current chain (BeginFrame's) has a group at `stage`. With pass 1 at a DLSS stage, a group at Present makes the add-on ask for
+  // the Present motion copies (PresentMotionGates::native_present_group).
+  [[nodiscard]] bool RunsAt(Stage stage) const { return GroupAt(stage).has_value(); }
+  // Split chain (Task 5): the recordings that applied NR at each stage (Stage order) so far: the transitions stress test's per-group counts.
+  [[nodiscard]] const std::array<uint64_t, STAGE_COUNT>& StageRecordings() const { return stage_recordings_; }
   [[nodiscard]] bool DlssSeen() const { return dlss_seen_; }
   // The placement is a DLSS one (DLSS seen, Source = DLSS, no reason against): NrClaim's "dlss_seen" for this context's identity. After the game's
   // NGX shutdown it still is (batch 3 review I-1), so the Present path never loads NR into a game that is shutting down; Setup then greys Present too, with
@@ -232,19 +239,40 @@ class VkDlssContext {
   void UpdateSession(std::chrono::steady_clock::time_point now);
   void NotePlacementChange();
   void SetOutputProblem(std::string problem);
-  // Plan 19: NR at Present runs natively here this frame (the placement is Present and the add-on chose the native route).
+  // Plan 19: NR at Present runs natively here this frame (the placement is Present and the add-on chose the native route). Split chain: pass 1's group.
   [[nodiscard]] bool NativePresent() const { return placement_.placement == Placement::PRESENT && config_.vk_native_present; }
-  // Plan 19: this present's frame for native NR at Present: why it cannot take NR (the copy access, the format, a blit the driver lacks), else its encoding
-  // and settled work layout.
-  void ResolvePresentFrame(std::chrono::steady_clock::time_point now);
+  // Split chain (Task 5): a group of the chain runs at Present natively here this frame: pass 1's (NativePresent), or a later one behind a DLSS stage.
+  [[nodiscard]] bool PresentGroupNative() const { return config_.vk_native_present && GroupAt(Stage::PRESENT).has_value(); }
+  // Plan 19: this present's frame for native NR at Present: why it cannot take NR (the copy access, the format, a blit the driver lacks), else its encoding.
+  // Split chain: read for pass 1 at Present, and for a later group only while some pass is stored at another stage (its "cannot run" fact).
+  void ResolvePresentFrame();
   void SetPresentProblem(std::string problem);
   // Plan 19: `copy_format` and RGBA16F can be blitted between on this GPU (optimal tiling), asked of the driver once per format.
   bool Blittable(VkFormat copy_format);
-  // Plan 19: a native Present frame that goes without NR, with `reason` (static text).
-  sources::PipelineResult SkipPresent(std::string_view reason);
+  // Plan 19: a native Present frame that goes without NR, with `reason` (static text). Split chain: the Present group `group`'s; a later group owes a reset.
+  sources::PipelineResult SkipPresent(std::string_view reason, uint32_t group = 0u);
   // Review 97f99e3 (Important 2): whether a recording may hand NGX `shape` as its motion input (VkMotionCheck). Empty: yes; otherwise the skip reason (static
-  // text), and after VK_MOTION_RELOAD_RECORDINGS of them the next present reloads the Session from OFF.
-  std::string_view CheckMotion(const VkMotionShape& shape);
+  // text), and after VK_MOTION_RELOAD_RECORDINGS of them the next present reloads the Session from OFF. Split chain: per stage group (`stage`'s).
+  std::string_view CheckMotion(Stage stage, const VkMotionShape& shape);
+  // Split chain (Task 5, design 3.1, 6.1): the frame's chain from pass 1's placement, the stored "Runs at" and why each stage cannot run now (Q6: Present
+  // whose route fell back off Native), right after the placement (BeginFrame): logged once when it splits or changes, the Session's groups set every frame,
+  // and a set no group uses any more retired.
+  void UpdateChain();
+  // The stage group of the current chain at `stage` (its index in chain order; 0 is pass 1's), if one is.
+  [[nodiscard]] std::optional<uint32_t> GroupAt(Stage stage) const;
+  // Decision Q5a: "Keep faces here" for a later group at `stage`.
+  [[nodiscard]] bool LaterStageKeepsFaces(Stage stage) const;
+  // This route splits and some pass 2..N below the pass count is stored at another stage than Same (Direct3D 12's fix round 1, M3).
+  [[nodiscard]] bool SplitStored() const;
+  // Why a later group the Session will not run skips, as Session::Evaluate says it: "budget", or nothing for the Defaults view.
+  [[nodiscard]] std::string_view SliceSkipReason(uint32_t group) const;
+  // Decision Q3: the command buffers the chain records into (a VkStreamBit per group: Present natively in Uplift's own, the DLSS stages in the game's).
+  [[nodiscard]] VkStreamSet ChainStreams() const;
+  // Split chain, no GPU waits (fix round 1, I1, as Direct3D 12's): whether every earlier DLSS-stage recording of a split that went to another queue than the
+  // effect queue has completed (VkStageWork::Done, a CPU check, never a wait). A later Present group skips its frame otherwise.
+  [[nodiscard]] bool StageWorkDone() const;
+  // A stage group's latest recording, for Status's groups, the card's pass count and StageRecordings (the caller sets pass 1's status above them).
+  void NoteGroupResult(Stage stage, const sources::PipelineResult& result);
   // What both DLSS placements take from one evaluate: the target (`resource`, `region`, the resolved encoding, the strengths, the game's exposure) and NR's inputs
   // with the game's motion vectors in place.
   struct ReadFrame {
@@ -258,19 +286,23 @@ class VkDlssContext {
   bool OpenToken(VkListState& list);
   // A recording that put nothing on the buffer: its token goes back unsubmitted.
   void DropOpenToken(VkListState& list);
-  // The size the Session is told each frame: the canvas for Before upscaling, DLSS's output region otherwise.
+  // The size the Session is told each frame for pass 1's group: the canvas for Before upscaling, DLSS's output region otherwise.
   [[nodiscard]] nr::Size SessionFrameSize() const;
   // Plan 14: the look stage, the colour fixes and passes 2..10 for the recording about to be made, with the frame time since the last one (the stabiliser's).
-  void ApplyLookConfig(std::chrono::steady_clock::time_point now);
-  // Plan 14 Task 8, as DeviceContext::SettleLayout: the settled work image (and Before upscaling's floor canvas) for `output` at the Resolution mode; the
-  // Session hears the canvas.
-  sources::WorkLayout SettleLayout(nr::Size output, bool before_upscaling, std::chrono::steady_clock::time_point now);
+  // Split chain: of stage group `group`, with Result shaping on the last group that runs only (decision Q5b) and Keep faces where it protects that group
+  // (Q5a).
+  void ApplyLookConfig(std::chrono::steady_clock::time_point now, uint32_t group);
+  // Plan 14 Task 8, as DeviceContext::SettleLayout: the settled work image (and Before upscaling's floor canvas) for `output` at `stage`; the Session hears
+  // the canvas. Split chain (design 4): pass 1's group at Setup's Resolution, a later group at its stage's own.
+  sources::WorkLayout SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now);
   // VK_ERROR_DEVICE_LOST: the latch rule (within 10 s of a recording in a game command buffer), the card's text, then Drop(true).
   void NoteDeviceLost(std::chrono::steady_clock::time_point now);
   // Device loss (`device_lost`: Session::OnDeviceLost) or abandon (the runtime's patches restored, no NGX call): the Session, the host and the
   // pipeline are leaked, and the completion abandoned (no event or semaphore destroyed). Idempotent.
   void Drop(bool device_lost);
-  [[nodiscard]] bool BeforeUpscaling() const { return config_.pre_upscale && main_feature_ == NVSDK_NGX_Feature_SuperSampling; }
+  [[nodiscard]] bool BeforeUpscaling() const {
+    return config_.pre_upscale && PreSrFeatureAllowed(main_feature_, ngx_hooks::NgxApi::VULKAN);
+  }
 
   vk::NrFunctions functions_;
   VkDevice device_;
@@ -296,17 +328,46 @@ class VkDlssContext {
   ngx_hooks::ResetMerger reset_merger_;
   std::optional<std::chrono::steady_clock::time_point> last_main_evaluate_;
   std::optional<std::chrono::steady_clock::time_point> last_game_list_recording_;
-  std::optional<std::chrono::steady_clock::time_point> last_look_recording_;  // Plan 14: the stabiliser's frame time
+  std::array<std::optional<std::chrono::steady_clock::time_point>, STAGE_COUNT> last_look_recordings_;  // Plan 14: the stabiliser's frame time, by group
   nr::Size output_size_;                          // the latest evaluate's output region
   VkFormat output_format_ = VK_FORMAT_UNDEFINED;  // and its view format
   std::vector<VkFormat> unbuildable_formats_;     // formats whose pipelines could not be built: never tried again
   bool pre_sr_unbuildable_ = false;               // Before upscaling's pipelines could not be built: never tried again
   // Before upscaling (v2 design §3.8, §3.9): the render region the game's Color holds; both placements (Plan 14): the settled work image keyed on, and the
-  // canvas NR runs at.
-  sources::WorkSizeSettle settle_;
+  // canvas NR runs at (pass 1's group's).
   nr::Size frame_size_;
   nr::Size work_size_;
   nr::Size canvas_size_;
+  // Split chain (Task 5, design 3.4): what each stage (Stage order) keeps of its own: its settled work size, its latest recording's result (Status's
+  // groups), its owed reset (a frame that did not apply NR: the next that does starts NR's history afresh; Plan 3, Minor 4), and (review 97f99e3,
+  // Important 2) the motion input its features were first evaluated with in this load and the different ones in a row since.
+  struct StageState {
+    sources::WorkSizeSettle settle;
+    nr::Size work;
+    nr::Size canvas;
+    bool nr_applied = false;
+    uint32_t passes_run = 0u;
+    std::string_view skip_reason;
+    sources::MotionSource motion_source = sources::MotionSource::NONE;
+    bool reset_owed = false;
+    std::optional<VkMotionShape> motion;
+    uint32_t motion_mismatches = 0u;
+  };
+  std::array<StageState, STAGE_COUNT> stages_;
+  std::array<uint64_t, STAGE_COUNT> stage_recordings_ = {};  // StageRecordings
+  // Split chain (Task 5): UpdateChain's; groups[0] is pass 1's, at `placement_`. `slices_` are the Session's, per group: the last runs to the end of the
+  // passes, so a one-group chain is exactly the single chain of before.
+  ChainPlan chain_;
+  std::array<nr::StageSlice, STAGE_COUNT> slices_ = {};
+  bool chain_passes_moved_ = false;   // this frame's chain moved a pass to another stage while its streams stayed (a reload, as a stream change's)
+  std::string present_cannot_;        // why a later group cannot run at Present (design 6.1, Q6); empty: it can
+  std::optional<bool> before_reset_;  // this evaluate's Before upscaling group's filtered reset, for the After DLSS group behind it
+  bool present_reset_owed_ = false;   // a later Present group skipped a frame: its next recording restarts its history
+  // Fix round 1 (I1) on Vulkan: the DLSS-stage recordings of a split and the queues they went to (fix round 2, I3: VkStageWork, unit-tested), the effect
+  // queue (BeginFrame's), and the other queue that keeps a later group off Present (logged once per change).
+  VkStageWork stage_work_;
+  void* effect_queue_ = nullptr;
+  const void* other_dlss_queue_ = nullptr;
   nr::SessionState logged_state_ = nr::SessionState::OFF;
   uint32_t passes_run_ = 0u;
   uint32_t trace_frames_ = 0u;
@@ -315,7 +376,6 @@ class VkDlssContext {
   float motion_scale_y_ = 1.f;
   bool nr_applied_ = false;
   bool last_motion_vectors_missing_ = false;
-  bool reset_owed_ = false;  // a frame that did not apply NR: the next one that does starts NR's history afresh (Plan 3, Minor 4)
   bool dlss_seen_ = false;
   // Plan 18 Task 12: the game switched its DLSS off here (FrameConfig::dlss_released held long enough, DLSS seen, the DLSS placements available): Source =
   // DLSS runs at Present from that present until the next main evaluate shows DLSS on again. Frozen once the context stops (the game's NGX shutdown, a loss,
@@ -383,16 +443,13 @@ class VkDlssContext {
   std::optional<std::chrono::steady_clock::time_point> pending_stop_since_;
   uint32_t pending_stop_presents_ = 0u;
   std::function<void()> before_present_load_;  // T6 fix round (M-1): VkContextSetup::before_present_load
-  // In-game round 1 (bug A): the command buffers the Session's NR was loaded for, and a reload through OFF in progress because the placement moved to the
-  // other ones (VkStreamNeedsReload).
-  VkNrStream session_stream_ = VkNrStream::NONE;
+  // In-game round 1 (bug A): the command buffers the Session's NR was loaded for, and a reload through OFF in progress because the placement moved to
+  // other ones (VkStreamNeedsReload). Split chain (decision Q3): the set of them the chain uses; any change of it reloads (VkStreamsNeedReload).
+  VkStreamSet session_streams_ = 0u;
   bool stream_reload_ = false;
   bool own_drain_waited_ = false;  // transitions: Uplift's own command buffers were waited for in this drain from Present (once)
-  // Review 97f99e3 (Important 2): the motion input this load's features were first evaluated with, different ones in a row since, and why the next present
-  // reloads the Session (empty: no reason).
-  std::optional<VkMotionShape> session_motion_;
+  // Review 97f99e3 (Important 2): why the next present reloads the Session (empty: no reason); the motion each stage's features first saw is in stages_.
   nr::Size dlss_motion_size_;  // stress round: the latest readable DLSS motion region (the Present copies' size)
-  uint32_t motion_mismatches_ = 0u;
   std::string input_reload_reason_;
   uint32_t queue_family_ = UINT32_MAX;  // the effect queue's family, to make the ring again for Present
   bool ring_failed_ = false;            // the ring could not be made again: NR at Present cannot run here

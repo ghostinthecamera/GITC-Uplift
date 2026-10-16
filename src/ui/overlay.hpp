@@ -34,6 +34,7 @@ struct OverlayView {
   std::string motion_line;     // "Motion vectors: DLSS (the game's own, scale 1 x 1)"; never empty
   std::string work_line;       // "Working at 1920x1080 of 3840x2160 (Edge-aware)"; empty before a frame
   std::string exposure_line;   // Plan 17: "Input exposure: metered (the game's exposure was 6.3 stops off)"; empty when none is used
+  std::string chain_line;      // split chain: "Chain: pass 1 before upscaling (960x540), 2 at Present (1920x1080)", and the chain's note; empty otherwise
   std::string mask_note;       // "NR mask: UPLIFT_MASK (1920x1080)", or why not
   std::string frame_generation_warning;  // shown under Pass count when it applies; empty otherwise
   // ui-review.md §4.1: why no DLSS placement can run this session (bridged, hooks, ReShade version, the

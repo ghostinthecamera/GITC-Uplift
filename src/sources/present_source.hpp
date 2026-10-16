@@ -23,7 +23,7 @@ class PresentSource {
 
   bool Initialize(std::string* error);
   PresentResult Record(ID3D12GraphicsCommandList* list, const PresentTarget& target, const nr::Controls& controls,
-                       bool reset_hint, const WorkLayout& layout = {});
+                       bool reset_hint, const WorkLayout& layout = {}, const ChainPart& part = {});
   void ReleaseIntermediates();
   [[nodiscard]] uint64_t HeldBytes() const;
   [[nodiscard]] NrPipeline& Pipeline() { return pipeline_; }

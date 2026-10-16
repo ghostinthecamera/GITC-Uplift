@@ -60,8 +60,10 @@ class Budget {
   // holds for this chain, each at its own size) + the first-use cost while it is pending.
   // `held_bytes`: allocations that stay part of the plan and are already inside info.usage (live
   // features being kept, the caller's surfaces).
+  // Split chain (design 3.2): `reserve_bytes` stays free for other stage groups' passes not made yet (an earlier stage that has not run): part of the need,
+  // never given to these passes.
   [[nodiscard]] FitResult Fit(Size work, uint32_t requested_passes, uint64_t surface_bytes, const MemoryInfo& info,
-                              uint64_t held_bytes, bool first_use_pending) const;
+                              uint64_t held_bytes, bool first_use_pending, uint64_t reserve_bytes = 0u) const;
   // `measured_feature_bytes`: the real (DXGI-equivalent) cost of one new
   // feature, e.g. its stats delta minus StatsOvercountBytes() plus the 8 B/px
   // capacity buffer that create-time stats omit (spike E6).

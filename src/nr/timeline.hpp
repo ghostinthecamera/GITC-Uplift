@@ -130,6 +130,19 @@ class Timeline {
   // the same address keeps counting up from it.
   void ForgetQueue(ID3D12CommandQueue* queue);
   [[nodiscard]] size_t OutstandingTokens() const;
+  // Split chain (fix round 1, I1: two NR features of one runtime never run at once, and never a GPU wait that could deadlock): `token` is a DLSS-stage NR
+  // recording's. The queue its list is submitted to is remembered for StageQueueOtherThan, and StageWorkDone checks it. Fix round 2 (I1): a token marked
+  // after its list was submitted names that queue at once; (m1) a list carrying one, executed again (Resubmit), marks its fresh token on its queue too.
+  void MarkStageToken(uint64_t token);
+  // The first queue other than `queue` a marked token's list was submitted to, ever; null when none was.
+  [[nodiscard]] ID3D12CommandQueue* StageQueueOtherThan(ID3D12CommandQueue* queue) const;
+  // Whether every marked token up to `through` whose list went to a queue other than `queue` has completed on the GPU (no wait of any kind). One on `queue`
+  // itself runs in queue order; a RECORDED one is not on the GPU yet (StageQueueOtherThan reports where it goes once submitted), but counts as not done
+  // until some marked token has been seen submitted (where they go is unknown before that).
+  [[nodiscard]] bool StageWorkDone(uint64_t through, ID3D12CommandQueue* queue) const;
+  // Split chain (Task 5, Vulkan): whether `token` alone is complete (TokensComplete for one token): pruned, dropped or never issued here, its event set
+  // (a probe's), or its stamp passed on its queue. Never waits.
+  [[nodiscard]] bool TokenComplete(uint64_t token) const;
 
  private:
   struct Pending {
@@ -149,6 +162,7 @@ class Timeline {
     uint64_t submit_frame = 0u;
     std::chrono::steady_clock::time_point submit_time;
     uint64_t fence_value = 0u;
+    bool stage = false;  // split chain: MarkStageToken's
   };
 
   [[nodiscard]] uint64_t LastToken() const;
@@ -185,6 +199,10 @@ class Timeline {
   std::vector<Reexecution> reexecutions_;      // guarded by tokens_mutex_; pruned by Poll once each fresh token completes
   std::atomic<bool> stuck_warned_{false};      // one stuck-token WARN per Timeline's lifetime (one per device)
   std::function<bool(uint64_t)> token_probe_;  // Plan 13; guarded by tokens_mutex_; empty on D3D12
+  std::vector<ID3D12CommandQueue*> stage_queues_;  // split chain: every queue a marked token's list was submitted to; guarded by tokens_mutex_
+  // Fix round 2 (m1): the first tokens of the newest lists submitted with a marked token (Resubmit's `first_token`), at most STAGE_LISTS of them.
+  static constexpr size_t STAGE_LISTS = 64u;
+  std::vector<uint64_t> stage_lists_;
 };
 
 }  // namespace uplift::nr

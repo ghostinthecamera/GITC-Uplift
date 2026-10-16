@@ -107,6 +107,8 @@ DlssHandoff RunDlssStage(D3D11Bridge& bridge, addon::DeviceContext& context, add
       .motion = motion,
       .motion_region = ResolveRegion11(motion, frame.motion_region),
       .exposure = nr::D3D11ResourceOf(frame.exposure_texture),
+      // Split chain (Task 4): a Before + After split runs both hand-offs every evaluate, so each keeps its own share.
+      .keep_other_stage = (context.RunsAt(addon::Stage::BEFORE_UPSCALING) && context.RunsAt(addon::Stage::AFTER_DLSS)),
   };
   BridgeDlssHost host;
   sources::PipelineResult recorded;
@@ -125,6 +127,13 @@ DlssHandoff RunDlssStage(D3D11Bridge& bridge, addon::DeviceContext& context, add
     } else {
       context.DropTokens(host.tokens);
     }
+  }
+  // Split chain (fix round 2, I2): three groups make three private lists per frame, beyond what 8 allocators cover at DXGI's frame latency; a busy skip
+  // while split says so too. The ring grows once, lazily; one group never grows it.
+  const int stages = (context.RunsAt(addon::Stage::BEFORE_UPSCALING) ? 1 : 0) + (context.RunsAt(addon::Stage::AFTER_DLSS) ? 1 : 0)
+                     + (context.RunsAt(addon::Stage::PRESENT) ? 1 : 0);
+  if (stages == 3 || (stages > 1 && handoff.skipped == DlssSkip::BUSY)) {
+    bridge.GrowRingForSplit();
   }
   if (handoff.skipped == DlssSkip::UNSUPPORTED_FORMAT) {
     context.NoteStageProblem(work, handoff.problem);

@@ -178,6 +178,13 @@ reason.
 - **Multisampled images (MSAA):** DX9 and OpenGL need the `Uplift` technique turned on. DX10 and 32-bit DX12 can't use MSAA with NR:
   turn it off in the game.
 
+### Passes at different stages
+
+With **Pass count** 2 or more, each Pass section starts with **Runs at**: where in the game's frame that pass runs (by default, with the
+pass before). Passes before upscaling run at the game's render resolution, so they cost less: for example, pass 1 Before upscaling and
+pass 2 at Present. This works in native DX12 and DX11 DLSS games, and in Vulkan games with **Vulkan NR at Present** on Native;
+elsewhere every pass runs at one stage. More in [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide#passes-at-different-stages).
+
 ### Settings in ReShade.ini
 
 Settings live in the game's `ReShade.ini`, under `[Uplift]`. Most are in the Uplift tab; these are the ones you may need by hand:
@@ -196,6 +203,10 @@ Settings live in the game's `ReShade.ini`, under `[Uplift]`. Most are in the Upl
 | `GraceSeconds` | `5` | **Grace (seconds)** (Advanced): how long NR keeps its memory after you switch it off, so a quick toggle doesn't reload it. |
 | `VramCheck` | `0` | **Video memory check** (Advanced): `0` Careful leaves the game its budget and pauses NR when the game needs the memory back; `1` Relaxed lets NR go about 1 GB past the game's budget; `2` Off never checks, like other DLSS-NR add-ons. Relaxed and Off can stutter in games that really use all their video memory. |
 | `KeepFaces` | `0` | **Keep faces** (Look): `1` keeps NR's lighting and shading on characters, but stops NR reshaping their faces. NR runs one more time per frame, and needs about 1 GB more video memory at 4K. |
+| `Pass2Stage` ... `Pass10Stage` | `0` | **Runs at** (each Pass section): `0` the same stage as the pass before, `1` Before upscaling, `2` After DLSS, `3` Present. A pass never runs before the pass before it, and a stage that can't run right now uses the nearest one that can. |
+| `ResolutionAfterDlss`, `ResolutionPresent` | `0` | **Resolution at After DLSS** / **at Present**: the size for the passes at that stage when pass 1 runs earlier. `0` Full, `1` Quality, `2` Balanced, `3` Performance, `4` Match game, `5` Custom. |
+| `ResolutionScaleAfterDlss`, `ResolutionScalePresent` | `100` | **Custom scale** for those, 25 to 100 (%). |
+| `KeepFacesAfterDlss`, `KeepFacesPresent` | `0` | **Keep faces here**: `1` also protects faces at that stage while Keep faces is on. One more NR run per frame. |
 | `FaceProtection` | `0` | **Face protection** (Look), 0 to 1: how much of NR's fine structure faces still get. `0` leaves faces as the game drew them; `1` lets NR's structure through. |
 | `LightingScale` | `2.5` | **Lighting scale (% of height)** (Look), 0.5 to 10: on characters, NR's change broader than this counts as lighting and is kept. Larger keeps only the broadest lighting; smaller keeps more of NR's change on faces. |
 | `ShowFaceMask` | `0` | **Show the face mask** (Advanced): `1` tints what Keep faces protects in magenta, while you tune it. |

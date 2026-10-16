@@ -80,11 +80,13 @@ bool D3D11Bridge::EnsureShared(Shared* shared, std::optional<ShareFailure>* fail
     return false;
   }
   failure->reset();
+  ++dlss_shares_made_;
   return true;
 }
 
 void D3D11Bridge::ReleaseDlss() {
   Retire(&dlss_image_);
+  Retire(&dlss_pre_image_);
   Retire(&dlss_motion_);
   Retire(&dlss_exposure_);
   Retire(&dlss_swap_);
@@ -108,19 +110,28 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
     ++busy_skips_;  // this evaluate goes without NR rather than waiting
     return {.skipped = DlssSkip::BUSY};
   }
+  // Split chain (Task 4): each DLSS stage has its own share. Unless the chain runs both, the other stage's go first, so one stage holds what it did.
+  Shared& shared_image = (after ? dlss_image_ : dlss_pre_image_);
+  std::optional<ShareFailure>& image_failure = (after ? dlss_image_failure_ : dlss_pre_image_failure_);
+  if (!input.keep_other_stage) {
+    if (after) {
+      Retire(&dlss_pre_image_);
+      Retire(&dlss_swap_);
+    } else {
+      Retire(&dlss_image_);
+    }
+  }
   // After DLSS: the region at (0, 0), written by NR's decode (a UAV). Before upscaling: the whole colour, so the region keeps its place, only read.
   const nr::Size image_size = (after ? nr::Size{input.region.width, input.region.height} : nr::Size{image->Width, image->Height});
   const D3D12_RESOURCE_FLAGS image_flags = (SHARE_FLAGS | (after ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE));
-  if (!EnsureShared(&dlss_image_, &dlss_image_failure_, image_size, format->uav_format, image_flags, format->bytes_per_pixel, "DLSS's image")) {
-    const HRESULT result = (dlss_image_failure_ ? dlss_image_failure_->result : E_FAIL);
+  if (!EnsureShared(&shared_image, &image_failure, image_size, format->uav_format, image_flags, format->bytes_per_pixel, "DLSS's image")) {
+    const HRESULT result = (image_failure ? image_failure->result : E_FAIL);
     // Fix round 1 (M-5): out of memory is not the format's; the stage is not greyed for the context's life (EnsureShared logged it once).
     if (!IsFormatRefusal(result)) return {.skipped = DlssSkip::SHARE_FAILED};
     return unsupported(result);
   }
-  if (after) {
-    Retire(&dlss_swap_);
-  } else if (!EnsureShared(&dlss_swap_, &dlss_swap_failure_, image_size, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 8u,
-                           "Before upscaling's colour")) {
+  if (!after && !EnsureShared(&dlss_swap_, &dlss_swap_failure_, image_size, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 8u,
+                              "Before upscaling's colour")) {
     return {.skipped = DlssSkip::SHARE_FAILED};
   }
   // DLSS's vectors and exposure cross when they can be shared; NR runs without them otherwise (EnsureShared logged why).
@@ -147,15 +158,16 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
   // The steps on this bridge's objects; RunBridgedFrame owns their order (D3D11 design §1.3).
   class Steps final : public BridgeSteps {
    public:
-    Steps(D3D11Bridge& bridge, const DlssHandoffInput& input, bool after, ID3D12Resource* motion12, ID3D12Resource* exposure12, const DlssRecorder& record)
-        : bridge_(bridge), input_(input), after_(after), motion12_(motion12), exposure12_(exposure12), record_(record) {}
+    Steps(D3D11Bridge& bridge, const DlssHandoffInput& input, Shared& image, bool after, ID3D12Resource* motion12, ID3D12Resource* exposure12,
+          const DlssRecorder& record)
+        : bridge_(bridge), input_(input), image_(image), after_(after), motion12_(motion12), exposure12_(exposure12), record_(record) {}
     bool used_mask = false;
     bool executed = false;  // the list was submitted: its surfaces are in use until the side's progress passes it
 
     void CopyIn() override {
       const nr::Rect& region = input_.region;
       const D3D11_BOX region_box = BoxOf(region);
-      bridge_.context11_->CopySubresourceRegion(bridge_.dlss_image_.d3d11.Get(), 0u, (after_ ? 0u : region.x), (after_ ? 0u : region.y), 0u, input_.image,
+      bridge_.context11_->CopySubresourceRegion(image_.d3d11.Get(), 0u, (after_ ? 0u : region.x), (after_ ? 0u : region.y), 0u, input_.image,
                                                 0u, &region_box);
       if (motion12_ != nullptr) {
         const D3D11_BOX motion_box = BoxOf(input_.motion_region);
@@ -180,7 +192,7 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
       if (list == nullptr) return false;
       const nr::Rect& region = input_.region;
       const DlssHandoffTargets targets = {
-          .image = bridge_.dlss_image_.d3d12.Get(),
+          .image = image_.d3d12.Get(),
           .region = (after_ ? nr::Rect{.x = 0u, .y = 0u, .width = region.width, .height = region.height} : region),
           .motion = motion12_,
           .motion_region = (motion12_ != nullptr ? nr::Rect{.x = 0u, .y = 0u, .width = input_.motion_region.width, .height = input_.motion_region.height}
@@ -225,24 +237,25 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
     void CopyOut() override {
       if (!after_) return;
       const D3D11_BOX box = BoxOf({.x = 0u, .y = 0u, .width = input_.region.width, .height = input_.region.height});
-      bridge_.context11_->CopySubresourceRegion(input_.image, 0u, input_.region.x, input_.region.y, 0u, bridge_.dlss_image_.d3d11.Get(), 0u, &box);
+      bridge_.context11_->CopySubresourceRegion(input_.image, 0u, input_.region.x, input_.region.y, 0u, image_.d3d11.Get(), 0u, &box);
     }
 
    private:
     D3D11Bridge& bridge_;
     const DlssHandoffInput& input_;
+    Shared& image_;
     bool after_;
     ID3D12Resource* motion12_;
     ID3D12Resource* exposure12_;
     const DlssRecorder& record_;
   };
-  Steps steps(*this, input, after, motion12, exposure12, record);
+  Steps steps(*this, input, shared_image, after, motion12, exposure12, record);
   const uint64_t in = ++last_value_;  // monotonic even when a step fails
   const uint64_t out = ++last_value_;
   const BridgedFrame frame = RunBridgedFrame(steps, in, out);
   // As Run's (final review C-1): stamped whenever the list was submitted, even when the D3D12 signal then failed, so nothing it reads is freed under it.
   if (steps.executed || frame.d3d12_signalled) {
-    dlss_image_.last_use = out;
+    shared_image.last_use = out;
     if (!after) {
       dlss_swap_.last_use = out;
     }

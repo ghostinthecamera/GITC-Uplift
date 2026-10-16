@@ -11,8 +11,11 @@ PipelineResult PreSrSource::Run(DlssFrameHost& host, const ngx_hooks::DlssFrame&
   const bool reset_was_owed = std::exchange(reset_owed_, true);
   ID3D12GraphicsCommandList* const list = host.NativeList();
   if (list == nullptr || frame.color == nullptr) return {.reason = "invalid input"};
-  // v2 design §3.9: Ray Reconstruction's input is still noisy, so NR stays after it.
-  if (frame.feature != NVSDK_NGX_Feature_SuperSampling) return {.reason = "Ray Reconstruction keeps NR after DLSS"};
+  // v2 design §3.9, split-chain design 11: DLSS-SR's colour input, or Ray Reconstruction's (the same NGX key). The device context chose the placement with
+  // PreSrFeatureAllowed: the Direct3D 11 bridge never reaches this with Ray Reconstruction (DecideBeforeEvaluate keeps DLSS-SR only).
+  if (frame.feature != NVSDK_NGX_Feature_SuperSampling && frame.feature != NVSDK_NGX_Feature_RayReconstruction) {
+    return {.reason = "not DLSS-SR or Ray Reconstruction"};
+  }
   if (!host.StateKnown()) return {.reason = "list state unknown"};
   if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return {.reason = "DLSS runs on a compute queue"};
   if (config.controls.intensity <= 0.f) return {.reason = "intensity 0"};  // exact pass-through: no swap either
@@ -26,7 +29,7 @@ PipelineResult PreSrSource::Run(DlssFrameHost& host, const ngx_hooks::DlssFrame&
     }
   }
   const PipelineResult result = RecordOnGameList(host, timeline_, config.restore, [&] {
-    return pipeline_.RecordPreSr(list, game.target, game.inputs, config.controls, config.layout);
+    return pipeline_.RecordPreSr(list, game.target, game.inputs, config.controls, config.layout, config.part);
   });
   if (result.nr_applied) {
     reset_owed_ = false;

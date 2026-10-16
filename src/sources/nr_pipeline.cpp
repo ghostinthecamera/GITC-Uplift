@@ -100,8 +100,12 @@ uint64_t NrPipeline::HeldBytes() const {
            : 0u);
   const uint64_t launchpad = (launchpad_motion_.texture ? launchpad_motion_.size.Pixels() * MOTION_BYTES_PER_PIXEL : 0u);
   const uint64_t ring = (dlss_present_motion_.texture ? dlss_present_motion_.size.Pixels() * MOTION_BYTES_PER_PIXEL : 0u);  // Plan 18 (fix round 1)
-  return (intermediates_.model_a ? intermediates_.bytes : 0u) + copies + launchpad + ring + look_.bytes + mask_.bytes
-         + (exposure_.state ? STATE_BYTES : 0u) + faces_.bytes;
+  // Split chain: every stage set's surfaces count (design 3.5).
+  uint64_t sets = 0u;
+  for (const StageSet& set : sets_) {
+    sets += (set.intermediates.model_a ? set.intermediates.bytes : 0u) + set.look.bytes + (set.exposure.state ? STATE_BYTES : 0u) + set.faces.bytes;
+  }
+  return sets + copies + launchpad + ring + mask_.bytes;
 }
 
 bool NrPipeline::SupportsUavTarget(DXGI_FORMAT format) const {
@@ -110,24 +114,31 @@ bool NrPipeline::SupportsUavTarget(DXGI_FORMAT format) const {
 }
 
 void NrPipeline::ReleaseIntermediates() {
-  RetireSet();
-  RetireLook();
-  RetireFaces();
+  RetireSetsFrom(0u);
   RetireMotionCopies();
   RetireLaunchpadMotion();
   RetireDlssPresentMotion();
   RetireMask();
-  RetireExposure();
 }
 
-void NrPipeline::RetireSet() {
-  if (!intermediates_.model_a) return;
+void NrPipeline::RetireSetsFrom(uint32_t first) {
+  for (uint32_t index = first; index < STAGE_SETS; ++index) {
+    StageSet* const set = &sets_[index];
+    RetireSet(set);
+    RetireLook(set);
+    RetireFaces(set);
+    RetireExposure(set);
+  }
+}
+
+void NrPipeline::RetireSet(StageSet* set) {
+  if (!set->intermediates.model_a) return;
   // Plan 3's rule: every recording takes its mark before its first command, so once the GPU has passed
   // the newest one the set goes at once; otherwise the callback's copy keeps it alive until then.
-  if (!timeline_.IsComplete(intermediates_.last_use)) {
-    timeline_.ReleaseAfter(intermediates_.last_use, [retired = intermediates_] {});
+  if (!timeline_.IsComplete(set->intermediates.last_use)) {
+    timeline_.ReleaseAfter(set->intermediates.last_use, [retired = set->intermediates] {});
   }
-  intermediates_ = {};
+  set->intermediates = {};
 }
 
 bool NrPipeline::MakeMotionCopies(size_t first, size_t end, nr::Size size) {
@@ -168,25 +179,25 @@ void NrPipeline::RetireDlssPresentMotion() {
   dlss_present_motion_ = {};
 }
 
-void NrPipeline::RetireLook() {
-  if (look_.plan == LookPlan{}) return;
-  if (!timeline_.IsComplete(look_.last_use)) {
-    timeline_.ReleaseAfter(look_.last_use, [retired = look_] {});
+void NrPipeline::RetireLook(StageSet* set) {
+  if (set->look.plan == LookPlan{}) return;
+  if (!timeline_.IsComplete(set->look.last_use)) {
+    timeline_.ReleaseAfter(set->look.last_use, [retired = set->look] {});
   }
-  look_ = {};
+  set->look = {};
 }
 
-void NrPipeline::RetireFaces() {
-  if (!faces_.twin) return;
-  if (!timeline_.IsComplete(faces_.last_use)) {
-    timeline_.ReleaseAfter(faces_.last_use, [retired = faces_] {});
+void NrPipeline::RetireFaces(StageSet* set) {
+  if (!set->faces.twin) return;
+  if (!timeline_.IsComplete(set->faces.last_use)) {
+    timeline_.ReleaseAfter(set->faces.last_use, [retired = set->faces] {});
   }
-  faces_ = {};
+  set->faces = {};
 }
 
 bool NrPipeline::EnsureFaces(nr::Size canvas) {
-  if (faces_.twin && faces_.size == canvas) return true;
-  RetireFaces();
+  if (set_->faces.twin && set_->faces.size == canvas) return true;
+  RetireFaces(set_);
   const look::Atlas layout = look::MakeAtlas(canvas);
   constexpr D3D12_RESOURCE_FLAGS UAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   FaceSurfaces created = {
@@ -206,18 +217,18 @@ bool NrPipeline::EnsureFaces(nr::Size canvas) {
     return false;  // `created` was never used by the GPU: freed here
   }
   allocation_failure_logged_ = false;
-  faces_ = std::move(created);
+  set_->faces = std::move(created);
   return true;
 }
 
 void NrPipeline::RecordFaces(ID3D12GraphicsCommandList* list, color::FacesPass pass) {
-  ID3D12Resource* const atlas = faces_.atlas.Get();
+  ID3D12Resource* const atlas = set_->faces.atlas.Get();
   pass.atlas = atlas;
-  pass.detail = faces_.detail.Get();
-  pass.fill = faces_.fill.Get();
-  pass.layout = faces_.layout;
-  pass.parameters = look::MakeFacesParameters(config_.keep_faces.lighting_scale, config_.keep_faces.tuning, intermediates_.plan.image.height, faces_.layout.levels);
-  faces_.last_use = slot_marks_[resolve_slot_];
+  pass.detail = set_->faces.detail.Get();
+  pass.fill = set_->faces.fill.Get();
+  pass.layout = set_->faces.layout;
+  pass.parameters = look::MakeFacesParameters(config_.keep_faces.lighting_scale, config_.keep_faces.tuning, set_->intermediates.plan.image.height, set_->faces.layout.levels);
+  set_->faces.last_use = slot_marks_[resolve_slot_];
   const bool fill = (pass.mask == nullptr && pass.parameters.fill);  // round 5: pass 1's pyramid writes the fill's too
   Transition(list, atlas, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   if (fill) {
@@ -257,22 +268,22 @@ void NrPipeline::RetireMask() {
   mask_ = {};
 }
 
-void NrPipeline::RetireExposure() {
-  if (exposure_.state && !timeline_.IsComplete(exposure_.last_use)) {
-    timeline_.ReleaseAfter(exposure_.last_use, [retired = exposure_.state] {});
+void NrPipeline::RetireExposure(StageSet* set) {
+  if (set->exposure.state && !timeline_.IsComplete(set->exposure.last_use)) {
+    timeline_.ReleaseAfter(set->exposure.last_use, [retired = set->exposure.state] {});
   }
-  exposure_ = {};
-  RetireExposureCheck();
+  set->exposure = {};
+  RetireExposureCheck(set);
 }
 
-void NrPipeline::RetireExposureCheck() {
+void NrPipeline::RetireExposureCheck(StageSet* set) {
   // The samples still in flight are dropped (Auto's run starts again with the next ones); the buffer goes once the GPU has passed its copies.
   for (uint32_t index = 0u; index < CHECK_SLOTS; ++index) {
-    if (check_.readback && check_.pending[index] && !timeline_.IsComplete(check_.marks[index])) {
-      timeline_.ReleaseAfter(check_.marks[index], [retired = check_.readback] {});
+    if (set->check.readback && set->check.pending[index] && !timeline_.IsComplete(set->check.marks[index])) {
+      timeline_.ReleaseAfter(set->check.marks[index], [retired = set->check.readback] {});
     }
   }
-  check_ = {};
+  set->check = {};
 }
 
 NrPipeline::Texture NrPipeline::CreateTexture(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags,
@@ -299,8 +310,8 @@ NrPipeline::Texture NrPipeline::CreateTexture(nr::Size size, DXGI_FORMAT format,
 }
 
 std::string_view NrPipeline::EnsureIntermediates(const SetPlan& plan) {
-  if (intermediates_.model_a && intermediates_.plan == plan) return {};
-  RetireSet();
+  if (set_->intermediates.model_a && set_->intermediates.plan == plan) return {};
+  RetireSet(set_);
   constexpr D3D12_RESOURCE_FLAGS UAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   const bool pre_sr = (plan.kind == TargetKind::PRE_SR);
   // I-1 (Plan 4 fix round 4): pre-SR always gets the image-sized change texture, whatever plan.output
@@ -342,29 +353,33 @@ std::string_view NrPipeline::EnsureIntermediates(const SetPlan& plan) {
     return "out of memory";
   }
   allocation_failure_logged_ = false;
-  intermediates_ = std::move(created);
+  set_->intermediates = std::move(created);
   return {};
 }
 
 void NrPipeline::SetLookConfig(const LookConfig& config) {
-  // v2 design §3.12: a new Detail radius or Stabilize mode starts the stabiliser afresh.
-  if (config.look.detail_radius != config_.look.detail_radius || config.look.stabilize != config_.look.stabilize
-      || config.look.stabilize_detail != config_.look.stabilize_detail) {
-    look_.history_valid = false;
-  }
-  if (config.fixes != config_.fixes) {
-    exposure_.snap = true;  // v2 design §3.14: the governor snaps on a settings change
+  // v2 design §3.12: a new Detail radius or Stabilize mode starts the stabiliser afresh. Split chain: in every set.
+  const bool restart_stabilizer = (config.look.detail_radius != config_.look.detail_radius || config.look.stabilize != config_.look.stabilize
+                                   || config.look.stabilize_detail != config_.look.stabilize_detail);
+  const bool snap_meter = (config.fixes != config_.fixes);  // v2 design §3.14: the governor snaps on a settings change
+  for (StageSet& set : sets_) {
+    if (restart_stabilizer) {
+      set.look.history_valid = false;
+    }
+    if (snap_meter) {
+      set.exposure.snap = true;
+    }
   }
   config_ = config;
 }
 
 LookPlan NrPipeline::LookPlanFor(nr::Size image, bool reduced) const {
-  return PlanLook(config_, image, reduced, static_cast<bool>(intermediates_.change), mask_.copied, color_.SupportsUavLoads());
+  return PlanLook(config_, image, reduced, static_cast<bool>(set_->intermediates.change), mask_.copied, color_.SupportsUavLoads());
 }
 
 bool NrPipeline::EnsureLook(const LookPlan& plan) {
-  if (plan == look_.plan) return true;
-  RetireLook();
+  if (plan == set_->look.plan) return true;
+  RetireLook(set_);
   if (plan == LookPlan{}) return true;
   LookSurfaces created = {.plan = plan, .atlas = (plan.shape ? look::MakeAtlas(plan.image) : look::Atlas{})};
   const auto make = [this, &created](bool wanted, nr::Size size, DXGI_FORMAT format, uint32_t bytes_per_pixel, const wchar_t* name) {
@@ -394,7 +409,7 @@ bool NrPipeline::EnsureLook(const LookPlan& plan) {
     return false;  // `created` was never used by the GPU: freed here
   }
   allocation_failure_logged_ = false;
-  look_ = std::move(created);
+  set_->look = std::move(created);
   return true;
 }
 
@@ -421,7 +436,7 @@ NrPipeline::ExposureChoice NrPipeline::ChooseExposure(color::Encoding encoding, 
       // its state, which the encode and the decode read as Metered's.
       if (!game_exposure) {
         metered = true;
-      } else if (can_meter && auto_exposure_.Latched()) {
+      } else if (can_meter && set_->auto_exposure.Latched()) {
         metered = true;
       } else if (can_meter && config_.fixes.auto_mode == color::AutoExposureMode::BLEND) {
         metered = true;
@@ -437,64 +452,64 @@ NrPipeline::ExposureChoice NrPipeline::ChooseExposure(color::Encoding encoding, 
     case color::InputExposure::MANUAL:  break;
   }
   metered = (metered && can_meter);
-  if (!metered && !probe && exposure_.state) {
-    RetireExposure();  // Batch 1 review: InputExposure left Metered/auto-metered; the state is no longer read
+  if (!metered && !probe && set_->exposure.state) {
+    RetireExposure(set_);  // Batch 1 review: InputExposure left Metered/auto-metered; the state is no longer read
   }
-  if ((metered || probe) && !exposure_.state) {
-    exposure_.state = CreateTexture(STATE_SIZE, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, PIXEL_AND_COMPUTE_READ,
+  if ((metered || probe) && !set_->exposure.state) {
+    set_->exposure.state = CreateTexture(STATE_SIZE, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, PIXEL_AND_COMPUTE_READ,
                                     L"Uplift exposure state");
-    exposure_.snap = true;  // undefined until the meter's first snap
+    set_->exposure.snap = true;  // undefined until the meter's first snap
   }
-  const bool have_state = static_cast<bool>(exposure_.state);
+  const bool have_state = static_cast<bool>(set_->exposure.state);
   const bool probing = (probe && have_state);
   if (blend && have_state) {
-    exposure_report_ = {.use = ExposureUse::BLEND, .blend = config_.fixes.auto_blend, .gap = auto_exposure_.LastGap()};
-    return {.texture = exposure_.state.Get(), .factor = 1.f, .metered = true, .probe = true, .game_texture = game_texture, .game_factor = game_factor,
+    set_->exposure_report = {.use = ExposureUse::BLEND, .blend = config_.fixes.auto_blend, .gap = set_->auto_exposure.LastGap()};
+    return {.texture = set_->exposure.state.Get(), .factor = 1.f, .metered = true, .probe = true, .game_texture = game_texture, .game_factor = game_factor,
             .game_weight = 1.f - std::clamp(config_.fixes.auto_blend, 0.f, 1.f)};
   }
   if (metered && have_state) {
-    const bool latched = (automatic && game_exposure && auto_exposure_.Latched());
-    exposure_report_ = {.use = ExposureUse::METERED,
-                        .stops_off = (latched ? std::optional<float>(auto_exposure_.StopsOff()) : std::nullopt),
-                        .latch = (latched ? auto_exposure_.Reason() : AutoLatch::NONE)};
-    return {.texture = exposure_.state.Get(), .factor = 1.f, .metered = true};
+    const bool latched = (automatic && game_exposure && set_->auto_exposure.Latched());
+    set_->exposure_report = {.use = ExposureUse::METERED,
+                        .stops_off = (latched ? std::optional<float>(set_->auto_exposure.StopsOff()) : std::nullopt),
+                        .latch = (latched ? set_->auto_exposure.Reason() : AutoLatch::NONE)};
+    return {.texture = set_->exposure.state.Get(), .factor = 1.f, .metered = true};
   }
   if (use_game || blend) {  // Blend without its state: the game's
-    exposure_report_ = {.use = (game_exposure ? ExposureUse::GAME : ExposureUse::NONE)};
+    set_->exposure_report = {.use = (game_exposure ? ExposureUse::GAME : ExposureUse::NONE)};
     return {.texture = game_texture, .factor = game_factor, .probe = probing, .game_texture = game_texture, .game_factor = game_factor};
   }
-  exposure_report_ = {};
+  set_->exposure_report = {};
   return {};
 }
 
 void NrPipeline::PollExposureChecks() {
-  if (!check_.readback) return;
+  if (!set_->check.readback) return;
   const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   for (uint32_t step = 0u; step < CHECK_SLOTS; ++step) {
-    const uint32_t index = (check_.next + step) % CHECK_SLOTS;  // the oldest first
-    if (!check_.pending[index] || !timeline_.IsComplete(check_.marks[index])) continue;
-    check_.pending[index] = false;
+    const uint32_t index = (set_->check.next + step) % CHECK_SLOTS;  // the oldest first
+    if (!set_->check.pending[index] || !timeline_.IsComplete(set_->check.marks[index])) continue;
+    set_->check.pending[index] = false;
     std::array<float, 8> texels = {};  // (2^E, E, the anchor, set), (the game's texel, its factor, the game's exposure, the meter's target)
     const D3D12_RANGE read = {.Begin = index * CHECK_STRIDE, .End = index * CHECK_STRIDE + sizeof(texels)};
     void* mapped = nullptr;
-    if (FAILED(check_.readback->Map(0u, &read, &mapped))) continue;
+    if (FAILED(set_->check.readback->Map(0u, &read, &mapped))) continue;
     std::memcpy(texels.data(), static_cast<const std::byte*>(mapped) + read.Begin, sizeof(texels));
     const D3D12_RANGE written = {.Begin = 0u, .End = 0u};
-    check_.readback->Unmap(0u, &written);
+    set_->check.readback->Unmap(0u, &written);
     const ExposureSample sample = {.texture_value = texels[4], .factor = texels[5], .game = texels[6], .metered_stops = texels[1], .target_stops = texels[7],
                                    .anchor_stops = texels[2]};
-    if (auto_exposure_.Observe(sample, seconds)) {
-      nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, auto_exposure_));
-    } else if (!auto_exposure_.Latched() && std::isfinite(AutoExposure::OutsideSpan(sample)) && auto_exposure_.DebugDue(seconds)) {
-      nr::Log(nr::LogLevel::TRACE, AutoDebugMessage(sample, config_.fixes.auto_mode, config_.fixes.auto_blend, auto_exposure_.HeldThroughMove()));  // 2026-10-09: once a second
+    if (set_->auto_exposure.Observe(sample, seconds)) {
+      nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, set_->auto_exposure));
+    } else if (!set_->auto_exposure.Latched() && std::isfinite(AutoExposure::OutsideSpan(sample)) && set_->auto_exposure.DebugDue(seconds)) {
+      nr::Log(nr::LogLevel::TRACE, AutoDebugMessage(sample, config_.fixes.auto_mode, config_.fixes.auto_blend, set_->auto_exposure.HeldThroughMove()));  // 2026-10-09: once a second
     }
   }
 }
 
 void NrPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, color::MeterPass pass, const ExposureChoice& exposure) {
-  ID3D12Resource* const state = exposure_.state.Get();
+  ID3D12Resource* const state = set_->exposure.state.Get();
   pass.state = state;
-  pass.snap = (exposure_.snap || intermediates_.reset_pending);  // the first frame, a settings change, a rebuild
+  pass.snap = (set_->exposure.snap || set_->intermediates.reset_pending);  // the first frame, a settings change, a rebuild
   pass.smooth = config_.fixes.smooth_adapt;
   pass.brighter_rate = config_.fixes.adapt_brighter;
   pass.darker_rate = config_.fixes.adapt_darker;
@@ -506,13 +521,13 @@ void NrPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, col
   Transition(list, state, PIXEL_AND_COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   color_.RecordMeter(list, slot, pass);
   Transition(list, state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, PIXEL_AND_COMPUTE_READ);
-  exposure_.snap = false;
-  exposure_.last_use = slot_marks_[slot];
+  set_->exposure.snap = false;
+  set_->exposure.last_use = slot_marks_[slot];
   if (!exposure.probe) return;
   // Plan 17: Auto's check. The state's two texels into the next readback slot, unless the GPU has not passed that slot's last copy yet (skipped).
-  const uint32_t index = check_.next;
-  if (check_.pending[index]) return;
-  if (!check_.readback) {
+  const uint32_t index = set_->check.next;
+  if (set_->check.pending[index]) return;
+  if (!set_->check.readback) {
     const D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_READBACK};
     const D3D12_RESOURCE_DESC description = {
         .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
@@ -527,12 +542,12 @@ void NrPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, col
         .Flags = D3D12_RESOURCE_FLAG_NONE,
     };
     if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                IID_PPV_ARGS(&check_.readback)))) {
+                                                IID_PPV_ARGS(&set_->check.readback)))) {
       return;
     }
-    check_.readback->SetName(L"Uplift exposure check readback");
+    set_->check.readback->SetName(L"Uplift exposure check readback");
   }
-  D3D12_TEXTURE_COPY_LOCATION destination = {.pResource = check_.readback.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+  D3D12_TEXTURE_COPY_LOCATION destination = {.pResource = set_->check.readback.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
   destination.PlacedFootprint = {
       .Offset = index * CHECK_STRIDE,
       .Footprint = {.Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .Width = STATE_SIZE.width, .Height = STATE_SIZE.height, .Depth = 1u,
@@ -542,9 +557,9 @@ void NrPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, col
   Transition(list, state, PIXEL_AND_COMPUTE_READ, D3D12_RESOURCE_STATE_COPY_SOURCE);
   list->CopyTextureRegion(&destination, 0u, 0u, 0u, &origin, nullptr);
   Transition(list, state, D3D12_RESOURCE_STATE_COPY_SOURCE, PIXEL_AND_COMPUTE_READ);
-  check_.marks[index] = slot_marks_[slot];
-  check_.pending[index] = true;
-  check_.next = (index + 1u) % CHECK_SLOTS;
+  set_->check.marks[index] = slot_marks_[slot];
+  set_->check.pending[index] = true;
+  set_->check.next = (index + 1u) % CHECK_SLOTS;
 }
 
 ID3D12Resource* NrPipeline::BoundMask(uint32_t slot) {
@@ -573,18 +588,19 @@ ID3D12Resource* NrPipeline::PrepareMaskCopy(const D3D12_RESOURCE_DESC* mask) {
 
 void NrPipeline::ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) {
   if (index == 0u || index > LATER_PASSES || !color_.SupportsUavLoads()) return;
-  const bool swapped = (given != intermediates_.model_a.Get());
+  const bool swapped = (given != set_->intermediates.model_a.Get());
   if (const PassStrengths& strengths = config_.later_strengths[index - 1u]; strengths != PassStrengths{}) {
     Transition(list, returned, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     color_.RecordResolve(list, resolve_slot_,
-                         {.given = given, .returned = returned, .size = intermediates_.plan.canvas,
+                         {.given = given, .returned = returned, .size = set_->intermediates.plan.canvas,
                           .transfer_strength = strengths.transfer, .color_strength = strengths.color,
                           .swapped = swapped});
     Transition(list, returned, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   }
-  if (faces_ran_) {
-    // Keep faces (design "Passes"): inside pass 1's face mask only this pass's broad change is kept.
-    RecordFaces(list, {.changed = returned, .reference = given, .mask = faces_.twin.Get(), .swapped = swapped});
+  if (faces_ran_ && index != faces_first_) {
+    // Keep faces (design "Passes"): inside pass 1's face mask only this pass's broad change is kept. Split chain (decision Q5a): a later group's own mask,
+    // from its first pass's twin, whose recombination already made that pass's result.
+    RecordFaces(list, {.changed = returned, .reference = given, .mask = set_->faces.twin.Get(), .swapped = swapped});
   }
 }
 
@@ -593,12 +609,12 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
                                               color::Upsampling upsampling, const color::StabilizeMotion& motion, bool reset) {
   // At the output size with nothing acting on NR's change: Plan 4's restore, bit for bit (key decision 3).
   if (!reduced && !(look_ready && NeedsChangePath(config_, mask_.copied, color_.SupportsUavLoads()))) return {.texture = nr_output};
-  if (look_.plan != LookPlan{}) {
-    look_.last_use = slot_marks_[slot];
+  if (set_->look.plan != LookPlan{}) {
+    set_->look.last_use = slot_marks_[slot];
   }
-  ID3D12Resource* const change = (intermediates_.change ? intermediates_.change.Get() : look_.change.Get());
-  const bool shape = (look_ready && look_.plan.shape);
-  ID3D12Resource* const basis = (shape ? look_.basis.Get() : nullptr);
+  ID3D12Resource* const change = (set_->intermediates.change ? set_->intermediates.change.Get() : set_->look.change.Get());
+  const bool shape = (look_ready && set_->look.plan.shape);
+  ID3D12Resource* const basis = (shape ? set_->look.basis.Get() : nullptr);
   // 1. NR's change field (v2 design §3.7) and, for the look, NR's input chroma κ_M.
   Transition(list, change, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   if (basis != nullptr) {
@@ -614,10 +630,10 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
   const AfterNr after = {.texture = change, .upsampling = (reduced ? upsampling : color::Upsampling::CLASSIC)};
   if (!shape) return after;
   // 2. The pyramids.
-  const look::Atlas& atlas = look_.atlas;
+  const look::Atlas& atlas = set_->look.atlas;
   const look::Bands bands = look::MakeBands(config_.look.detail_radius, atlas.image.height, atlas.levels);
-  ID3D12Resource* const gauss = look_.gauss.Get();
-  ID3D12Resource* const peaks = look_.peaks.Get();
+  ID3D12Resource* const gauss = set_->look.gauss.Get();
+  ID3D12Resource* const peaks = set_->look.peaks.Get();
   Transition(list, gauss, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   Transition(list, peaks, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   color_.RecordPyramid(list, slot, {.change = change, .gauss = gauss, .peaks = peaks, .atlas = atlas});
@@ -626,32 +642,32 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
   // 3. The stabiliser (key decision 5): the two levels the low band reads, then the fine band.
   ID3D12Resource* history = nullptr;
   ID3D12Resource* detail = nullptr;
-  if (look_.plan.stabilize) {
-    const uint32_t current = look_.current;
-    ID3D12Resource* const state = look_.state.Get();
-    history = look_.history[current].Get();
+  if (set_->look.plan.stabilize) {
+    const uint32_t current = set_->look.current;
+    ID3D12Resource* const state = set_->look.state.Get();
+    history = set_->look.history[current].Get();
     color::StabilizePass stabilize = {
-        .gauss = gauss, .previous = look_.history[1u - current].Get(), .current = history, .state = state, .atlas = atlas,
+        .gauss = gauss, .previous = set_->look.history[1u - current].Get(), .current = history, .state = state, .atlas = atlas,
         .bands = bands, .rate = look::StabilizeRate(config_.frame_seconds, config_.look.stabilize_ms),
-        .motion_mode = (config_.look.stabilize == look::StabilizeMode::MOTION), .reset = (reset || !look_.history_valid),
+        .motion_mode = (config_.look.stabilize == look::StabilizeMode::MOTION), .reset = (reset || !set_->look.history_valid),
         .motion = motion,
     };
     Transition(list, history, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     Transition(list, state, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     color_.RecordStabilize(list, slot, stabilize);
     Transition(list, history, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    if (look_.plan.detail) {
-      detail = look_.detail_history[current].Get();
+    if (set_->look.plan.detail) {
+      detail = set_->look.detail_history[current].Get();
       stabilize.change = change;
-      stabilize.previous = look_.detail_history[1u - current].Get();
+      stabilize.previous = set_->look.detail_history[1u - current].Get();
       stabilize.current = detail;
       Transition(list, detail, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
       color_.RecordDetail(list, slot, stabilize);
       Transition(list, detail, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
     }
     Transition(list, state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    look_.current = 1u - current;
-    look_.history_valid = true;
+    set_->look.current = 1u - current;
+    set_->look.history_valid = true;
   }
   // 4. The shape pass rewrites C in place.
   Transition(list, change, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -663,45 +679,47 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
 }
 
 nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs inputs,
-                                        const nr::Controls& controls) {
+                                        const nr::Controls& controls, const nr::StageSlice& slice) {
   if (inputs.motion.resource == nullptr) {
-    inputs.motion = {.resource = intermediates_.zero_motion.Get()};
+    inputs.motion = {.resource = set_->intermediates.zero_motion.Get()};
     inputs.motion_scale_x = 1.f;
     inputs.motion_scale_y = 1.f;
   }
-  inputs.reset_hint = (inputs.reset_hint || intermediates_.reset_pending);
+  inputs.reset_hint = (inputs.reset_hint || set_->intermediates.reset_pending);
   // Plan 5 (v2 design §3.10): passes 2..10's own controls, and their own strengths between passes.
   inputs.later_passes = config_.later_controls;
   inputs.resolver = this;
   resolve_slot_ = slot;
   // Keep faces (2026-10-08): pass 1's twin, with its surfaces made before the fit like the set's. Off, unsupported, or paused by the Session (fix round 1,
   // I3), they go; a frame whose surfaces cannot be made only goes without the twin (M4).
+  // Split chain (decision Q5a): the slice's first pass's twin, at its stage, when the device context's config protects this group.
   faces_ran_ = false;
+  faces_first_ = slice.first;
   if (config_.keep_faces.enabled && KeepFacesSupported()) {
     inputs.faces = {.wanted = true, .controls = FaceTwinControls(controls, config_.keep_faces.protection),
-                    .surface_bytes = FaceSurfaceBytes(intermediates_.plan.canvas)};
-    if (session_.FacesPaused()) {
-      RetireFaces();
-    } else if (EnsureFaces(intermediates_.plan.canvas)) {
-      inputs.faces.output = faces_.twin.Get();
-      faces_.last_use = slot_marks_[slot];  // fix round 1 (C1): the Session may evaluate the twin into it even when no recombination follows
+                    .surface_bytes = FaceSurfaceBytes(set_->intermediates.plan.canvas)};
+    if (session_.FacesPaused(slice.stage)) {
+      RetireFaces(set_);
+    } else if (EnsureFaces(set_->intermediates.plan.canvas)) {
+      inputs.faces.output = set_->faces.twin.Get();
+      set_->faces.last_use = slot_marks_[slot];  // fix round 1 (C1): the Session may evaluate the twin into it even when no recombination follows
     }
   } else {
-    RetireFaces();
+    RetireFaces(set_);
   }
   const uint64_t held = HeldBytes();  // allocated before the fit: charged as the chain's surfaces and credited as held
   const nr::EvaluateResult evaluated = session_.Evaluate(
       list,
-      {.a = intermediates_.model_a.Get(), .b = intermediates_.model_b.Get(), .size = intermediates_.plan.canvas,
+      {.a = set_->intermediates.model_a.Get(), .b = set_->intermediates.model_b.Get(), .size = set_->intermediates.plan.canvas,
        .surface_bytes = held, .held_intermediate_bytes = held},
-      inputs, controls);
+      inputs, controls, slice);
   if (evaluated.output != nullptr) {
-    intermediates_.reset_pending = false;  // Plan 3: only a frame that ran NR pays off the owed reset
+    set_->intermediates.reset_pending = false;  // Plan 3: only a frame that ran NR pays off the owed reset
   }
   if (evaluated.output != nullptr && faces_ran_ && config_.keep_faces.show_mask) {
     // Show the face mask: the mask tinted into NR's result, which the change field and the decode then carry to the image.
     Transition(list, evaluated.output, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    color_.RecordFacesShow(list, slot, evaluated.output, faces_.twin.Get(), intermediates_.plan.canvas);
+    color_.RecordFacesShow(list, slot, evaluated.output, set_->faces.twin.Get(), set_->intermediates.plan.canvas);
     Transition(list, evaluated.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   }
   return evaluated;
@@ -709,10 +727,10 @@ nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_
 
 void NrPipeline::NoteEncoding(color::Encoding encoding, float input_scale) {
   // Plan 2 final review M4: NR's history belongs to one encoding and input scale; a change starts it afresh.
-  if (encoding != intermediates_.encoding || input_scale != intermediates_.input_scale) {
-    intermediates_.encoding = encoding;
-    intermediates_.input_scale = input_scale;
-    intermediates_.reset_pending = true;
+  if (encoding != set_->intermediates.encoding || input_scale != set_->intermediates.input_scale) {
+    set_->intermediates.encoding = encoding;
+    set_->intermediates.input_scale = input_scale;
+    set_->intermediates.reset_pending = true;
   }
 }
 
@@ -720,14 +738,14 @@ void NrPipeline::CommitSlot(uint32_t slot) {
   // The GPU reads this slot's descriptors, and the intermediates, until this recording completes: the
   // current frame, and the token an After-DLSS caller issued before recording.
   slot_marks_[slot] = timeline_.MarkNow();
-  intermediates_.last_use = slot_marks_[slot];
+  set_->intermediates.last_use = slot_marks_[slot];
   next_slot_ = (slot + 1u) % color::ColorPipeline::RING_SLOTS;
 }
 
 bool NrPipeline::Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::EncodePass pass) {
-  ID3D12Resource* const model_a = intermediates_.model_a.Get();
-  ID3D12Resource* const zero_motion = intermediates_.zero_motion.Get();
-  const bool clear_motion = intermediates_.motion_needs_clear;
+  ID3D12Resource* const model_a = set_->intermediates.model_a.Get();
+  ID3D12Resource* const zero_motion = set_->intermediates.zero_motion.Get();
+  const bool clear_motion = set_->intermediates.motion_needs_clear;
   Transition(list, model_a, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   if (clear_motion) {
     Transition(list, zero_motion, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -739,16 +757,17 @@ bool NrPipeline::Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::E
   if (clear_motion) {
     Transition(list, zero_motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
     if (encoded) {
-      intermediates_.motion_needs_clear = false;
+      set_->intermediates.motion_needs_clear = false;
     }
   }
   return encoded;
 }
 
 PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const PresentTarget& target,
-                                         const nr::Controls& controls, bool reset_hint, const WorkLayout& layout) {
+                                         const nr::Controls& controls, bool reset_hint, const WorkLayout& layout, const ChainPart& part) {
   if (session_.State() != nr::SessionState::ACTIVE) return {.reason = "inactive"};
-  if (list == nullptr || target.resource == nullptr) return {.reason = "invalid input"};
+  if (list == nullptr || target.resource == nullptr || part.set >= STAGE_SETS) return {.reason = "invalid input"};
+  set_ = &sets_[part.set];
   const D3D12_RESOURCE_DESC description = target.resource->GetDesc();
   const std::optional<color::FormatInfo> format = color::DescribeFormat(description.Format);
   if (!format) return {.reason = "unsupported format"};
@@ -780,7 +799,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   const uint32_t options = ShaderOptions();
   // v2 design §3.14, key decision 10: the Present path never has the game's own exposure.
   const ExposureChoice exposure = ChooseExposure(target.encoding, nullptr, 1.f);
-  ID3D12Resource* const source_copy = intermediates_.source_copy.Get();
+  ID3D12Resource* const source_copy = set_->intermediates.source_copy.Get();
   // Amendment 7, deepened by I-2: the copy of the game's motion vectors made for this very frame, when
   // there is one, from the slot the frame it was made for selects (PresentMotionSlotOf).
   nr::FrameInputs inputs = {.ui_correction = config_.present_ui_correction, .reset_hint = reset_hint};
@@ -823,8 +842,8 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   if (motion_source != MotionSource::LAUNCHPAD && launchpad_motion_.texture) {
     RetireLaunchpadMotion();  // Launchpad's vectors stopped coming: its copy goes, behind the recordings that used it
   }
-  inputs.reset_hint = (inputs.reset_hint || motion_source != present_motion_);  // spec §9: a provider switch
-  present_motion_ = motion_source;
+  inputs.reset_hint = (inputs.reset_hint || motion_source != set_->present_motion);  // spec §9: a provider switch
+  set_->present_motion = motion_source;
   // 1. Source copy ← target (Plan 3, unchanged).
   Transition(list, source_copy, PIXEL_AND_COMPUTE_READ, D3D12_RESOURCE_STATE_COPY_DEST);
   list->CopyResource(source_copy, target.resource);
@@ -852,8 +871,8 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   };
   if (!Encode(list, slot, encode)) return {.recorded = true, .reason = "encode failed", .motion_source = motion_source};
   // 3. NR.
-  const bool look_reset = (inputs.reset_hint || intermediates_.reset_pending);  // Evaluate pays the owed reset off
-  const nr::EvaluateResult evaluated = Evaluate(list, slot, inputs, controls);
+  const bool look_reset = (inputs.reset_hint || set_->intermediates.reset_pending);  // Evaluate pays the owed reset off
+  const nr::EvaluateResult evaluated = Evaluate(list, slot, inputs, controls, part.slice);
   if (evaluated.output == nullptr) {
     return {.recorded = true, .reason = evaluated.reason, .from_session = SessionWroteMessage(evaluated.reason),
             .motion_source = motion_source};
@@ -885,9 +904,11 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
 }
 
 PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavTarget& target,
-                                     const nr::FrameInputs& inputs, const nr::Controls& controls, const WorkLayout& layout) {
+                                     const nr::FrameInputs& inputs, const nr::Controls& controls, const WorkLayout& layout,
+                                     const ChainPart& part) {
   if (session_.State() != nr::SessionState::ACTIVE) return {.reason = "inactive"};
-  if (list == nullptr || target.resource == nullptr) return {.reason = "invalid input"};
+  if (list == nullptr || target.resource == nullptr || part.set >= STAGE_SETS) return {.reason = "invalid input"};
+  set_ = &sets_[part.set];
   const D3D12_RESOURCE_DESC description = target.resource->GetDesc();
   const std::optional<color::UavFormatInfo> format = color::DescribeUavFormat(description.Format);
   // M5 for UAV targets: without typed UAV stores the decode could not write NR's result back.
@@ -922,7 +943,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   NoteEncoding(target.encoding, input_scale);
   const uint32_t options = ShaderOptions();
   const ExposureChoice exposure = ChooseExposure(target.encoding, target.exposure, target.exposure_factor);
-  ID3D12Resource* const source_copy = intermediates_.source_copy.Get();
+  ID3D12Resource* const source_copy = set_->intermediates.source_copy.Get();
   const MotionSource motion_source = (inputs.motion.resource != nullptr ? MotionSource::DIRECT : MotionSource::NONE);
 
   // 1. Source copy ← the region. DLSS leaves its Output in UNORDERED_ACCESS, and so does Uplift.
@@ -960,8 +981,8 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   };
   if (!Encode(list, slot, encode)) return {.recorded = true, .reason = "encode failed", .motion_source = motion_source};
   // 3. The NR passes, with the game's motion vectors bound in place.
-  const bool look_reset = (inputs.reset_hint || intermediates_.reset_pending);  // Evaluate pays the owed reset off
-  const nr::EvaluateResult evaluated = Evaluate(list, slot, inputs, controls);
+  const bool look_reset = (inputs.reset_hint || set_->intermediates.reset_pending);  // Evaluate pays the owed reset off
+  const nr::EvaluateResult evaluated = Evaluate(list, slot, inputs, controls, part.slice);
   if (evaluated.output == nullptr) {
     return {.recorded = true, .reason = evaluated.reason, .from_session = SessionWroteMessage(evaluated.reason),
             .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
@@ -994,9 +1015,10 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
 }
 
 PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const UavTarget& color, const nr::FrameInputs& inputs,
-                                       const nr::Controls& controls, const WorkLayout& layout) {
+                                       const nr::Controls& controls, const WorkLayout& layout, const ChainPart& part) {
   if (session_.State() != nr::SessionState::ACTIVE) return {.reason = "inactive"};
-  if (list == nullptr || color.resource == nullptr) return {.reason = "invalid input"};
+  if (list == nullptr || color.resource == nullptr || part.set >= STAGE_SETS) return {.reason = "invalid input"};
+  set_ = &sets_[part.set];
   const D3D12_RESOURCE_DESC description = color.resource->GetDesc();
   const std::optional<color::UavFormatInfo> format = color::DescribeUavFormat(description.Format);
   // v2 design §3.9 step 1: a 2D, single-sample texture Uplift reads through a typed, non-sRGB view.
@@ -1070,7 +1092,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
       const D3D12_RESOURCE_DESC motion = inputs.motion.resource->GetDesc();
       motion_region = {.x = 0u, .y = 0u, .width = static_cast<uint32_t>(motion.Width), .height = motion.Height};
     }
-    ID3D12Resource* const canvas_motion = intermediates_.canvas_motion.Get();
+    ID3D12Resource* const canvas_motion = set_->intermediates.canvas_motion.Get();
     Transition(list, canvas_motion, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     color_.RecordMotion(list, slot,
                         {
@@ -1094,8 +1116,8 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
   // scaled by what the caller asked for (inputs.motion_scale_x/y), not nr_inputs' own post-copy (1, 1).
   const MotionSource motion_source = (nr_inputs.motion.resource != nullptr ? MotionSource::DIRECT : MotionSource::NONE);
   // 3. NR on the canvas (or the image).
-  const bool look_reset = (inputs.reset_hint || intermediates_.reset_pending);  // Evaluate pays the owed reset off
-  const nr::EvaluateResult evaluated = Evaluate(list, slot, nr_inputs, controls);
+  const bool look_reset = (inputs.reset_hint || set_->intermediates.reset_pending);  // Evaluate pays the owed reset off
+  const nr::EvaluateResult evaluated = Evaluate(list, slot, nr_inputs, controls, part.slice);
   if (evaluated.output == nullptr) {
     return {.recorded = true, .reason = evaluated.reason, .from_session = SessionWroteMessage(evaluated.reason),
             .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
@@ -1109,7 +1131,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
             .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
   }
   // 5. The compose into the private colour's region.
-  ID3D12Resource* const private_color = intermediates_.private_color.Get();
+  ID3D12Resource* const private_color = set_->intermediates.private_color.Get();
   Transition(list, private_color, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   const bool composed = color_.RecordComputeDecode(
       list, slot,

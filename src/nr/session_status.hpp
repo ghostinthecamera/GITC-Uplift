@@ -3,6 +3,7 @@
 // Plan 9: the Session's public state, apart from Session itself, so the 32-bit add-on's ui/ code compiles without the
 // NGX headers session.hpp pulls in. Moved out of session.hpp unchanged.
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -20,6 +21,18 @@ enum class SessionState : uint8_t {
   GRACE,
   DRAINING,
   FAILED,
+};
+
+// Split chain (2026-10-10): the stages of the frame a pass can run at (Before upscaling, After DLSS, Present), at most one group each.
+inline constexpr uint8_t SESSION_STAGES = 3u;
+
+// Split chain (design 3.2): one stage group, as the latest Session::SetChain gave it, and its features.
+struct SessionGroupStatus {
+  uint8_t stage = 0u;
+  uint32_t first = 0u;     // 0-based, global
+  uint32_t count = 0u;     // its passes within the pass count
+  uint32_t live = 0u;      // live features among them
+  Size capacity;           // its first live feature's
 };
 
 struct SessionStatus {
@@ -42,6 +55,9 @@ struct SessionStatus {
   uint32_t create_result = 0u;  // Plan 19 T6 (M-4): NGX's result of that creation (an NVSDK_NGX_Result), while `create_failed`
   // Keep faces fix round 1 (C2): why Keep faces does not run although it is on (paused or stopped), for the card; empty otherwise. Static text.
   std::string_view faces_note;
+  // Split chain (design 3.2): the stage groups, in chain order; one (every pass at one stage) unless the chain is split.
+  std::array<SessionGroupStatus, SESSION_STAGES> groups = {};
+  uint32_t group_count = 0u;
 };
 
 // Upper-case state name for logs and the overlay.

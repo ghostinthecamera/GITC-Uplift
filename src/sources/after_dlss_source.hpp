@@ -43,6 +43,7 @@ struct AfterDlssConfig {
   state::RestoreMode restore = state::RestoreMode::FULL;  // StateRestore
   nr::Controls controls;
   WorkLayout layout;  // v2 design §3.8: set by DeviceContext; empty = Full
+  ChainPart part;  // split chain: the stage group this evaluate's recording runs; the default is the whole chain
 };
 
 // The region of DLSS's Output NR runs on (v2 design §3.4): the Output subrect, or the whole Output
@@ -61,12 +62,13 @@ struct GameFrame {
 // v2 design §3.2/§3.3: an Uplift recording on the game's list. Its completion token is issued first,
 // attached to the list once anything was recorded (also when `record` throws), and the game's compute
 // state is replayed after it. `record` returns the recording's PipelineResult.
+// Split chain: a recorded result carries that token, which a later stage group's recording waits to see completed (Timeline::StageWorkDone).
 template <class Record>
 PipelineResult RecordOnGameList(DlssFrameHost& host, nr::Timeline& timeline, state::RestoreMode restore, Record&& record) {
   const uint64_t token = timeline.IssueToken();  // before recording, so every mark taken while recording includes it
   bool attached = false;
   try {
-    const PipelineResult result = record();
+    PipelineResult result = record();
     if (!result.recorded) {
       timeline.Drop(std::span<const uint64_t>(&token, 1u));
       return result;
@@ -74,6 +76,7 @@ PipelineResult RecordOnGameList(DlssFrameHost& host, nr::Timeline& timeline, sta
     host.AttachToken(token);
     attached = true;
     host.ReplayState(restore);
+    result.token = token;
     return result;
   } catch (...) {
     // The list may already hold commands: an attached token completes at the list's reset or destroy,

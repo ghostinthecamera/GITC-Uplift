@@ -377,6 +377,8 @@ struct AddonState {
   std::optional<uint64_t> e2e_first_applied;     // the hold's first present with NR applied (its index)
   std::optional<int64_t> e2e_first_applied_ms;  // and when, since the hold began
   std::map<std::string, uint64_t> e2e_skips;     // why the hold's other presents went without NR
+  // Split chain (Task 5): the native Vulkan context's recordings with NR applied per stage when the hold began (its held line counts each group's since).
+  std::array<uint64_t, addon::STAGE_COUNT> e2e_stage_recordings = {};
   std::filesystem::path vk_native_marker;
   std::atomic<bool> vk_native_marker_pending{false};
   api::device* vk_native_marker_owner = nullptr;  // fix round (I-C): the device whose native Present wrote it; its Session reaching OFF clears it
@@ -823,14 +825,16 @@ void AddonRouting::OnMainEvaluateD3D11(const void* device, ID3D12GraphicsCommand
   }
   const nr::Rect output = bridge::ResolveRegion11(nr::D3D11ResourceOf(frame.output), frame.output_region);
   const addon::BridgedDlssDecision decision = entry.context->DecideAfterEvaluate(frame, {output.width, output.height}, now);
-  if (decision.work == addon::BridgedDlssWork::PRESENT_MOTION) {
+  // Split chain (Task 4): with pass 1 inside the frame and a later group at Present, the ring copy comes first, then After DLSS's hand-off (both may run).
+  if (decision.work == addon::BridgedDlssWork::PRESENT_MOTION || decision.present_motion) {
     ID3D11Resource* const motion = nr::D3D11ResourceOf(frame.motion_vectors);
     if (entry.d3d11_bridge->CopyPresentMotion(motion, frame.motion_region, decision.motion_scale_x, decision.motion_scale_y) && !entry.present_motion_logged) {
       entry.present_motion_logged = true;
       const nr::Rect region = bridge::ResolveRegion11(motion, frame.motion_region);
       nr::Logf(nr::LogLevel::INFO, "Direct3D 11: DLSS's motion vectors copied for Present ({}x{})", region.width, region.height);
     }
-  } else if (decision.work == addon::BridgedDlssWork::AFTER_DLSS) {
+  }
+  if (decision.work == addon::BridgedDlssWork::AFTER_DLSS) {
     const Microsoft::WRL::ComPtr<ID3D12Fence> gate = DiagnosticGateMidFrame(state, entry);  // null but on the hidden key's removal frame
     DiagnosticRemoveMidFrame(state, entry, bridge::RunDlssStage(*entry.d3d11_bridge, *entry.context, decision.work, frame, now), gate.Get());
   }
@@ -1104,6 +1108,10 @@ void E2eLiveSettings(AddonState& state, DeviceEntry& entry, api::device* device)
   next.motion_vectors = static_cast<ui::MotionVectorSource>(std::min(read("MotionVectors", static_cast<uint32_t>(next.motion_vectors)), 3u));
   next.keep_faces = (read("KeepFaces", next.keep_faces ? 1u : 0u) != 0u);
   next.show_face_mask = (read("ShowFaceMask", next.show_face_mask ? 1u : 0u) != 0u);
+  // Split chain (Task 5): the pass count and passes 2 and 3's Runs at, for the split holds.
+  next.pass_count = std::clamp(read("PassCount", next.pass_count), 1u, ui::MAX_PASSES);
+  next.passes[0].stage = static_cast<ui::PassStage>(std::min(read("Pass2Stage", static_cast<uint32_t>(next.passes[0].stage)), 3u));
+  next.passes[1].stage = static_cast<ui::PassStage>(std::min(read("Pass3Stage", static_cast<uint32_t>(next.passes[1].stage)), 3u));
   // In-game round 2: a VulkanNr change applies as the panel's pick does, and the stage it moves is written back, as the panel's save writes it.
   if (entry.vulkan && MoveStageForVkRoute(&next, state.settings.vulkan_nr)) {
     state.config.Set("Source", std::to_string(static_cast<uint32_t>(next.source)));
@@ -1117,13 +1125,29 @@ void E2eLiveSettings(AddonState& state, DeviceEntry& entry, api::device* device)
   for (const auto& [reason, count] : state.e2e_skips) {
     skips += std::format("{}{} x{}", (skips.empty() ? "" : "; "), reason, count);
   }
+  // Split chain (Task 5): a split held natively names each stage group and its recordings with NR applied in the hold.
+  std::string groups;
+  if (entry.vk_dlss) {
+    const std::array<uint64_t, addon::STAGE_COUNT> recordings = entry.vk_dlss->StageRecordings();
+    const addon::ContextStatus native_status = entry.vk_dlss->Status();
+    for (uint32_t group = 0u; native_status.group_count > 1u && group < native_status.group_count; ++group) {
+      const addon::ContextStatus::Group& stage_group = native_status.groups[group];
+      const auto stage = static_cast<size_t>(stage_group.stage);
+      const std::string_view name = (stage_group.stage == addon::Stage::BEFORE_UPSCALING ? "before upscaling"
+                                     : stage_group.stage == addon::Stage::AFTER_DLSS    ? "after DLSS"
+                                                                                        : "at Present");
+      groups += std::format("{}{} {}-{} x{}", (groups.empty() ? " | groups: " : ", "), name, stage_group.first + 1u, stage_group.first + stage_group.count,
+                            recordings[stage] - std::min(recordings[stage], state.e2e_stage_recordings[stage]));
+    }
+    state.e2e_stage_recordings = recordings;
+  }
   nr::Logf(nr::LogLevel::INFO,
-           "e2e: held VulkanNr={} Source={} PreUpscale={} MotionVectors={} KeepFaces={} ShowFaceMask={}: {} of {} presents with NR applied, the first after {} "
-           "presents ({} ms), {} of {} from there on; without NR: {}",
+           "e2e: held VulkanNr={} Source={} PreUpscale={} MotionVectors={} KeepFaces={} ShowFaceMask={} PassCount={} Pass2Stage={} Pass3Stage={}: {} of {} "
+           "presents with NR applied, the first after {} presents ({} ms), {} of {} from there on; without NR: {}{}",
            static_cast<uint32_t>(held.vulkan_nr), static_cast<uint32_t>(held.source), (held.pre_upscale ? 1 : 0), static_cast<uint32_t>(held.motion_vectors),
-           (held.keep_faces ? 1 : 0), (held.show_face_mask ? 1 : 0),
-           state.e2e_applied_presents, state.e2e_presents, first, state.e2e_first_applied_ms.value_or(-1), state.e2e_applied_presents,
-           state.e2e_presents - first, (skips.empty() ? std::string("none") : skips));
+           (held.keep_faces ? 1 : 0), (held.show_face_mask ? 1 : 0), held.pass_count, static_cast<uint32_t>(held.passes[0].stage),
+           static_cast<uint32_t>(held.passes[1].stage), state.e2e_applied_presents, state.e2e_presents, first, state.e2e_first_applied_ms.value_or(-1),
+           state.e2e_applied_presents, state.e2e_presents - first, (skips.empty() ? std::string("none") : skips), groups);
   state.e2e_applied_presents = 0u;
   state.e2e_presents = 0u;
   state.e2e_first_applied.reset();
@@ -1206,7 +1230,8 @@ void RunBridged(DeviceEntry& entry, api::device* device, addon::TriggerPoint poi
     // Plan 18 (design §4): at Present, this frame's ring slot of DLSS's vectors (copied in the game's evaluate) comes before Launchpad's.
     entry.d3d11_bridge->Run(reinterpret_cast<ID3D11Resource*>(entry.back_buffer.handle),
                             reinterpret_cast<ID3D11Resource*>(launchpad_motion), record,
-                            /*dlss_motion=*/entry.context->CurrentPlacement() == addon::Placement::PRESENT);
+                            /*dlss_motion=*/(entry.context->CurrentPlacement() == addon::Placement::PRESENT
+                                             || entry.context->RunsAt(addon::Stage::PRESENT)));  // split chain: a later group at Present too
   }
 }
 
@@ -1500,7 +1525,7 @@ void OnExecuteCommandList(api::command_queue* queue, api::command_list* cmd_list
           if (vk_list->executed) {
             context->Reexecuted(vk_list->tokens, vk_list->first_token, queue);  // N12 on Vulkan: submitted again without a new recording
           } else {
-            context->Executed(vk_list->tokens);
+            context->Executed(vk_list->tokens, queue);  // split chain (Task 5): the queue decides whether a later Present group may run beside it
           }
         }
       }
@@ -2006,6 +2031,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
           .native_present = native_route,
           .same_queue = (entry.present_queue == entry.queue),
           .native_wants_nr = (entry.vk_dlss && entry.vk_dlss->AtDlssPlacement()),
+          .native_present_group = (entry.vk_dlss && entry.vk_dlss->AtDlssPlacement() && entry.vk_dlss->RunsAt(addon::Stage::PRESENT)),
           .native_can_copy = (!entry.vk_dlss || entry.vk_dlss->CanCopy()),
           .problem = (!entry.vk_native_problem.empty() || !state.dlss_unavailable_reason.empty()),
           .dlss_motion = (ui::MotionPickOf(state.settings) == ui::MotionPick::DLSS),
@@ -2112,6 +2138,9 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         // Plan 19: the route, and the NGX core initialised for the game's device unless the game created DLSS on it (then the core is the game's own).
         native_config.vk_native_present = native_route;
         native_config.vk_initialize_core = !state.bridge.Registry().UpscalerCreated(device);
+        // Split chain (Task 5): the native context runs passes at several stages while VulkanNr is Native and its DLSS stages may run; its Present then
+        // needs the native route (decision Q6: a Present that fell back cannot run, and its passes join the DLSS stage).
+        native_config.split_capable = addon::SplitCapable(true, false, state.settings.vulkan_nr == ui::VulkanNrMode::NATIVE && !vk_dlss_stages_off);
         native_config.effects_on = (entry.runtime != nullptr && entry.runtime->get_effects_state());  // 1.1.6: NR before effects at their begin event
         if (vk_dlss_stages_off) {
           // In-game round 2: the route is Direct3D 12 or Helper, so the native context runs no DLSS stage whatever is stored (Auto stays at Present here).
@@ -2476,6 +2505,8 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     }
     // Plan 14 (batch 2 review, minor 2): the bridged context's Details motion line says what is true on Vulkan, where DLSS's vectors come as copies.
     frame_config.vulkan = entry.vulkan;
+    // Split chain (design 3.4): Direct3D 12 native and (Task 4) a Direct3D 11 device's DLSS bridge run passes at several stages; the other bridges one stage.
+    frame_config.split_capable = addon::SplitCapable(Bridged(entry), entry.d3d11);
     frame_config.present_motion_copy = present_motion_wanted;
     if (entry.d3d11) {
       // Plan 18 (design §4): Direct3D 11's ring, as Direct3D 12's amendment 7: Source = Present.
@@ -2520,9 +2551,11 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         frame = entry.d3d10_bridge->BeginFrame(reinterpret_cast<ID3D10Resource*>(entry.back_buffer.handle), settings.enabled, running, now);
         frame_queue = entry.d3d10_bridge->Queue();
       } else {
-        // Plan 18: at a DLSS stage NR runs inside the game's frame, so the back buffer is only described.
-        frame = entry.d3d11_bridge->BeginFrame(reinterpret_cast<ID3D11Resource*>(entry.back_buffer.handle), settings.enabled, running, now,
-                                               /*present_copy=*/!addon::IsDlssStage(entry.context->CurrentPlacement()));
+        // Plan 18: at a DLSS stage NR runs inside the game's frame, so the back buffer is only described. Split chain (Task 4): unless a later group runs at
+        // Present (the chain of the latest present: a split's first frame at Present waits for the copy, as NR's first frame does).
+        frame = entry.d3d11_bridge->BeginFrame(
+            reinterpret_cast<ID3D11Resource*>(entry.back_buffer.handle), settings.enabled, running, now,
+            /*present_copy=*/(!addon::IsDlssStage(entry.context->CurrentPlacement()) || entry.context->RunsAt(addon::Stage::PRESENT)));
         frame_queue = entry.d3d11_bridge->Queue();
       }
       target.resource = frame.color;
@@ -2540,7 +2573,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       if (!addon::IsDlssStage(placement)) {
         entry.d3d11_bridge->ReleaseDlss();
       }
-      if (!frame_config.present_motion_copy || placement != addon::Placement::PRESENT || entry.context->NrState() == nr::SessionState::OFF) {
+      if (!entry.context->PresentRingWanted() || entry.context->NrState() == nr::SessionState::OFF) {  // split chain: a later group at Present wants it too
         entry.d3d11_bridge->ReleasePresentMotion();
         entry.present_motion_logged = false;
       }
@@ -2927,6 +2960,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     ui::SetupFacts facts;
     std::string after_dlss_problem;  // Plan 18: Setup's facts view these; they outlive FinishSetup
     std::string before_upscaling_problem;
+    std::string chain_note;  // split chain (Task 3): the card's note line
     addon::FillPreference(&facts, state.settings, view.dlss_explicit);
     bool setup_finished = false;  // the helper front finished Setup (a Direct3D 9 device, T5: a Vulkan device on the helper route)
     if (overlay_device_api != api::device_api::d3d9) {
@@ -2992,8 +3026,14 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         const std::optional<ngx_hooks::FeatureRecord> main_record = state.bridge.Registry().Find(main_handle);
         facts.ray_reconstruction = main_record && main_record->feature == NVSDK_NGX_Feature_RayReconstruction;
       }
+      // Split-chain design 11 (the owner, 2026-10-15): Before upscaling runs on Ray Reconstruction on Direct3D 12 and Vulkan; the Direct3D 11 bridge keeps
+      // DLSS-SR only (decision Q7).
+      facts.ray_reconstruction_after_dlss = !addon::PreSrFeatureAllowed(NVSDK_NGX_Feature_RayReconstruction, DlssApiOf(entry));
       facts.launchpad_ready = entry.launchpad_ready;
       facts.lumenite_ready = entry.lumenite_ready;  // 2026-10-08
+      // Split chain (Task 3, Task 4, Task 5): as FrameConfig::split_capable, the native Vulkan context's included.
+      facts.split_capable = addon::SplitCapable(Bridged(entry), entry.d3d11,
+                                                (entry.vulkan && native_view && state.settings.vulkan_nr == ui::VulkanNrMode::NATIVE && entry.vk_stages_off.empty()));
       facts.uplift_mv_lumenite = entry.uplift_mv_lumenite;
       facts.match_game_readable = (!Bridged(entry) || entry.d3d11 || native_view);  // the bridges never see the game's DLSS create (Plan 18: Direct3D 11's context reads it)
       // Final review, minor 3: at Present on Vulkan a DLSS stage reads it when it can run here, so Match game waits for one (temporary).
@@ -3041,6 +3081,13 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         view.motion_line = status.motion_line;
         view.work_line = status.work_line;  // P17, D4: the "Working at" readout
         view.exposure_line = status.exposure_line;  // Plan 17: which input exposure NR used
+        // Split chain (design 6.2): the chain's groups while it is split, and why a stored "Runs at" does not run as stored (the working card's note too).
+        view.chain_line = status.chain_line;
+        chain_note = status.chain_note;
+        facts.chain_note = chain_note;
+        if (!status.chain_note.empty()) {
+          view.chain_line += (view.chain_line.empty() ? status.chain_note : "\n" + status.chain_note);
+        }
         view.mask_note = entry.mask_note;
         view.ui_correction_note = status.ui_correction_note;
         view.keep_faces_unavailable = std::string(ui::KeepFacesUnavailable({.gpu_ready = status.keep_faces_supported}));

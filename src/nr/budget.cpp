@@ -30,9 +30,9 @@ uint64_t Budget::Available(const MemoryInfo& info) const {
 }
 
 FitResult Budget::Fit(Size work, uint32_t requested_passes, uint64_t surface_bytes, const MemoryInfo& info,
-                      uint64_t held_bytes, bool first_use_pending) const {
+                      uint64_t held_bytes, bool first_use_pending, uint64_t reserve_bytes) const {
   const uint64_t available = Available(info) + held_bytes;
-  const uint64_t fixed = surface_bytes + (first_use_pending ? config_.first_use_bytes : 0u);
+  const uint64_t fixed = surface_bytes + (first_use_pending ? config_.first_use_bytes : 0u) + reserve_bytes;
   const uint64_t feature = FeatureBytes(work);
   for (uint32_t passes = requested_passes; passes >= 1u; --passes) {
     const uint64_t need = passes * feature + fixed;

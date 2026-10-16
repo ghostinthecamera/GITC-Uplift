@@ -60,6 +60,9 @@ inline constexpr std::string_view VULKAN_MATCH_GAME_REASON = "On Vulkan, Match g
 inline constexpr std::string_view FOREIGN_D3D12_DLSS_REASON =
     "This game's DLSS runs on a separate Direct3D 12 device (a mod), which Uplift cannot reach. NR runs at Present";
 
+// Split chain (Task 3): every "Runs at" choice is greyed with it on a route that runs every pass at one stage (every route but native Direct3D 12, for now).
+inline constexpr std::string_view ONE_STAGE_REASON = "All passes run at one stage here";
+
 // A selectable motion source that delivered nothing on the latest recording (design §1.4).
 enum class MotionGap : uint8_t {
   NONE,
@@ -86,6 +89,7 @@ struct SetupFacts {
   bool dlss_seen = false;             // sticky for the session
   bool dlss_off = false;              // Plan 18 Task 12: seen, and the game switched its DLSS off since (DLSS_OFF_REASON); a pause is not off
   bool ray_reconstruction = false;    // the main DLSS feature is Ray Reconstruction
+  bool ray_reconstruction_after_dlss = false;  // split-chain design 11: Ray Reconstruction keeps NR after DLSS here (the Direct3D 11 bridge, decision Q7)
   bool frame_generation_blocks_present = false;
   std::string_view present_fixed;      // final review I-1: Present cannot run this session (VULKAN_NGX_SHUT_DOWN_PRESENT_REASON)
   // Plan 15: NR is held off on this Direct3D 12 device until the game's DLSS starts again (D3D12_NGX_SHUT_DOWN_REASON): every stage and DLSS's and
@@ -122,7 +126,27 @@ struct SetupFacts {
   uint64_t vram_bytes = 0u;
   std::string_view latch_note;  // the note line when there is no Why: the first non-empty, in this order
   std::string_view passes_note;
+  std::string_view chain_note;  // split chain: "Pass 3 runs at After DLSS: frame generation is on" (ChainPlan::note)
   std::string_view frame_generation_line;
+  // Split chain (Task 3): passes 2..N's "Runs at" rows. `chain`: where each pass runs now, from the shown context's chain; without one, the stored picks
+  // from pass 1's highlight, never backwards.
+  uint32_t pass_count = 1u;
+  std::array<PassStage, MAX_PASSES - 1u> stored_stages = {};  // Pass{n}Stage
+  bool split_capable = false;  // the shown device runs passes at more than one stage
+  std::optional<std::array<SourcePick, MAX_PASSES>> chain;
+};
+
+// Split chain (Task 3): one choice of a pass's "Runs at" row. Empty `why`: selectable. It owns its text (a backwards pick names the pass before).
+struct PassStageOption {
+  std::string why;
+  bool temporary = false;  // the cause can clear by itself (frame generation turned off, DLSS starting)
+};
+// Split chain (Task 3): pass n's "Runs at" row (n >= 2).
+struct PassStageRow {
+  std::array<PassStageOption, 4> options = {};  // PassStage order: Same as pass n-1, Before upscaling, After DLSS, Present
+  PassStage shown = PassStage::SAME;  // the highlight: what runs (a stored stage that runs elsewhere shows where it runs)
+  SourcePick runs = SourcePick::PRESENT;
+  bool starts_group = false;  // the first pass of a later stage group: its section shows that stage's Resolution and Keep faces here
 };
 
 struct SetupView {
@@ -134,6 +158,13 @@ struct SetupView {
   ResolutionMode resolution = ResolutionMode::FULL;
   std::string why;  // without "Why: "; empty unless a highlight is a temporary fallback from the preference
   bool stopped = false;  // Plan 15 fix round: SetupFacts::stopped; the highlights stay greyed too (SetupSettle never un-greys them)
+  // Split chain (Task 3): passes 2..10's rows ([0] is pass 2; only those below the pass count are resolved), whether passes can run at several stages
+  // here (otherwise every row is greyed with ONE_STAGE_REASON), and whether some pass runs at another stage than pass 1 (the pass trees name the stage).
+  std::array<PassStageRow, MAX_PASSES - 1u> pass_stages = {};
+  bool split_capable = false;
+  bool chain_split = false;
+  // Split-chain design 11 (2026-10-15): the game's DLSS is Ray Reconstruction and Before upscaling may run on it here: its tip says what NR then works on.
+  bool before_upscaling_on_rr = false;
 };
 // Every option's state, the three highlights and the Why line, from the facts alone (design §1.2-§1.4): pure.
 [[nodiscard]] SetupView ResolveSetup(const SetupFacts& facts);

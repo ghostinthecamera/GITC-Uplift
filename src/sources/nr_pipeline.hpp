@@ -64,6 +64,7 @@ struct PipelineResult {
   MotionSource motion_source = MotionSource::NONE;
   float motion_scale_x = 1.f;  // valid when motion_source == DIRECT: MV.Scale x MotionScale
   float motion_scale_y = 1.f;
+  uint64_t token = 0u;  // split chain: a game-list recording's completion token (RecordOnGameList); 0 otherwise
 };
 
 // v2 design §3.8/§3.9: the size NR works at for one recording.
@@ -71,6 +72,14 @@ struct WorkLayout {
   nr::Size image;   // the output region resampled to this size; empty = the output size (Full)
   nr::Size canvas;  // NR's network size: `image` plus mirrored padding (pre-SR below the floor); empty = `image`
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;  // how NR's change returns to the output size
+};
+
+// Split chain (design 3.3): the part of the NR chain one recording runs. The default is every pass on the first set: the single chain of before the split.
+struct ChainPart {
+  nr::StageSlice slice;  // the Session's passes and their stage
+  // The stage group's index in chain order (0: pass 1's), below NrPipeline::STAGE_SETS: its own surfaces, exposure, look and Keep faces. Keyed by the
+  // group, not the stage, so a one-group chain always uses set 0, across placement switches too, exactly as the single set did.
+  uint32_t set = 0u;
 };
 
 // Plan 5's LookConfig (what the next recordings apply beyond their target), its parts and LookPlan are in sources/look_plan.hpp since Plan 14:
@@ -87,6 +96,8 @@ enum class TargetKind : uint8_t {
 // provider), sized to the region NR runs on. Never blocks. Not thread-safe: the device context's lock.
 class NrPipeline final : private nr::PassResolver {
  public:
+  static constexpr uint32_t STAGE_SETS = nr::SESSION_STAGES;  // split chain: one set per stage group
+
   NrPipeline(ID3D12Device* device, nr::Session& session, nr::Timeline& timeline);
   ~NrPipeline();  // releases the intermediates directly: only after the GPU is idle for them
   NrPipeline(const NrPipeline&) = delete;
@@ -96,22 +107,25 @@ class NrPipeline final : private nr::PassResolver {
   // Once per presented frame: the whole back buffer at `layout`. Binds the copy of the game's motion
   // vectors made for this frame (RecordMotionCopy), else the zero texture; a switch between the two
   // restarts NR's history for one frame (spec §9).
+  // Split chain: each recording runs `part` of the chain (every recording below takes one).
   PipelineResult RecordPresent(ID3D12GraphicsCommandList* list, const PresentTarget& target, const nr::Controls& controls,
-                               bool reset_hint, const WorkLayout& layout = {});
+                               bool reset_hint, const WorkLayout& layout = {}, const ChainPart& part = {});
   // Any number of times per frame (every evaluate of the main handle, v2 design §3.1): a region copy,
   // encode with the game's exposure, NR with `inputs` (a null inputs.motion.resource binds the
   // all-zero texture), a compute decode into the region, then a UAV barrier on the target. Only
   // compute-legal states. The caller issues its completion token before calling.
   PipelineResult RecordUav(ID3D12GraphicsCommandList* list, const UavTarget& target, const nr::FrameInputs& inputs,
-                           const nr::Controls& controls, const WorkLayout& layout = {});
+                           const nr::Controls& controls, const WorkLayout& layout = {}, const ChainPart& part = {});
   // v2 design §3.9: NR on the region of the game's Color (`color.resource`, only read) before DLSS
   // upscales it. With a canvas in `layout` the image is mirror-padded into it, and the game's motion
   // vectors are copied into a canvas texture. NR's result is composed into PrivateColor() at the same
   // region, left in NON_PIXEL_SHADER_RESOURCE for DLSS.
   PipelineResult RecordPreSr(ID3D12GraphicsCommandList* list, const UavTarget& color, const nr::FrameInputs& inputs,
-                             const nr::Controls& controls, const WorkLayout& layout);
-  // After RecordPreSr applied NR and until the next recording: what DLSS reads as Color.
-  [[nodiscard]] ID3D12Resource* PrivateColor() const { return intermediates_.private_color.Get(); }
+                             const nr::Controls& controls, const WorkLayout& layout, const ChainPart& part = {});
+  // After RecordPreSr applied NR and until the next recording: what DLSS reads as Color. Before upscaling is always pass 1's group: set 0.
+  [[nodiscard]] ID3D12Resource* PrivateColor() const { return sets_[0].intermediates.private_color.Get(); }
+  // Split chain (design 3.3): the sets of the groups from `first` on, a chain that has fewer, go behind their last use, as a placement switch's set did.
+  void RetireSetsFrom(uint32_t first);
   // Amendment 7: at an evaluate of the game's DLSS, copies its motion vectors (`motion`, scaled into the
   // region's own pixels by `scale_x/y`) on the game's list, for the present that closes the current
   // frame. False when nothing was recorded.
@@ -143,8 +157,8 @@ class NrPipeline final : private nr::PassResolver {
   // from NoteMaskCopied on. `mask` null, or a format Uplift cannot read, releases the copy and returns null.
   ID3D12Resource* PrepareMaskCopy(const D3D12_RESOURCE_DESC* mask);
   void NoteMaskCopied() { mask_.copied = (mask_.texture != nullptr); }
-  // Plan 17: the exposure the latest recording's encode read (the Details line).
-  [[nodiscard]] ExposureReport LastExposure() const { return exposure_report_; }
+  // Plan 17: the exposure the latest recording's encode read (the Details line). Split chain: pass 1's group's (set 0).
+  [[nodiscard]] ExposureReport LastExposure() const { return sets_[0].exposure_report; }
   // Keep faces (2026-10-08): the device loads the formats its recombination reads back (typed UAV loads, as the look stage needs).
   [[nodiscard]] bool KeepFacesSupported() const { return color_.SupportsUavLoads() && color_.FacesReady(); }
 
@@ -229,34 +243,27 @@ class NrPipeline final : private nr::PassResolver {
   void CombineFaces(ID3D12GraphicsCommandList* list, ID3D12Resource* lighting, ID3D12Resource* faces) override;
   // Keep faces: the twin and the atlas at `canvas`, made now unless held. False (logged once): Keep faces is skipped this recording.
   bool EnsureFaces(nr::Size canvas);
-  void RetireFaces();
   // Keep faces: the recombination of one pass (`pass.changed` rewritten), on the recording's slot: the pyramid of its weighted change, then the combine.
   void RecordFaces(ID3D12GraphicsCommandList* list, color::FacesPass pass);
   [[nodiscard]] LookPlan LookPlanFor(nr::Size image, bool reduced) const;  // sources::PlanLook for this device and this set
   bool EnsureLook(const LookPlan& plan);       // false: the look (and C at Full) is skipped this recording
-  void RetireLook();
   void RetireMask();
-  void RetireExposure();
   [[nodiscard]] uint32_t ShaderOptions() const;  // the encode's and the decodes' shader_options
   ExposureChoice ChooseExposure(color::Encoding encoding, ID3D12Resource* game_texture, float game_factor);
   // The meter (and, for Auto's check, the copy of its state into the readback ring) before the encode.
   void RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, color::MeterPass pass, const ExposureChoice& exposure);
-  void PollExposureChecks();  // reads the samples the GPU has passed into auto_exposure_
-  void RetireExposureCheck();
+  void PollExposureChecks();  // reads the samples the GPU has passed into the set's auto_exposure
   ID3D12Resource* BoundMask(uint32_t slot);  // the mask copy for this recording, or null
   AfterNr RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
                         ID3D12Resource* nr_output, bool reduced, bool look_ready, color::Upsampling upsampling,
                         const color::StabilizeMotion& motion, bool reset);
 
   LookConfig config_;
-  LookSurfaces look_;
-  FaceSurfaces faces_;
-  bool faces_ran_ = false;  // Keep faces: this recording's pass 1 ran its twin, so the later passes keep only their broad change inside the face mask
+  // Keep faces: this recording's first pass ran its twin, so the later passes keep only their broad change inside the face mask. Split chain: the
+  // recording's slice's first pass (`faces_first_`), whose own result the recombination already made.
+  bool faces_ran_ = false;
+  uint32_t faces_first_ = 0u;
   MaskCopy mask_;
-  MeterState exposure_;
-  ExposureCheck check_;
-  AutoExposure auto_exposure_;  // Plan 17: kept for the pipeline's life (a latch never flips back), across disables and setting changes
-  ExposureReport exposure_report_;
   uint32_t resolve_slot_ = 0u;  // the recording's descriptor slot, for ResolvePass
 
   // What one recording needs allocated (v2 design §3.21's surfaces). A different plan reallocates the set.
@@ -286,6 +293,18 @@ class NrPipeline final : private nr::PassResolver {
     color::Encoding encoding = color::Encoding::AUTO;
     float input_scale = 0.f;
     nr::Mark last_use;  // the newest recording on this set (CommitSlot): the GPU is done with it once complete
+  };
+  // Split chain (design 3.3): what one stage group records on, apart from every other group's, so a group's encoding, size, exposure and look never
+  // restart another's. With every pass at one stage only sets_[0] is ever made: the single set of before the split.
+  struct StageSet {
+    Intermediates intermediates;
+    LookSurfaces look;
+    FaceSurfaces faces;
+    MeterState exposure;
+    ExposureCheck check;
+    AutoExposure auto_exposure;  // Plan 17: kept for the pipeline's life (a latch never flips back), across disables and setting changes
+    ExposureReport exposure_report;
+    MotionSource present_motion = MotionSource::NONE;  // the last present's provider
   };
   // Amendment 7, deepened by I-2 (Plan 4 fix round 4): copies indexed by the frame the next present closes. The flicker fix (2026-10-08): four slots, grown
   // to eight once a copy is skipped for a slot still read (a lag past 3; fix round 1, M6), and a present without its own binds the
@@ -319,7 +338,13 @@ class NrPipeline final : private nr::PassResolver {
   Texture CreateTexture(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
                         const wchar_t* name);
   std::string_view EnsureIntermediates(const SetPlan& plan);  // empty on success, else "out of memory"
-  void RetireSet();            // the intermediates only: freed now if the GPU is done with them, else at their mark
+  // `set`'s intermediates only: freed now if the GPU is done with them, else at their mark. The Retire*(StageSet*) free one set's surfaces: the recording's,
+  // or any from ReleaseIntermediates and RetireSetsFrom.
+  void RetireSet(StageSet* set);
+  void RetireLook(StageSet* set);
+  void RetireFaces(StageSet* set);
+  void RetireExposure(StageSet* set);
+  void RetireExposureCheck(StageSet* set);
   void RetireMotionCopies();   // likewise for the motion copies
   void RetireLaunchpadMotion();  // likewise for Launchpad's converted motion
   void RetireDlssPresentMotion();  // Plan 18 (fix round 1, M-1): likewise for Direct3D 11's converted ring vectors
@@ -337,13 +362,15 @@ class NrPipeline final : private nr::PassResolver {
   void NoteEncoding(color::Encoding encoding, float input_scale);
   void CommitSlot(uint32_t slot);
   bool Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::EncodePass pass);
-  nr::EvaluateResult Evaluate(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs inputs, const nr::Controls& controls);
+  nr::EvaluateResult Evaluate(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs inputs, const nr::Controls& controls,
+                              const nr::StageSlice& slice);
 
   Microsoft::WRL::ComPtr<ID3D12Device> device_;
   nr::Session& session_;
   nr::Timeline& timeline_;
   color::ColorPipeline color_;
-  Intermediates intermediates_;
+  std::array<StageSet, STAGE_SETS> sets_;
+  StageSet* set_ = &sets_[0];  // the recording's (ChainPart::set)
   std::array<nr::Mark, color::ColorPipeline::RING_SLOTS> slot_marks_ = {};
   uint32_t next_slot_ = 0u;
   uint64_t last_present_frame_ = 0u;
@@ -351,7 +378,6 @@ class NrPipeline final : private nr::PassResolver {
   MotionCopies motion_copies_;
   LaunchpadMotion launchpad_motion_;
   DlssPresentMotion dlss_present_motion_;  // Plan 18 (fix round 1, M-1)
-  MotionSource present_motion_ = MotionSource::NONE;  // the last present's provider
 };
 
 }  // namespace uplift::sources

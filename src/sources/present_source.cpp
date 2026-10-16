@@ -10,8 +10,8 @@ bool PresentSource::Initialize(std::string* error) {
 }
 
 PresentResult PresentSource::Record(ID3D12GraphicsCommandList* list, const PresentTarget& target,
-                                    const nr::Controls& controls, bool reset_hint, const WorkLayout& layout) {
-  return pipeline_.RecordPresent(list, target, controls, reset_hint, layout);
+                                    const nr::Controls& controls, bool reset_hint, const WorkLayout& layout, const ChainPart& part) {
+  return pipeline_.RecordPresent(list, target, controls, reset_hint, layout, part);
 }
 
 void PresentSource::ReleaseIntermediates() {

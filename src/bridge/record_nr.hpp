@@ -20,7 +20,9 @@ bool RecordNr(addon::DeviceContext& context, addon::TriggerPoint point, ID3D12Gr
 // Plan 18 (design §3): one DLSS stage's hand-off for a decided AFTER_DLSS or BEFORE_UPSCALING, as the add-on's hooked evaluate runs it: the game's Direct3D 11
 // resources from `frame` (punned), their regions resolved, D3D11Bridge::RunDlss with the stage's recording, the recording's tokens handed to the context
 // (submitted and stamped on the private queue, or dropped when nothing was submitted), and an image the bridge cannot share noted as the stage's problem.
-// With the add-on's lock held; never waits on the CPU.
+// With the add-on's lock held; never waits on the CPU. Split chain (Task 4): the context records the stage's own group of its chain, and in a Before + After
+// split the bridge keeps both stages' shares. Every hand-off (both DLSS stages' and the present's) runs on the bridge's one private queue, so a later
+// Present group is ordered after the DLSS stages' NR by that queue alone.
 DlssHandoff RunDlssStage(D3D11Bridge& bridge, addon::DeviceContext& context, addon::BridgedDlssWork work, const ngx_hooks::DlssFrame& frame,
                          std::chrono::steady_clock::time_point now);
 

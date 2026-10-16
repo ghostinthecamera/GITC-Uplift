@@ -76,6 +76,8 @@ struct VkPresentTarget {
 // transitioned. Never blocks. Not thread-safe: the add-on's lock.
 class VkNrPipeline final : private nr::PassResolver {
  public:
+  static constexpr uint32_t STAGE_SETS = nr::SESSION_STAGES;  // split chain (Task 5): one set per stage group, as NrPipeline's
+
   VkNrPipeline(const vk::NrFunctions& functions, VkDevice device, const VkPhysicalDeviceMemoryProperties& memory, nr::Session& session,
                nr::Timeline& timeline);
   ~VkNrPipeline();  // frees directly: only after the device is idle for them
@@ -101,8 +103,10 @@ class VkNrPipeline final : private nr::PassResolver {
   // token's event is set at the end of the hooked evaluate, whatever the result). `recorded` says whether anything went onto `buffer`. Nothing is recorded
   // for: Intensity 0 ("intensity 0": exact pass-through), an output format without a variant ("unsupported format"), a variant whose pipelines cannot be
   // built ("pipeline failed"), a region or a canvas below the NR floor (640x360) ("frame too small").
+  // Split chain (Task 5): each recording below runs `part` of the chain (its Session slice, on its stage group's set); the default is the whole chain on
+  // set 0, the single chain of before the split.
   PipelineResult RecordAfterDlss(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
-                                 const WorkLayout& layout = {});
+                                 const WorkLayout& layout = {}, const ChainPart& part = {});
   // Task 10, Before upscaling (design §4.1, v2 design §3.9): NR on the region of the game's Color (`color.resource`: a sampled image view in
   // SHADER_READ_ONLY_OPTIMAL, only read) before DLSS-SR upscales it, inside the game's command buffer right before DLSS's evaluate. The region is resampled
   // into the SETTLED work image of `layout` (the set is keyed on it, never on the per-frame render region, Plan 4's I-1), mirror-padded into the floor
@@ -113,7 +117,7 @@ class VkNrPipeline final : private nr::PassResolver {
   // outside their image. The caller issued the token before this call; its event is set after DLSS has read the private colour. `nr_applied` says the
   // private colour holds NR's result, left in SHADER_READ_ONLY_OPTIMAL for DLSS.
   PipelineResult RecordPreSr(VkCommandBuffer buffer, const VkDlssTarget& color, const nr::FrameInputs& inputs, const nr::Controls& controls,
-                             const WorkLayout& layout);
+                             const WorkLayout& layout, const ChainPart& part = {});
   // Plan 19: native NR at Present, inside Uplift's own command buffer `buffer` (never a game's, never ReShade's immediate one), which the caller submits to
   // the effect queue: the swap-chain image copied in (VkPresentTarget), RecordAfterDlss on the RGBA16F intermediate (no game exposure; UI correction as
   // LookConfig says; DLSS's Present copy, else Launchpad's UPLIFT_MV converted, else none, NR's history restarting when that provider changes), and the
@@ -121,11 +125,16 @@ class VkNrPipeline final : private nr::PassResolver {
   // intermediates are used on ReShade's queue alone, so they go at their marks through FreeFinished (never the timeline's pending releases). Nothing is
   // recorded for: Intensity 0, a frame or canvas below the NR floor, a pipeline that cannot be built, a busy descriptor slot, surfaces that cannot be made.
   PipelineResult RecordPresent(VkCommandBuffer buffer, const VkPresentTarget& target, const nr::Controls& controls, bool reset_hint,
-                               const WorkLayout& layout = {});
+                               const WorkLayout& layout = {}, const ChainPart& part = {});
   // After RecordPreSr applied NR and until the next recording: what DLSS reads as Color (a pointer to the struct the pipeline owns, valid while the set is).
+  // Before upscaling is always pass 1's group: set 0.
   [[nodiscard]] const NVSDK_NGX_Resource_VK* PrivateColor() const {
-    return intermediates_.private_color.image != VK_NULL_HANDLE ? &intermediates_.private_color.ngx : nullptr;
+    const Intermediates& set = sets_[0].intermediates;
+    return set.private_color.image != VK_NULL_HANDLE ? &set.private_color.ngx : nullptr;
   }
+  // Split chain (Task 5, design 3.3): the sets of the groups from `first` on, which a chain that has fewer no longer uses, go behind their last use, as a
+  // placement switch's set did.
+  void RetireSetsFrom(uint32_t first);
   // The formats Before upscaling reads the game's Color in: the five output variants, and BGRA8 (a sampled view needs no storage format).
   [[nodiscard]] static bool PreSrColorFormatSupported(VkFormat format);
   // The game's motion vectors are read as floats (D3D12's MotionViewFormat: unconverted ones cannot be copied, E9): RG16F, RG32F, RGBA16F, RGBA32F.
@@ -140,8 +149,8 @@ class VkNrPipeline final : private nr::PassResolver {
   // into it yet, so its layout is UNDEFINED (between copies it rests in SHADER_READ_ONLY_OPTIMAL).
   VkImage PrepareMaskCopy(VkFormat format, nr::Size size, bool* first);
   void NoteMaskCopied() { mask_.copied = (mask_.image.image != VK_NULL_HANDLE); }
-  // Plan 17: the exposure the latest recording's encode read (the Details line), as Direct3D 12's NrPipeline.
-  [[nodiscard]] ExposureReport LastExposure() const { return exposure_report_; }
+  // Plan 17: the exposure the latest recording's encode read (the Details line), as Direct3D 12's NrPipeline. Split chain: pass 1's group's (set 0).
+  [[nodiscard]] ExposureReport LastExposure() const { return sets_[0].exposure_report; }
   // Keep faces (2026-10-08): the device loads and stores the formats its recombination needs (the look's).
   [[nodiscard]] bool KeepFacesSupported() const { return look_storage_ && !color_.FacesFailed(); }
   // The mask copy, now when the GPU has passed its last use, else at its mark (Mask off, the effect off, NR off).
@@ -175,12 +184,8 @@ class VkNrPipeline final : private nr::PassResolver {
   // no completion token covers that queue. Retired ones wait here: this frees those whose mark is complete. Returns how many still wait. The
   // destructor frees the rest (after the game's idle).
   size_t FreeFinished();
-  [[nodiscard]] uint64_t HeldBytes() const {
-    const uint64_t motion_images = (intermediates_.zero_motion.image != VK_NULL_HANDLE ? 1u : 0u) + (intermediates_.canvas_motion.image != VK_NULL_HANDLE ? 1u : 0u);
-    return (intermediates_.a.image != VK_NULL_HANDLE ? intermediates_.bytes : 0u) + motion_images * intermediates_.motion_bytes + present_motion_bytes_
-           + look_.bytes + (mask_.image.image != VK_NULL_HANDLE ? mask_.bytes : 0u) + (exposure_.state.image != VK_NULL_HANDLE ? EXPOSURE_STATE_BYTES : 0u)
-           + present_.bytes + present_.launchpad_bytes + faces_.bytes;
-  }
+  // Split chain: every stage set's surfaces count (design 3.5).
+  [[nodiscard]] uint64_t HeldBytes() const;
 
  private:
   struct Intermediates {
@@ -316,8 +321,22 @@ class VkNrPipeline final : private nr::PassResolver {
     nr::Mark mark;
   };
 
-  void RetireSet();  // freed now if the GPU is done with them, else at their mark
-  void RetireLook();
+  // Split chain (Task 5): what one stage group records on, apart from every other group's, as NrPipeline's StageSet: a group's encoding, size, exposure and
+  // look never restart another's. With every pass at one stage only sets_[0] is ever made: the single set of before the split. Shared by the groups: the
+  // colour pipeline and its ring, the mask copy, the Present motion copies and native Present's own surfaces (only a Present group uses them).
+  struct StageSet {
+    Intermediates intermediates;
+    LookSurfaces look;
+    FaceSurfaces faces;
+    MeterState exposure;
+    ExposureCheck check;
+    AutoExposure auto_exposure;  // Plan 17: kept for the pipeline's life (a latch never flips back)
+    ExposureReport exposure_report;
+  };
+
+  // `set`'s surfaces, freed now if the GPU is done with them, else at their mark: the recording's set, or any from ReleaseNrSurfaces and RetireSetsFrom.
+  void RetireSet(StageSet* set);
+  void RetireLook(StageSet* set);
   void RetireMask();
   void RetirePresent();           // Plan 19: the staging image and the intermediate (and Launchpad's conversion)
   void RetirePresentLaunchpad();  // Plan 19: Launchpad's conversion alone (its vectors stopped coming)
@@ -326,10 +345,10 @@ class VkNrPipeline final : private nr::PassResolver {
   bool ConvertLaunchpadMotion(VkCommandBuffer buffer, const VkPresentTarget& target, const WorkLayout& work);
   // Stress round: present_.stand_in at `size`, cleared to zero and handed to NGX in SHADER_READ_ONLY_OPTIMAL; null when it cannot be made.
   const NVSDK_NGX_Resource_VK* ZeroStandIn(VkCommandBuffer buffer, nr::Size size);
-  void RetireExposure();
-  void RetireExposureCheck();
+  void RetireExposure(StageSet* set);
+  void RetireExposureCheck(StageSet* set);
   bool EnsureExposureCheck();  // the readback ring, made on first use
-  void PollExposureChecks();   // reads the samples the GPU has passed into auto_exposure_
+  void PollExposureChecks();   // reads the samples the GPU has passed into the set's auto_exposure
   // Final review C-1: frees `image` now when `mark` is complete, else keeps it in `reshade_retired_` (never in the timeline's pending releases).
   void RetireReshadeImage(const vk::NrImage& image, const nr::Mark& mark);
   // The Session's nr::PassResolver: pass `index`'s own Transfer and Colour strength applied to its raw output in place (Direct3D 12's ResolvePass).
@@ -338,12 +357,12 @@ class VkNrPipeline final : private nr::PassResolver {
   void CombineFaces(ID3D12GraphicsCommandList* list, ID3D12Resource* lighting, ID3D12Resource* faces) override;
   // Keep faces: the twin and the atlas at `canvas`, made now unless held. False (logged once): Keep faces is skipped this recording.
   bool EnsureFaces(nr::Size canvas);
-  void RetireFaces();
+  void RetireFaces(StageSet* set);
   // Keep faces: one pass's recombination (`pass.changed` rewritten) on the recording's slot: a barrier, the pyramid of its weighted change, the combine.
   void RecordFaces(VkCommandBuffer buffer, color::VkFacesPass pass);
   // Keep faces, before a recording's Session evaluate: the twin's surfaces and `frame_inputs->faces` while it is on (and can run), else its surfaces go.
-  // Call before OpenRecording, which opens the surfaces.
-  void PrepareFaces(nr::Size canvas, const nr::Controls& controls, nr::FrameInputs* frame_inputs);
+  // Call before OpenRecording, which opens the surfaces. Split chain: the twin of `slice`'s first pass, at its stage (decision Q5a).
+  void PrepareFaces(nr::Size canvas, const nr::Controls& controls, const nr::StageSlice& slice, nr::FrameInputs* frame_inputs);
   // The look set for `plan`, made now unless it is the one held. False (logged once): the look (and C at the output size) is skipped this recording.
   bool EnsureLook(const LookPlan& plan);
   [[nodiscard]] LookPlan LookPlanFor(nr::Size image, bool reduced) const;  // sources::PlanLook for this device and this set
@@ -385,15 +404,13 @@ class VkNrPipeline final : private nr::PassResolver {
   VkPhysicalDeviceMemoryProperties memory_;
   LookConfig config_;
   bool look_storage_ = true;
-  Intermediates intermediates_;
-  LookSurfaces look_;
-  FaceSurfaces faces_;
-  bool faces_ran_ = false;  // Keep faces: this recording's pass 1 ran its twin, so the later passes keep only their broad change inside the face mask
+  std::array<StageSet, STAGE_SETS> sets_;
+  StageSet* set_ = &sets_[0];  // the recording's (ChainPart::set)
+  // Keep faces: this recording's first pass ran its twin, so the later passes keep only their broad change inside the face mask. Split chain: the
+  // recording's slice's first pass (`faces_first_`), whose own result the recombination already made.
+  bool faces_ran_ = false;
+  uint32_t faces_first_ = 0u;
   MaskCopy mask_;
-  MeterState exposure_;
-  ExposureCheck check_;
-  AutoExposure auto_exposure_;  // Plan 17: kept for the pipeline's life (a latch never flips back)
-  ExposureReport exposure_report_;
   uint32_t resolve_slot_ = 0u;  // the recording's ring slot, for ResolvePass
   std::array<PresentMotionSlot, PRESENT_MOTION_SLOTS> present_motion_;
   nr::Size present_motion_size_;        // the slots' size: the motion region

@@ -20,6 +20,10 @@ constexpr auto DLSS_LATCH_WINDOW = std::chrono::seconds(10);
 // worth one WARN -- long enough that a normal submit-only-thread stall (aged out by Timeline's own
 // AGED_SUBMISSION_TIME, at most a few hundred ms) never triggers it.
 constexpr auto DESCRIPTORS_BUSY_WARN_AGE = std::chrono::seconds(1);
+// Split chain (fix round 1, I1): why a later group cannot run at Present while the game's DLSS-stage NR goes to another queue than the presents. With
+// frame generation on, the presents come from its own queue (the owner's Onimusha check), so the card says that instead.
+constexpr std::string_view OTHER_QUEUE_REASON = "the game's DLSS runs on another queue";
+constexpr std::string_view FRAME_GEN_QUEUE_REASON = "with frame generation on, the presents come from another queue";
 
 }  // namespace
 
@@ -160,6 +164,34 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
     logged_after_dlss_ = false;
   }
   NotePlacementChange();
+  // The back buffer as NR at Present sees it: pass 1's output problem there, and (split chain, design 6.1) whether a later group can run there. Not read
+  // when nothing could run at Present.
+  std::string present_problem;
+  std::optional<color::Encoding> present_encoding;
+  nr::Size present_size;
+  // Fix round 1 (M3): for a later group only while some pass is stored at another stage, so the default path reads nothing more.
+  const bool present_possible = (placement_.placement == Placement::PRESENT || SplitStored());
+  if (present_possible && !target.problem.empty()) {
+    present_problem = std::string(target.problem);  // Plan 7: the D3D11 bridge cannot hand this back buffer to NR
+  } else if (present_possible && (target.resource != nullptr || target.format != DXGI_FORMAT_UNKNOWN)) {
+    DXGI_FORMAT format = target.format;
+    present_size = target.size;
+    if (target.resource != nullptr) {
+      const D3D12_RESOURCE_DESC description = target.resource->GetDesc();
+      present_size = {static_cast<uint32_t>(description.Width), description.Height};
+      format = description.Format;
+    }
+    if (!color::DescribeFormat(format).has_value()) {
+      present_problem = std::format("Unsupported back-buffer format (DXGI_FORMAT {})", static_cast<int>(format));
+    } else {
+      present_encoding = color::ResolveEncoding(config.encoding, target.color_space, format);
+      if (!present_encoding) {
+        present_problem = "HDR10 HLG output is not supported";
+      }
+    }
+  }
+  present_cannot_ = (!present_problem.empty() ? present_problem : (present_encoding ? std::string() : std::string("the back buffer cannot reach NR")));
+  UpdateChain();
   const bool dlss_placement =
       (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
   if (!dlss_placement && !ran_since_present_) {
@@ -177,12 +209,13 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   // Minor 4 (fix round 4): the Present motion copies are only useful with Source = Present and
   // MotionVectors wanting them; release them (through the Timeline, like any other intermediate) as
   // soon as either stops holding, rather than waiting for the Session to next go OFF. A no-op once
-  // there is nothing left to release.
-  if (placement_.placement != Placement::PRESENT || !config.motion_vectors) {
+  // there is nothing left to release. Split chain: a later group at Present binds them too.
+  const std::optional<uint32_t> present_group = GroupAt(Stage::PRESENT);
+  if (!present_group || !config.motion_vectors) {
     present_source_->Pipeline().ReleaseMotionCopies();
   }
   // 1.0.1 (fix round 1, minor 2): Launchpad's converted motion goes the same way once the Present path cannot bind UPLIFT_MV.
-  if (placement_.placement != Placement::PRESENT || !config.launchpad_motion) {
+  if (!present_group || !config.launchpad_motion) {
     present_source_->Pipeline().ReleaseLaunchpadMotion();
   }
 
@@ -191,25 +224,10 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   if (!dlss_placement) {
     frame_size_ = {};
   }
-  if (placement_.placement == Placement::PRESENT && !target.problem.empty()) {
-    message = std::string(target.problem);  // Plan 7: the D3D11 bridge cannot hand this back buffer to NR
-  } else if (placement_.placement == Placement::PRESENT
-             && (target.resource != nullptr || target.format != DXGI_FORMAT_UNKNOWN)) {
-    DXGI_FORMAT format = target.format;
-    frame_size_ = target.size;
-    if (target.resource != nullptr) {
-      const D3D12_RESOURCE_DESC description = target.resource->GetDesc();
-      frame_size_ = {static_cast<uint32_t>(description.Width), description.Height};
-      format = description.Format;
-    }
-    if (!color::DescribeFormat(format).has_value()) {
-      message = std::format("Unsupported back-buffer format (DXGI_FORMAT {})", static_cast<int>(format));
-    } else {
-      encoding_ = color::ResolveEncoding(config.encoding, target.color_space, format);
-      if (!encoding_) {
-        message = "HDR10 HLG output is not supported";
-      }
-    }
+  if (placement_.placement == Placement::PRESENT) {
+    message = std::move(present_problem);
+    encoding_ = present_encoding;
+    frame_size_ = present_size;
   }
   if (message != output_message_) {
     if (!message.empty()) {
@@ -218,8 +236,8 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
     output_message_ = std::move(message);
   }
 
-  if (placement_.placement == Placement::PRESENT && encoding_) {
-    present_layout_ = SettleLayout(frame_size_, false, now);  // before UpdateSession, so its Tick sees the size
+  if (present_group && present_encoding) {
+    present_layout_ = SettleLayout(present_size, Stage::PRESENT, now);  // before UpdateSession, so its Tick sees the size
   }
 
   const ui::SessionOptions& options = config.session;
@@ -230,6 +248,10 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   session_->SetCreateOptions(options.preset, options.performance);
   session_->SetPassCount(options.pass_count);
   session_->NoteFacesWanted(config.look.keep_faces.enabled);  // Keep faces fix round 2 (4): its off edge, even on a frame NR then skips
+  for (uint32_t group = 1u; group < chain_.group_count; ++group) {
+    const Stage stage = chain_.groups[group].stage;  // decision Q5a: a later group's own "Keep faces here"
+    session_->NoteFacesWanted(static_cast<uint8_t>(stage), config.look.keep_faces.enabled && LaterStageKeepsFaces(stage));
+  }
   session_->SetAutoRetry(options.auto_retry);
   session_->SetPassViewLimit(config.pass_view_limit);
   if (config.settings_generation != settings_generation_) {
@@ -238,13 +260,16 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   }
   UpdateSession(now);
 
-  if (placement_.placement == Placement::PRESENT && encoding_) {
-    diffuse_white_nits_ = (config.diffuse_white_nits > 0.f ? config.diffuse_white_nits
-                                                           : color::DefaultDiffuseWhiteNits(*encoding_));
+  if (present_group && present_encoding) {
+    const float diffuse_white_nits = (config.diffuse_white_nits > 0.f ? config.diffuse_white_nits
+                                                                      : color::DefaultDiffuseWhiteNits(*present_encoding));
+    if (*present_group == 0u) {
+      diffuse_white_nits_ = diffuse_white_nits;  // the status describes pass 1's group
+    }
     frame_target_ = {
         .resource = target.resource,
-        .encoding = *encoding_,
-        .diffuse_white_nits = diffuse_white_nits_,
+        .encoding = *present_encoding,
+        .diffuse_white_nits = diffuse_white_nits,
         .transfer_strength = config.transfer_strength,
         .color_strength = config.color_strength,
     };
@@ -260,14 +285,33 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   if (point == TriggerPoint::NONE || !frame_ready_) return {};
   frame_ready_ = false;
   ran_since_present_ = true;
+  // Split chain: the Present group is pass 1's (group 0, the single chain of before) or a later one, whose result only Status's groups report.
+  const uint32_t group = GroupAt(Stage::PRESENT).value_or(0u);
+  StageState& stage = stages_[static_cast<size_t>(Stage::PRESENT)];
+  const auto skip = [&](std::string_view reason) -> sources::PresentResult {
+    stage.nr_applied = false;
+    stage.passes_run = 0u;
+    stage.skip_reason = reason;
+    stage.motion_source = sources::MotionSource::NONE;
+    if (group == 0u) {
+      skip_reason_ = reason;
+      skip_from_session_ = false;
+    } else {
+      present_reset_owed_ = true;  // the Session never saw this frame: the group's next recording restarts its history
+    }
+    return {.reason = reason};
+  };
   // Spec §11: on the Present path NR would also run on generated frames.
-  if (frame_generation_.State().active && !config_.present_with_frame_gen) {
-    skip_reason_ = "frame generation is on";
-    skip_from_session_ = false;
-    return {.reason = skip_reason_};
-  }
-  ApplyLookConfig(last_present_.value_or(std::chrono::steady_clock::now()));
+  if (frame_generation_.State().active && !config_.present_with_frame_gen) return skip("frame generation is on");
+  // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before its source copy and encode.
+  if (group > 0u && !session_->SliceRuns(slices_[group])) return skip(SliceSkipReason(group));
+  // Split chain (fix round 1, I1): two features of one NR runtime never run at once, and nothing ever makes a queue wait on the GPU (with the game's DLSS on
+  // an async queue that can deadlock). DLSS-stage NR on another queue latches Present off for later groups (UpdateChain); until that shows, a later Present
+  // group runs only once every earlier DLSS-stage recording off the present queue has completed, else it skips this frame. On the present queue itself the
+  // queue's order keeps them apart.
+  if (group > 0u && !timeline_->StageWorkDone(dlss_stage_token_, present_queue_)) return skip("waiting for the earlier stages' NR");
   host->FlushPending();
+  ApplyLookConfig(last_present_.value_or(std::chrono::steady_clock::now()), group);
   host->TargetBarrier(entry_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
   frame_target_.dlss_motion = {.resource = (motion_is_dlss && config_.motion_vectors ? motion : nullptr),
                                 .rect = (motion_is_dlss ? dlss_motion_region : nr::Rect{})};
@@ -279,17 +323,27 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   frame_target_.dlss_motion_scale_y = (motion_is_dlss ? dlss_scale_y : 1.f);
   frame_target_.dlss_motion_raw = (motion_is_dlss && dlss_stages_);  // fix round 1 (M-1): the motion copy filters them, as every other Present source
   frame_target_.dlss_motion_flip = (frame_target_.dlss_motion_raw && config_.dlss_motion_upside_down);  // 1.1.6 (Vulkan's copies are flipped by theirs)
-  const sources::PresentResult result =
-      present_source_->Record(host->NativeList(), frame_target_, controls_, false, present_layout_);
+  const sources::PresentResult result = present_source_->Record(host->NativeList(), frame_target_, controls_, present_reset_owed_, present_layout_,
+                                                                {.slice = slices_[group], .set = group});
   host->TargetBarrier(D3D12_RESOURCE_STATE_COPY_SOURCE, entry_state);
-  nr_applied_ = result.nr_applied;
-  nr_recordings_ += (result.nr_applied ? 1u : 0u);
-  passes_run_ = result.passes_run;
-  skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
-  skip_from_session_ = (result.nr_applied ? false : result.from_session);
-  motion_source_ = result.motion_source;
-  motion_scale_x_ = result.motion_scale_x;
-  motion_scale_y_ = result.motion_scale_y;
+  if (result.nr_applied) {
+    present_reset_owed_ = false;
+  }
+  stage.nr_applied = result.nr_applied;
+  stage.passes_run = result.passes_run;
+  stage.skip_reason = (result.nr_applied ? std::string_view() : result.reason);
+  stage.motion_source = result.motion_source;
+  if (group == 0u) {
+    // The status and NR's heartbeat follow pass 1's group: one NR frame per frame.
+    nr_applied_ = result.nr_applied;
+    nr_recordings_ += (result.nr_applied ? 1u : 0u);
+    passes_run_ = result.passes_run;
+    skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
+    skip_from_session_ = (result.nr_applied ? false : result.from_session);
+    motion_source_ = result.motion_source;
+    motion_scale_x_ = result.motion_scale_x;
+    motion_scale_y_ = result.motion_scale_y;
+  }
   if (result.nr_applied) {
     trigger_used_ = point;
     if (point != logged_trigger_) {
@@ -356,12 +410,14 @@ bool DeviceContext::NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chr
     // Minor 2 (fix round 4): a placement change decided here needs the same bookkeeping BeginFrame gives
     // it, or the log stays silent and the work size keeps the old placement's until the next present.
     NotePlacementChange();
+    UpdateChain();  // split chain: the chain follows pass 1's placement, with the latest present's back buffer
     // Batch 1 re-review R1: the same release BeginFrame gives a placement change, so the Present motion
     // copies do not linger past starvation switching Auto away from Present (or MotionVectors off).
-    if (placement_.placement != Placement::PRESENT || !config_.motion_vectors) {
+    const bool present_group = GroupAt(Stage::PRESENT).has_value();
+    if (!present_group || !config_.motion_vectors) {
       present_source_->Pipeline().ReleaseMotionCopies();
     }
-    if (placement_.placement != Placement::PRESENT || !config_.launchpad_motion) {
+    if (!present_group || !config_.launchpad_motion) {
       present_source_->Pipeline().ReleaseLaunchpadMotion();
     }
     UpdateSession(now);
@@ -371,14 +427,14 @@ bool DeviceContext::NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chr
 
 sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                       std::chrono::steady_clock::time_point now) {
+  const std::optional<bool> before_reset = std::exchange(before_reset_, std::nullopt);  // this evaluate's, from BeforeDlssEvaluate
   if (!NoteMainEvaluate(frame, now)) return {.reason = "device removed"};
-  if (placement_.placement == Placement::PRESENT) {
-    // Amendment 7 (Key decision 7): with Source = Present, copy the game's motion vectors on its list for
-    // the present that closes this frame.
+  // Amendment 7 (Key decision 7): copy the game's motion vectors on its list for the present that closes this frame: with Source = Present, and (split
+  // chain) for a later group at Present.
+  const auto copy_motion = [&]() -> sources::PipelineResult {
     ID3D12GraphicsCommandList* const list = host.NativeList();
-    if (config_.source != ui::PlacementSource::PRESENT || !config_.motion_vectors || frame.motion_vectors == nullptr
-        || session_->State() != nr::SessionState::ACTIVE || list == nullptr || !host.StateKnown()
-        || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+    if (!config_.motion_vectors || frame.motion_vectors == nullptr || session_->State() != nr::SessionState::ACTIVE || list == nullptr
+        || !host.StateKnown() || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
       return {.reason = "not placed after DLSS"};
     }
     const sources::PipelineResult copied = sources::RecordOnGameList(host, *timeline_, config_.restore, [&] {
@@ -392,32 +448,71 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
       last_game_list_recording_ = now;
     }
     return copied;
+  };
+  if (placement_.placement == Placement::PRESENT) {
+    if (config_.source != ui::PlacementSource::PRESENT) return {.reason = "not placed after DLSS"};
+    return copy_motion();
   }
-  if (placement_.placement != Placement::AFTER_DLSS || dlss_idle_) {
+  // Pass 1 runs inside the game's frame here, so a Present group can only be a later one.
+  sources::PipelineResult motion_copy = {.reason = "not placed after DLSS"};
+  if (const std::optional<uint32_t> present = GroupAt(Stage::PRESENT); present && session_->SliceRuns(slices_[*present])) {
+    motion_copy = copy_motion();  // only for a Present group that runs (fix round 1, M4)
+  }
+  const std::optional<uint32_t> group = GroupAt(Stage::AFTER_DLSS);
+  if (!group || dlss_idle_) {
     descriptors_busy_since_.reset();
-    return {.reason = "not placed after DLSS"};  // Before upscaling already ran in BeforeDlssEvaluate
+    return motion_copy;  // Before upscaling already ran in BeforeDlssEvaluate
   }
   const nr::Rect region = sources::ResolveOutputRegion(frame);
-  const sources::WorkLayout layout = SettleLayout({region.width, region.height}, false, now);  // N10: in every state
+  const sources::WorkLayout layout = SettleLayout({region.width, region.height}, Stage::AFTER_DLSS, now);  // N10: in every state
   // Important 3 (fix round 1, N11): only ACTIVE has anything to evaluate. LOADING, GRACE, DRAINING and
   // FAILED would otherwise reach AfterDlssSource::Run and report its misleading "list state unknown".
   if (session_->State() != nr::SessionState::ACTIVE) {
-    nr_applied_ = false;
-    skip_reason_ = {};  // NR is off: nothing to explain, and the list's state is not tracked
-    skip_from_session_ = false;
+    stages_[static_cast<size_t>(Stage::AFTER_DLSS)].nr_applied = false;
+    stages_[static_cast<size_t>(Stage::AFTER_DLSS)].skip_reason = {};
+    if (*group == 0u) {
+      nr_applied_ = false;
+      skip_reason_ = {};  // NR is off: nothing to explain, and the list's state is not tracked
+      skip_from_session_ = false;
+    }
     descriptors_busy_since_.reset();
     return {.reason = "NR is off"};
   }
-  return RecordAfterDlss(frame, host, layout, now);
+  if (*group > 0u && !session_->SliceRuns(slices_[*group])) {
+    // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before its source copy; its next recording starts afresh.
+    after_dlss_->OweReset();
+    stages_[static_cast<size_t>(Stage::AFTER_DLSS)].nr_applied = false;
+    stages_[static_cast<size_t>(Stage::AFTER_DLSS)].skip_reason = SliceSkipReason(*group);
+    return {.reason = SliceSkipReason(*group)};
+  }
+  return RecordAfterDlss(frame, host, layout, now, *group, before_reset);
 }
 
 sources::PipelineResult DeviceContext::RecordAfterDlss(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
-                                                       const sources::WorkLayout& layout, std::chrono::steady_clock::time_point now) {
-  ApplyLookConfig(now);
-  const sources::PipelineResult result = after_dlss_->Run(host, frame, reset_merger_.Filter(frame.reset, now), DlssConfig(layout));
+                                                       const sources::WorkLayout& layout, std::chrono::steady_clock::time_point now, uint32_t group,
+                                                       std::optional<bool> before_reset) {
+  ApplyLookConfig(now, group);
+  // The game's reset, filtered once per evaluate: behind a Before upscaling group, the answer that group's recording got.
+  bool reset = false;
+  if (before_reset) {
+    reset = *before_reset;
+  } else {
+    reset = reset_merger_.Filter(frame.reset, now);
+  }
+  const sources::PipelineResult result = after_dlss_->Run(host, frame, reset, DlssConfig(layout, group));
   if (result.recorded) {
     last_game_list_recording_ = now;
+    last_dlss_token_ = result.token;  // fix round 2 (I1): marked if the chain splits before its work is done
+    if (chain_.Split()) {
+      dlss_stage_token_ = std::max(dlss_stage_token_, result.token);
+      timeline_->MarkStageToken(result.token);  // fix round 1 (I1): where its list goes decides whether Present may run beside it
+    }
   }
+  StageState& stage = stages_[static_cast<size_t>(Stage::AFTER_DLSS)];
+  stage.nr_applied = result.nr_applied;
+  stage.passes_run = result.passes_run;
+  stage.skip_reason = (result.nr_applied ? std::string_view() : result.reason);
+  stage.motion_source = result.motion_source;
   // Important 1 (fix round 2): a submit-only thread's tokens age out only after Timeline's own
   // AGED_SUBMISSION_TIME, so the ring can stay fully busy for a while there by design (see the ring
   // size in color_pipeline.hpp). One WARN per context once that has held for over a second running,
@@ -434,18 +529,21 @@ sources::PipelineResult DeviceContext::RecordAfterDlss(const ngx_hooks::DlssFram
   } else {
     descriptors_busy_since_.reset();
   }
-  nr_applied_ = result.nr_applied;
-  nr_recordings_ += (result.nr_applied ? 1u : 0u);
-  passes_run_ = result.passes_run;
-  skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
-  skip_from_session_ = (result.nr_applied ? false : result.from_session);
-  motion_source_ = result.motion_source;
-  motion_scale_x_ = result.motion_scale_x;
-  motion_scale_y_ = result.motion_scale_y;
-  frame_size_ = frame.snapshot.output;
-  if (result.nr_applied && !logged_after_dlss_) {
-    logged_after_dlss_ = true;  // once per activation, as the Present path logs its trigger
-    nr::Log(nr::LogLevel::INFO, "NR trigger: after DLSS");
+  if (group == 0u) {
+    // The status and NR's heartbeat follow pass 1's group: one NR frame per frame.
+    nr_applied_ = result.nr_applied;
+    nr_recordings_ += (result.nr_applied ? 1u : 0u);
+    passes_run_ = result.passes_run;
+    skip_reason_ = (result.nr_applied ? std::string_view() : result.reason);
+    skip_from_session_ = (result.nr_applied ? false : result.from_session);
+    motion_source_ = result.motion_source;
+    motion_scale_x_ = result.motion_scale_x;
+    motion_scale_y_ = result.motion_scale_y;
+    frame_size_ = frame.snapshot.output;
+    if (result.nr_applied && !logged_after_dlss_) {
+      logged_after_dlss_ = true;  // once per activation, as the Present path logs its trigger
+      nr::Log(nr::LogLevel::INFO, "NR trigger: after DLSS");
+    }
   }
   if (trace_frames_ > 0u) {
     --trace_frames_;
@@ -456,7 +554,9 @@ sources::PipelineResult DeviceContext::RecordAfterDlss(const ngx_hooks::DlssFram
 }
 
 bool DeviceContext::BeforeUpscaling() const {
-  return config_.pre_upscale && main_feature_ == NVSDK_NGX_Feature_SuperSampling;
+  // A bridged context runs the DLSS stages only as the Direct3D 11 bridge's (dlss_stages_), which keeps DLSS-SR only.
+  const ngx_hooks::NgxApi api = (bridged_ ? ngx_hooks::NgxApi::D3D11 : ngx_hooks::NgxApi::D3D12);
+  return config_.pre_upscale && PreSrFeatureAllowed(main_feature_, api);
 }
 
 ID3D12Resource* DeviceContext::PrepareMaskCopy(const D3D12_RESOURCE_DESC* mask) {
@@ -464,13 +564,158 @@ ID3D12Resource* DeviceContext::PrepareMaskCopy(const D3D12_RESOURCE_DESC* mask) 
   return present_source_->Pipeline().PrepareMaskCopy(wanted ? mask : nullptr);
 }
 
-void DeviceContext::ApplyLookConfig(std::chrono::steady_clock::time_point now) {
+void DeviceContext::ApplyLookConfig(std::chrono::steady_clock::time_point now, uint32_t group) {
   sources::LookConfig look = config_.look;
-  if (last_look_recording_) {
-    look.frame_seconds = std::chrono::duration<float>(now - *last_look_recording_).count();  // the pipeline clamps it
+  std::optional<std::chrono::steady_clock::time_point>& last_look_recording = last_look_recordings_[group];
+  if (last_look_recording) {
+    look.frame_seconds = std::chrono::duration<float>(now - *last_look_recording).count();  // the pipeline clamps it
   }
-  last_look_recording_ = now;
+  last_look_recording = now;
+  // Decision Q5b: Result shaping acts on the last group's change only (shaping twice would double it); an earlier group's change passes through as it is.
+  // Fix round 1 (I2): the last group that runs, so a later group the budget cut (or the Defaults view hides) never takes the shaping away. A group that
+  // skips for the order (I1) cannot be known ahead: rare, accepted.
+  uint32_t shaped = (chain_.group_count > 0u ? chain_.group_count - 1u : 0u);
+  while (shaped > 0u && !session_->SliceRuns(slices_[shaped])) {
+    --shaped;
+  }
+  if (group != shaped) {
+    look.look.enabled = false;
+  }
+  // Decision Q5a: pass 1's group is protected whenever Keep faces is on, a later group only with its stage's "Keep faces here".
+  if (group > 0u && group < chain_.group_count) {
+    look.keep_faces.enabled = (look.keep_faces.enabled && LaterStageKeepsFaces(chain_.groups[group].stage));
+  }
   present_source_->Pipeline().SetLookConfig(look);
+}
+
+void DeviceContext::UpdateChain() {
+  // Design 6.1: why each stage cannot run now. A DLSS pause is a wait, never a cause (decision Q4): its groups skip those frames.
+  const bool dlss_off = (dlss_off_.Off() && !core_hold_.Held());
+  std::string_view dlss_cause;
+  if (!dlss_unavailable_reason_.empty()) {
+    dlss_cause = dlss_unavailable_reason_;
+  } else if (!dlss_seen_) {
+    dlss_cause = "DLSS has not run yet";
+  } else if (dlss_off) {
+    dlss_cause = "the game's DLSS is off";
+  }
+  ChainFacts facts = {
+      .pass1 = placement_.placement,
+      .passes = config_.session.pass_count,
+      .stored = config_.pass_stages,
+      .split_capable = config_.split_capable,
+  };
+  std::string_view before_cause = dlss_cause;
+  if (before_cause.empty()) {
+    before_cause = (!before_upscaling_problem_.empty() ? std::string_view(before_upscaling_problem_)
+                    : BeforeUpscaling()                ? std::string_view()
+                                                       : std::string_view("Before upscaling is off"));
+  }
+  facts.cannot[static_cast<size_t>(Stage::BEFORE_UPSCALING)] = before_cause;
+  facts.cannot[static_cast<size_t>(Stage::AFTER_DLSS)] = (dlss_cause.empty() ? std::string_view(after_dlss_problem_) : dlss_cause);
+  // Fix round 1 (I1): DLSS-stage NR seen on another queue than the presents keeps Present off for later groups: their passes join the DLSS stage, so NR
+  // never runs on two queues at once (no GPU wait can order them safely). Checked only while a split is stored, against the queue presenting now: BeginFrame
+  // updated present_queue_ before this, so a later Present group never records on a new queue before this check. With frame generation the presents
+  // come from its own queue, and may come back to the game's when it stops; Present is allowed again only then (no DLSS-stage list ever went there).
+  if (present_queue_ != nullptr && SplitStored()) {
+    ID3D12CommandQueue* const other = timeline_->StageQueueOtherThan(present_queue_);
+    if (other != other_dlss_queue_) {
+      if (other != nullptr) {
+        nr::Logf(nr::LogLevel::INFO, "Direct3D 12: the game's DLSS runs on another queue ({}) than its presents ({}){}: passes stored at Present run at the "
+                 "DLSS stage", static_cast<const void*>(other), static_cast<const void*>(present_queue_),
+                 (frame_generation_.State().active ? " with frame generation on" : ""));
+      } else {
+        nr::Logf(nr::LogLevel::INFO, "Direct3D 12: the presents ({}) are on the game's DLSS queue again: passes stored at Present run there again",
+                 static_cast<const void*>(present_queue_));
+      }
+      other_dlss_queue_ = other;
+    }
+  }
+  std::string_view present_cause;
+  if (!present_cannot_.empty()) {
+    present_cause = present_cannot_;
+  } else if (frame_generation_.State().active && !config_.present_with_frame_gen) {
+    present_cause = "frame generation is on";
+  } else if (other_dlss_queue_ != nullptr) {
+    present_cause = (frame_generation_.State().active ? FRAME_GEN_QUEUE_REASON : OTHER_QUEUE_REASON);
+  }
+  facts.cannot[static_cast<size_t>(Stage::PRESENT)] = present_cause;
+  ChainPlan chain = DecideChain(facts);
+
+  const auto same_groups = [](const ChainPlan& first, const ChainPlan& second) {
+    if (first.group_count != second.group_count) return false;
+    for (uint32_t index = 0u; index < first.group_count; ++index) {
+      const StageGroup& a = first.groups[index];
+      const StageGroup& b = second.groups[index];
+      if (a.stage != b.stage || a.first != b.first || a.count != b.count) return false;
+    }
+    return true;
+  };
+  if (!same_groups(chain, chain_)) {
+    // Logged only around a split, so a one-group chain logs exactly what the placement line already says.
+    if (chain.Split()) {
+      nr::Logf(nr::LogLevel::INFO, "NR chain: {}", FormatChainLine(chain, {}));
+    } else if (chain_.Split()) {
+      nr::Log(nr::LogLevel::INFO, "NR chain: every pass at one stage");
+    }
+    for (size_t stage = 0u; stage < STAGE_COUNT; ++stage) {
+      const auto uses = [stage](const ChainPlan& plan) {
+        return std::ranges::any_of(std::span(plan.groups).first(plan.group_count),
+                                   [stage](const StageGroup& group) { return static_cast<size_t>(group.stage) == stage; });
+      };
+      if (!uses(chain) || !uses(chain_)) {
+        stages_[stage] = {};  // a stage that joins the chain works at its own size at once, and reports nothing stale from an earlier time
+      }
+    }
+  }
+  if (chain.note != chain_.note && !chain.note.empty()) {
+    nr::Logf(nr::LogLevel::INFO, "NR chain: {}", chain.note);
+  }
+  if (chain.Split() && !chain_.Split() && last_dlss_token_ != 0u) {
+    // Fix round 2 (I1): the DLSS-stage recording made under the one-group chain (unmarked) may still run on another queue when a later Present group first
+    // runs: marked now, it holds that group (StageWorkDone) until it is on the present queue or complete, and names its queue to the latch.
+    timeline_->MarkStageToken(last_dlss_token_);
+    dlss_stage_token_ = std::max(dlss_stage_token_, last_dlss_token_);
+  }
+  chain_ = std::move(chain);
+  for (uint32_t index = 0u; index < chain_.group_count; ++index) {
+    const StageGroup& group = chain_.groups[index];
+    const bool last = (index + 1u == chain_.group_count);
+    slices_[index] = {.stage = static_cast<uint8_t>(group.stage), .first = group.first, .count = (last ? nr::MAX_PASSES - group.first : group.count)};
+  }
+  if (chain_.group_count > 0u) {
+    session_->SetChain(std::span(slices_).first(chain_.group_count));
+  }
+  // Design 3.3: a group the chain no longer has frees its set behind its last use; set 0 stays, as the single set always did.
+  present_source_->Pipeline().RetireSetsFrom(std::max(chain_.group_count, 1u));
+}
+
+std::optional<uint32_t> DeviceContext::GroupAt(Stage stage) const {
+  for (uint32_t index = 0u; index < chain_.group_count; ++index) {
+    if (chain_.groups[index].stage == stage) return index;
+  }
+  return std::nullopt;
+}
+
+bool DeviceContext::SplitStored() const {
+  if (!config_.split_capable) return false;
+  const uint32_t later = std::min(config_.session.pass_count, ui::MAX_PASSES) - std::min(config_.session.pass_count, 1u);
+  return std::any_of(config_.pass_stages.begin(), config_.pass_stages.begin() + later, [](ui::PassStage stage) { return stage != ui::PassStage::SAME; });
+}
+
+std::string_view DeviceContext::SliceSkipReason(uint32_t group) const {
+  // As Session::Evaluate says it: the Defaults view hides a pass without a reason; a budget cut is "budget".
+  const bool hidden_by_view = (config_.pass_view_limit != 0u && slices_[group].first >= config_.pass_view_limit);
+  return (hidden_by_view ? std::string_view() : std::string_view("budget"));
+}
+
+bool DeviceContext::LaterStageKeepsFaces(Stage stage) const {
+  switch (stage) {
+    case Stage::AFTER_DLSS:       return config_.stage_keep_faces[0];
+    case Stage::PRESENT:          return config_.stage_keep_faces[1];
+    case Stage::BEFORE_UPSCALING: break;  // always pass 1's group
+  }
+  return false;
 }
 
 void DeviceContext::NotePlacementChange() {
@@ -480,19 +725,37 @@ void DeviceContext::NotePlacementChange() {
   if (logged_placement_ && *logged_placement_ == placement_.placement) return;
   logged_placement_ = placement_.placement;
   nr::Log(nr::LogLevel::INFO, FormatPlacementLine(placement_, main_snapshot_));
-  settle_.Reset();  // a new placement's work size applies at once
+  // A new placement's work size applies at once.
+  switch (placement_.placement) {
+    case Placement::BEFORE_UPSCALING: stages_[static_cast<size_t>(Stage::BEFORE_UPSCALING)].settle.Reset(); break;
+    case Placement::AFTER_DLSS:       stages_[static_cast<size_t>(Stage::AFTER_DLSS)].settle.Reset(); break;
+    case Placement::PRESENT:          stages_[static_cast<size_t>(Stage::PRESENT)].settle.Reset(); break;
+    case Placement::NONE:             break;
+  }
 }
 
-sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, bool before_upscaling, std::chrono::steady_clock::time_point now) {
+sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now) {
+  // Split chain (design 4): pass 1's group works at Setup's Resolution; a later group at its stage's own (Before upscaling is always pass 1's).
+  const bool pass1 = (chain_.group_count == 0u || chain_.groups[0].stage == stage);
+  ui::ResolutionMode mode = config_.resolution;
+  float custom_scale = config_.resolution_scale;
+  bool slider_held = config_.resolution_slider_held;
+  if (!pass1) {
+    const FrameConfig::StageResolution& own = config_.stage_resolution[(stage == Stage::AFTER_DLSS ? 0u : 1u)];
+    mode = own.mode;
+    custom_scale = own.scale;
+    slider_held = own.slider_held;
+  }
+  const bool before_upscaling = (stage == Stage::BEFORE_UPSCALING);
   double target_width = output.width;
   double target_height = output.height;
   double scale = 1.0;
-  switch (config_.resolution) {
+  switch (mode) {
     case ui::ResolutionMode::FULL:        break;
     case ui::ResolutionMode::QUALITY:     scale = sources::QUALITY_SCALE; break;
     case ui::ResolutionMode::BALANCED:    scale = sources::BALANCED_SCALE; break;
     case ui::ResolutionMode::PERFORMANCE: scale = sources::PERFORMANCE_SCALE; break;
-    case ui::ResolutionMode::CUSTOM:      scale = config_.resolution_scale / 100.0; break;
+    case ui::ResolutionMode::CUSTOM:      scale = custom_scale / 100.0; break;
     case ui::ResolutionMode::MATCH_GAME:
       // v2 design §3.8 (D3): DLSS's create-time render size, stable under dynamic resolution. Before
       // upscaling, NR already works at the render size; until DLSS is seen, Full. Plan 18 Task 12 (fix round 1, M-1): Full while the game's DLSS is off
@@ -503,16 +766,20 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, bool before_ups
       }
       break;
   }
-  const nr::Size image =
-      settle_.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, config_.resolution_slider_held);
+  StageState& state = stages_[static_cast<size_t>(stage)];
+  const nr::Size image = state.settle.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, slider_held);
   const nr::Size canvas = ((before_upscaling && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);
-  work_size_ = image;
-  canvas_size_ = canvas;
-  session_->NoteFrameSize(canvas);
+  state.work = image;
+  state.canvas = canvas;
+  if (pass1) {
+    work_size_ = image;
+    canvas_size_ = canvas;
+  }
+  session_->NoteFrameSize(static_cast<uint8_t>(stage), canvas);
   return {.image = image, .canvas = canvas, .upsampling = config_.upsampling};
 }
 
-sources::AfterDlssConfig DeviceContext::DlssConfig(const sources::WorkLayout& layout) const {
+sources::AfterDlssConfig DeviceContext::DlssConfig(const sources::WorkLayout& layout, uint32_t group) const {
   return {
       .encoding = config_.encoding,
       .diffuse_white_nits = config_.diffuse_white_nits,
@@ -526,6 +793,7 @@ sources::AfterDlssConfig DeviceContext::DlssConfig(const sources::WorkLayout& la
       .restore = config_.restore,
       .controls = controls_,
       .layout = layout,
+      .part = {.slice = slices_[group], .set = group},
   };
 }
 
@@ -534,7 +802,7 @@ ID3D12Resource* DeviceContext::BeforeDlssEvaluate(const ngx_hooks::DlssFrame& fr
   if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) return nullptr;
   if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_) return nullptr;
   frame_size_ = {frame.color_region.width, frame.color_region.height};
-  const sources::WorkLayout layout = SettleLayout(frame_size_, true, now);  // N10: in every state
+  const sources::WorkLayout layout = SettleLayout(frame_size_, Stage::BEFORE_UPSCALING, now);  // N10: in every state
   if (session_->State() != nr::SessionState::ACTIVE) {
     nr_applied_ = false;
     skip_reason_ = {};
@@ -547,11 +815,25 @@ ID3D12Resource* DeviceContext::BeforeDlssEvaluate(const ngx_hooks::DlssFrame& fr
 
 sources::PipelineResult DeviceContext::RecordBeforeUpscaling(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                              const sources::WorkLayout& layout, std::chrono::steady_clock::time_point now) {
-  ApplyLookConfig(now);
-  const sources::PipelineResult result = pre_sr_->Run(host, frame, reset_merger_.Filter(frame.reset, now), DlssConfig(layout));
+  ApplyLookConfig(now, 0u);  // Before upscaling is always pass 1's group
+  const bool reset = reset_merger_.Filter(frame.reset, now);
+  const sources::PipelineResult result = pre_sr_->Run(host, frame, reset, DlssConfig(layout, 0u));
+  if (chain_.Split()) {
+    before_reset_ = reset;  // the After DLSS group behind it in this evaluate takes the same answer
+  }
   if (result.recorded) {
     last_game_list_recording_ = now;  // the latch window covers pre-SR's recordings too
+    last_dlss_token_ = result.token;  // fix round 2 (I1), as After DLSS's
+    if (chain_.Split()) {
+      dlss_stage_token_ = std::max(dlss_stage_token_, result.token);
+      timeline_->MarkStageToken(result.token);  // fix round 1 (I1), as After DLSS's
+    }
   }
+  StageState& stage = stages_[static_cast<size_t>(Stage::BEFORE_UPSCALING)];
+  stage.nr_applied = result.nr_applied;
+  stage.passes_run = result.passes_run;
+  stage.skip_reason = (result.nr_applied ? std::string_view() : result.reason);
+  stage.motion_source = result.motion_source;
   nr_applied_ = result.nr_applied;
   nr_recordings_ += (result.nr_applied ? 1u : 0u);
   passes_run_ = result.passes_run;
@@ -569,10 +851,11 @@ sources::PipelineResult DeviceContext::RecordBeforeUpscaling(const ngx_hooks::Dl
 
 BridgedDlssDecision DeviceContext::DecideBeforeEvaluate(const ngx_hooks::DlssFrame& frame, nr::Size render_region,
                                                         std::chrono::steady_clock::time_point now) {
+  before_reset_.reset();  // split chain: each evaluate's own, set only by this evaluate's Before upscaling recording
   if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) return {};
   if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_ || frame.feature != NVSDK_NGX_Feature_SuperSampling) return {};
   frame_size_ = render_region;
-  bridged_layout_ = SettleLayout(frame_size_, true, now);  // N10: in every state
+  bridged_layouts_[0] = SettleLayout(frame_size_, Stage::BEFORE_UPSCALING, now);  // N10: in every state
   if (session_->State() != nr::SessionState::ACTIVE) {
     nr_applied_ = false;
     skip_reason_ = {};
@@ -588,7 +871,10 @@ BridgedDlssDecision DeviceContext::DecideBeforeEvaluate(const ngx_hooks::DlssFra
 
 BridgedDlssDecision DeviceContext::DecideAfterEvaluate(const ngx_hooks::DlssFrame& frame, nr::Size output_region,
                                                        std::chrono::steady_clock::time_point now) {
-  if (!NoteMainEvaluate(frame, now)) return {};
+  if (!NoteMainEvaluate(frame, now)) {
+    before_reset_.reset();
+    return {};
+  }
   if (placement_.placement == Placement::PRESENT) {
     // Plan 18 (design §4): Source = Present copies DLSS's vectors for the present that closes this frame, as Direct3D 12's amendment 7, into the bridge's ring.
     if (config_.source != ui::PlacementSource::PRESENT || !config_.motion_vectors || frame.motion_vectors == nullptr
@@ -599,37 +885,74 @@ BridgedDlssDecision DeviceContext::DecideAfterEvaluate(const ngx_hooks::DlssFram
             .motion_scale_x = frame.mv_scale_x * config_.motion_scale_x,
             .motion_scale_y = frame.mv_scale_y * config_.motion_scale_y};
   }
-  if (placement_.placement != Placement::AFTER_DLSS || dlss_idle_) {
-    descriptors_busy_since_.reset();
-    return {};
+  // Split chain (Task 4): pass 1 runs inside the game's frame here, so a Present group is a later one: DLSS's vectors go into the ring for it, as Direct3D 12
+  // native copies them (only for a Present group that runs, fix round 1 M4), and the add-on copies them before After DLSS's hand-off.
+  BridgedDlssDecision decision;
+  if (const std::optional<uint32_t> present = GroupAt(Stage::PRESENT);
+      present && config_.motion_vectors && frame.motion_vectors != nullptr && session_->State() == nr::SessionState::ACTIVE
+      && session_->SliceRuns(slices_[*present])) {
+    decision.present_motion = true;
+    decision.motion_scale_x = frame.mv_scale_x * config_.motion_scale_x;
+    decision.motion_scale_y = frame.mv_scale_y * config_.motion_scale_y;
   }
-  bridged_layout_ = SettleLayout(output_region, false, now);  // N10: in every state
-  if (session_->State() != nr::SessionState::ACTIVE) {
-    nr_applied_ = false;
-    skip_reason_ = {};
-    skip_from_session_ = false;
+  const std::optional<uint32_t> group = GroupAt(Stage::AFTER_DLSS);
+  if (!group || dlss_idle_) {
     descriptors_busy_since_.reset();
-    return {};
+    before_reset_.reset();
+    return decision;
+  }
+  bridged_layouts_[1] = SettleLayout(output_region, Stage::AFTER_DLSS, now);  // N10: in every state
+  StageState& stage = stages_[static_cast<size_t>(Stage::AFTER_DLSS)];
+  if (session_->State() != nr::SessionState::ACTIVE) {
+    stage.nr_applied = false;
+    stage.skip_reason = {};
+    if (*group == 0u) {
+      nr_applied_ = false;
+      skip_reason_ = {};
+      skip_from_session_ = false;
+    }
+    descriptors_busy_since_.reset();
+    before_reset_.reset();
+    return decision;
+  }
+  if (*group > 0u && !session_->SliceRuns(slices_[*group])) {
+    // Split chain: a later group the budget cut to no pass (or the Defaults view hides) crosses nothing; its next recording starts afresh.
+    after_dlss_->OweReset();
+    stage.nr_applied = false;
+    stage.passes_run = 0u;
+    stage.skip_reason = SliceSkipReason(*group);
+    before_reset_.reset();
+    return decision;
   }
   const std::string_view skip = (!nr::MeetsNrFloor(output_region) ? std::string_view("frame too small")
                                  : controls_.intensity <= 0.f     ? std::string_view("intensity 0")
                                                                   : std::string_view());
   if (!skip.empty()) {
     NoteBridgedSkip(BridgedDlssWork::AFTER_DLSS, skip);  // as AfterDlssSource::Run says it, and owes it; nothing crosses
-    return {};
+    before_reset_.reset();
+    return decision;
   }
-  return {.work = BridgedDlssWork::AFTER_DLSS};
+  decision.work = BridgedDlssWork::AFTER_DLSS;
+  return decision;
 }
 
 sources::PipelineResult DeviceContext::RecordBridgedStage(BridgedDlssWork work, const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                           std::chrono::steady_clock::time_point now) {
+  // Split chain (Task 4): After DLSS records its own group (pass 1's, or a later one behind Before upscaling, which then takes the reset that group's
+  // recording filtered in this evaluate); Before upscaling is always pass 1's.
   switch (work) {
-    case BridgedDlssWork::AFTER_DLSS:       return RecordAfterDlss(frame, host, bridged_layout_, now);
-    case BridgedDlssWork::BEFORE_UPSCALING: return RecordBeforeUpscaling(frame, host, bridged_layout_, now);
+    case BridgedDlssWork::AFTER_DLSS:
+      return RecordAfterDlss(frame, host, bridged_layouts_[1], now, GroupAt(Stage::AFTER_DLSS).value_or(0u), std::exchange(before_reset_, std::nullopt));
+    case BridgedDlssWork::BEFORE_UPSCALING: return RecordBeforeUpscaling(frame, host, bridged_layouts_[0], now);
     case BridgedDlssWork::NONE:
     case BridgedDlssWork::PRESENT_MOTION:   break;
   }
   return {.reason = "not placed after DLSS"};
+}
+
+bool DeviceContext::PresentRingWanted() const {
+  if (placement_.placement == Placement::PRESENT) return config_.present_motion_copy;
+  return (config_.motion_vectors && GroupAt(Stage::PRESENT).has_value());
 }
 
 void DeviceContext::NoteStageProblem(BridgedDlssWork stage, std::string problem) {
@@ -646,6 +969,14 @@ void DeviceContext::NoteBridgedSkip(BridgedDlssWork stage, std::string_view reas
   } else {
     after_dlss_->OweReset();
   }
+  // Split chain (Task 4): the stage's own group reports it (Status's groups and the card's pass count); the status above them follows pass 1's group only.
+  const Stage chain_stage = (stage == BridgedDlssWork::BEFORE_UPSCALING ? Stage::BEFORE_UPSCALING : Stage::AFTER_DLSS);
+  StageState& state = stages_[static_cast<size_t>(chain_stage)];
+  state.nr_applied = false;
+  state.passes_run = 0u;
+  state.skip_reason = reason;
+  state.motion_source = sources::MotionSource::NONE;
+  if (GroupAt(chain_stage).value_or(0u) != 0u) return;
   nr_applied_ = false;
   passes_run_ = 0u;
   skip_reason_ = reason;
@@ -704,8 +1035,20 @@ void DeviceContext::UpdateSession(std::chrono::steady_clock::time_point now) {
   dlss_idle_ = (dlss_placement && last_main_evaluate_.has_value()
                 && now - *last_main_evaluate_ > std::max(2 * config_.session.grace, DLSS_IDLE_MINIMUM));
   dlss_paused_ = (last_main_evaluate_.has_value() && now - *last_main_evaluate_ > DLSS_IDLE_MINIMUM);
+  // Split chain (design 3.4): NR is wanted while some group can run. A later Present group runs on while the game's DLSS idles (a menu), so the DLSS idle
+  // drain waits for none then; the DLSS groups skip those frames and restart their history when DLSS returns (design 6.1).
+  const bool later_present = (dlss_placement && GroupAt(Stage::PRESENT).has_value());
+  if (chain_.Split() && dlss_paused_) {
+    pre_sr_->OweReset();
+    after_dlss_->OweReset();
+    // Fix round 2 (m2): the card counts the passes that run; the DLSS groups run none while DLSS is paused.
+    for (const Stage stage : {Stage::BEFORE_UPSCALING, Stage::AFTER_DLSS}) {
+      stages_[static_cast<size_t>(stage)].nr_applied = false;
+      stages_[static_cast<size_t>(stage)].passes_run = 0u;
+    }
+  }
   const bool placement_ready =
-      (dlss_placement ? !dlss_idle_ : (placement_.placement == Placement::PRESENT && encoding_.has_value()));
+      (dlss_placement ? (!dlss_idle_ || later_present) : (placement_.placement == Placement::PRESENT && encoding_.has_value()));
   // Plan 15: never while held after the game's NGX shutdown (no NGX call on this device until its DLSS starts again), at any placement.
   const bool want = (config_.session.enabled && config_.nr_allowed && blocked_reason_.empty() && placement_ready && !core_hold_.Held());
   // New Important 1 (fix round 2), replacing Important 4 (fix round 1): that guard skipped
@@ -723,7 +1066,7 @@ void DeviceContext::UpdateSession(std::chrono::steady_clock::time_point now) {
   // hold entirely.
   // Plan 15: never while held, so a suspension cannot auto-resume NR (a load) before the game's DLSS starts again.
   const bool idle_only =
-      (config_.session.enabled && config_.nr_allowed && blocked_reason_.empty() && dlss_placement && dlss_idle_ && !core_hold_.Held());
+      (config_.session.enabled && config_.nr_allowed && blocked_reason_.empty() && dlss_placement && dlss_idle_ && !later_present && !core_hold_.Held());
   if (!(idle_only && session_->Status().suspended)) {
     session_->SetEnabled(want);
   }
@@ -842,7 +1185,9 @@ ContextStatus DeviceContext::Status() const {
     status.session = session_->Status();
   }
   std::string placement_note = placement_.reason;
-  if ((placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING) && dlss_idle_) {
+  // Split chain: a later Present group runs on while the game's DLSS idles, so NR is not waiting then.
+  if ((placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING) && dlss_idle_
+      && !GroupAt(Stage::PRESENT).has_value()) {
     placement_note = (status.session.state == nr::SessionState::OFF ? "Waiting for DLSS: NR memory released"
                                                                     : "Waiting for DLSS: releasing NR memory");
   }
@@ -872,6 +1217,17 @@ ContextStatus DeviceContext::Status() const {
   status.trigger = (placement_.placement == Placement::PRESENT ? trigger_used_ : TriggerPoint::NONE);
   status.nr_applied = nr_applied_;
   status.passes_run = passes_run_;
+  if (chain_.Split()) {
+    // Split chain: the card and Details count every group's passes, not only pass 1's group (the owner's Onimusha check showed "Running 1 of 3" with all
+    // three running). A group whose latest recording skipped counts none, and a group's latest recording counts at most its own passes (it may predate a
+    // chain change in this frame).
+    status.passes_run = 0u;
+    for (uint32_t index = 0u; index < chain_.group_count; ++index) {
+      const StageGroup& group = chain_.groups[index];
+      const StageState& stage = stages_[static_cast<size_t>(group.stage)];
+      status.passes_run += (stage.nr_applied ? std::min(stage.passes_run, group.count) : 0u);
+    }
+  }
   status.frame = frame_size_;
   status.encoding = encoding_;
   status.diffuse_white_nits = diffuse_white_nits_;
@@ -925,6 +1281,23 @@ ContextStatus DeviceContext::Status() const {
   }
   if (nr_applied_) {
     status.exposure_line = sources::ExposureLine(present_source_->Pipeline().LastExposure());  // Plan 17
+  }
+  // Split chain (design 6.2): the chain line and note, and each group's latest recording.
+  std::array<nr::Size, STAGE_COUNT> canvases = {};
+  for (size_t stage = 0u; stage < STAGE_COUNT; ++stage) {
+    canvases[stage] = stages_[stage].canvas;
+  }
+  if (chain_.Split()) {
+    status.chain_line = std::format("Chain: {}", FormatChainLine(chain_, canvases));
+  }
+  status.chain_note = chain_.note;
+  status.group_count = chain_.group_count;
+  for (uint32_t index = 0u; index < chain_.group_count; ++index) {
+    const StageGroup& group = chain_.groups[index];
+    const StageState& stage = stages_[static_cast<size_t>(group.stage)];
+    status.groups[index] = {.stage = group.stage, .first = group.first, .count = group.count, .nr_applied = stage.nr_applied,
+                            .passes_run = stage.passes_run, .skip_reason = stage.skip_reason, .motion_source = stage.motion_source,
+                            .work = stage.work, .canvas = stage.canvas};
   }
   // The user's motion-vector-indicator request: NrPipeline's mechanical report (motion_source_, and the
   // scale for DIRECT) plus the reason for NONE, which only DeviceContext has enough context to say.
@@ -980,8 +1353,11 @@ ContextStatus DeviceContext::Status() const {
       break;
     }
   }
-  if (config_.pre_upscale && placement_.placement == Placement::AFTER_DLSS && main_feature_ != NVSDK_NGX_Feature_SuperSampling) {
+  if (config_.pre_upscale && placement_.placement == Placement::AFTER_DLSS && !BeforeUpscaling()) {
     status.placement_line += " (Ray Reconstruction keeps NR after DLSS)";  // v2 design §3.9: the status says so
+  }
+  if (placement_.placement == Placement::BEFORE_UPSCALING && main_feature_ == NVSDK_NGX_Feature_RayReconstruction) {
+    status.placement_line += " (Ray Reconstruction's input)";  // split-chain design 11: NR runs before RR denoises and upscales
   }
   switch (placement_.placement) {
     case Placement::AFTER_DLSS:

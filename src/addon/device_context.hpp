@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 
+#include "addon/chain_plan.hpp"
 #include "addon/frame_trigger.hpp"
 #include "addon/placement.hpp"
 #include "color/encoding.hpp"
@@ -93,6 +94,19 @@ struct FrameConfig {
   bool vk_initialize_core = false;
   uint32_t pass_view_limit = 0u;      // Plan 6 (D6): the Defaults view's passes on the live features; 0 = all
   uint64_t settings_generation = 0u;  // Plan 6 (D11): changes with every saved settings change; restarts the retry backoff
+  // Split chain (2026-10-10, design 3.4): passes 2..10's stored "Runs at" (Pass{n}Stage), and whether this route runs passes at more than one stage (set
+  // by the add-on: Direct3D 12 native and the Direct3D 11 DLSS bridge, SplitCapable). Without it every pass runs at pass 1's stage.
+  std::array<ui::PassStage, ui::MAX_PASSES - 1u> pass_stages = {};
+  bool split_capable = false;
+  // Split chain (design 4, decision Q5a): a later stage group's own Resolution and "Keep faces here", at [0] After DLSS and [1] Present. Pass 1's group
+  // uses `resolution` and Keep faces itself.
+  struct StageResolution {
+    ui::ResolutionMode mode = ui::ResolutionMode::FULL;
+    float scale = 100.f;  // Custom: % of the output
+    bool slider_held = false;  // its Custom slider is being dragged: the work size waits for the release
+  };
+  std::array<StageResolution, 2> stage_resolution = {};
+  std::array<bool, 2> stage_keep_faces = {};
 };
 
 // 2026-10-08: the name of what UPLIFT_MV holds, and why none arrived, for the motion readouts.
@@ -155,6 +169,24 @@ struct ContextStatus {
   bool abandoned = false;
   std::string after_dlss_problem;        // Plan 18: NoteStageProblem's, for Setup
   std::string before_upscaling_problem;
+  // Split chain (design 6.2): Details' "Chain: passes 1-2 before upscaling (960x540), 3 at Present (1920x1080)" while the chain is split (empty
+  // otherwise), the card's note when a stored "Runs at" does not run as stored (ChainPlan::note), and each stage group's latest recording. Every other
+  // field above describes pass 1's group.
+  std::string chain_line;
+  std::string chain_note;
+  struct Group {
+    Stage stage = Stage::PRESENT;
+    uint32_t first = 0u;  // 0-based
+    uint32_t count = 0u;
+    bool nr_applied = false;
+    uint32_t passes_run = 0u;
+    std::string_view skip_reason;
+    sources::MotionSource motion_source = sources::MotionSource::NONE;
+    nr::Size work;
+    nr::Size canvas;
+  };
+  std::array<Group, STAGE_COUNT> groups = {};
+  uint32_t group_count = 0u;
 };
 
 // Plan 15: how long the game's Direct3D 12 NGX shutdown waits for NR's submitted work before Uplift releases NR on the device (else abandons it), as Vulkan's.
@@ -178,7 +210,10 @@ enum class BridgedDlssWork : uint8_t {
 };
 struct BridgedDlssDecision {
   BridgedDlssWork work = BridgedDlssWork::NONE;
-  float motion_scale_x = 1.f;  // PRESENT_MOTION: MV.Scale x MotionScaleX, the scale the ring slot carries to the Present path
+  // Split chain (Task 4): pass 1 runs inside the game's frame and a later group at Present, so DLSS's vectors also go into the Present path's ring, before
+  // `work` (After DLSS) runs. PRESENT_MOTION (pass 1 at Present) never sets it.
+  bool present_motion = false;
+  float motion_scale_x = 1.f;  // PRESENT_MOTION or `present_motion`: MV.Scale x MotionScaleX, the scale the ring slot carries to the Present path
   float motion_scale_y = 1.f;
 };
 
@@ -248,12 +283,19 @@ class DeviceContext {
   BridgedDlssDecision DecideBeforeEvaluate(const ngx_hooks::DlssFrame& frame, nr::Size render_region, std::chrono::steady_clock::time_point now);
   // After the original evaluate: OnDlssEvaluate's bookkeeping (DLSS seen, the cadence, the present-starvation catch-up), then AFTER_DLSS when NR runs after
   // DLSS for this evaluate (the work size settled on `output_region` first, the NR floor, Intensity above 0), PRESENT_MOTION when Source = Present wants
-  // DLSS's vectors (NR ACTIVE, the game passed vectors), else NONE.
+  // DLSS's vectors (NR ACTIVE, the game passed vectors), else NONE. Split chain (Task 4): `present_motion` too when a later group runs at Present.
   BridgedDlssDecision DecideAfterEvaluate(const ngx_hooks::DlssFrame& frame, nr::Size output_region, std::chrono::steady_clock::time_point now);
   // The decided AFTER_DLSS or BEFORE_UPSCALING on the private list `host` names, `frame` pointing at the bridge's shared copies; the status as OnDlssEvaluate
-  // and BeforeDlssEvaluate set it. Before upscaling with nr_applied: PrivateColor() holds NR's result.
+  // and BeforeDlssEvaluate set it. Before upscaling with nr_applied: PrivateColor() holds NR's result. Split chain (Task 4): the stage's own group of the
+  // chain (its slice and stage set), as Direct3D 12's evaluates record it.
   sources::PipelineResult RecordBridgedStage(BridgedDlssWork work, const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                              std::chrono::steady_clock::time_point now);
+  // Split chain (Task 4): the current chain has a group at `stage` (BeginFrame's). The Direct3D 11 bridge keeps both DLSS stages' shares while both run,
+  // and makes its back-buffer copy for a later group at Present.
+  [[nodiscard]] bool RunsAt(Stage stage) const { return GroupAt(stage).has_value(); }
+  // Split chain (Task 4): the Direct3D 11 bridge's ring of DLSS's vectors for the Present path is wanted: pass 1 at Present with
+  // FrameConfig::present_motion_copy, or a later group at Present while Motion vectors is not None. The add-on also drops it while NR is OFF.
+  [[nodiscard]] bool PresentRingWanted() const;
   // Plan 18: the pipeline's private colour (RGBA16F at the colour's size), where Before upscaling's recording leaves NR's result.
   [[nodiscard]] ID3D12Resource* PrivateColor() const { return present_source_->Pipeline().PrivateColor(); }
   // Plan 18 (design §3): the bridge cannot share this stage's image: the stage is greyed with `problem` (Setup) and Auto runs at Present from the next
@@ -345,31 +387,46 @@ class DeviceContext {
   // OFF/FAILED -- so an evaluate that drives the Timeline while presents starve reloads NR exactly
   // as a present would, instead of finding a stale placement and an unticked Session.
   void UpdateSession(std::chrono::steady_clock::time_point now);
-  // v2 design §3.8/§3.9: the settled work layout for an output region of `output` on the current
-  // placement. Noted to the Session in every state (N10), so a FAILED session retries when it changes.
-  sources::WorkLayout SettleLayout(nr::Size output, bool before_upscaling, std::chrono::steady_clock::time_point now);
+  // Split chain (design 3.1, 6.1): the frame's chain from pass 1's placement, the stored "Runs at" and why each stage cannot run now, right after
+  // ChoosePlacement (BeginFrame, and OnDlssEvaluate's present-starvation catch-up): logged once when it splits or changes, the Session's groups set, and a
+  // set no group uses any more retired.
+  void UpdateChain();
+  // The stage group of the current chain at `stage` (its index in chain order; 0 is pass 1's), if one is.
+  [[nodiscard]] std::optional<uint32_t> GroupAt(Stage stage) const;
+  // Decision Q5a: "Keep faces here" for a later group at `stage`.
+  [[nodiscard]] bool LaterStageKeepsFaces(Stage stage) const;
+  // Fix round 1 (M3): this route splits and some pass 2..N below the pass count is stored at another stage than Same.
+  [[nodiscard]] bool SplitStored() const;
+  // Fix round 1 (M4): why a later group the Session will not run skips, as Session::Evaluate says it: "budget", or nothing for the Defaults view.
+  [[nodiscard]] std::string_view SliceSkipReason(uint32_t group) const;
+  // v2 design §3.8/§3.9: the settled work layout for an output region of `output` at `stage`. Noted to the Session in every state (N10), so a FAILED
+  // session retries when it changes. Split chain (design 4): pass 1's group's stage at Setup's Resolution, a later group's at its stage's own.
+  sources::WorkLayout SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now);
   // Minor 2 (Plan 4 fix round 4): the bookkeeping a placement_ change needs wherever it is decided
   // (BeginFrame, and OnDlssEvaluate's present-starvation catch-up) -- logged once, and the settle
   // starts over so the new placement's work size applies at once. A no-op when the placement did not
   // change.
   void NotePlacementChange();
-  // The per-evaluate settings both DLSS placements run with.
-  [[nodiscard]] sources::AfterDlssConfig DlssConfig(const sources::WorkLayout& layout) const;
+  // The per-evaluate settings both DLSS placements run with, for stage group `group`'s recording.
+  [[nodiscard]] sources::AfterDlssConfig DlssConfig(const sources::WorkLayout& layout, uint32_t group) const;
   // Plan 18: OnDlssEvaluate's opening, shared with DecideAfterEvaluate: the removal check (false, with the status reset, after a removal), the core hold's
   // resume, DLSS seen, the cadence and the present-starvation catch-up.
   bool NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chrono::steady_clock::time_point now);
   // Plan 18: the recordings of both DLSS placements on `host`'s list, with the status they set: shared by the Direct3D 12 paths (OnDlssEvaluate,
-  // BeforeDlssEvaluate) and the Direct3D 11 bridge's (RecordBridgedStage).
+  // BeforeDlssEvaluate) and the Direct3D 11 bridge's (RecordBridgedStage). Split chain: After DLSS records stage group `group` (Before upscaling is always
+  // group 0); `before_reset`, the game's reset as this evaluate's Before upscaling group already filtered it (ResetMerger passes one per window).
   sources::PipelineResult RecordAfterDlss(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host, const sources::WorkLayout& layout,
-                                          std::chrono::steady_clock::time_point now);
+                                          std::chrono::steady_clock::time_point now, uint32_t group, std::optional<bool> before_reset);
   sources::PipelineResult RecordBeforeUpscaling(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host, const sources::WorkLayout& layout,
                                                 std::chrono::steady_clock::time_point now);
-  // PreUpscale is on and the main handle is DLSS-SR (Ray Reconstruction keeps NR after DLSS).
+  // PreUpscale is on and the main handle is DLSS-SR, or Ray Reconstruction on this native Direct3D 12 device (PreSrFeatureAllowed; the Direct3D 11 bridge
+  // keeps DLSS-SR only).
   [[nodiscard]] bool BeforeUpscaling() const;
   // Plan 5: FrameConfig::look for the recording about to run, with Δt since this context's last recording (v2 design
-  // §3.12: between main-handle evaluates on the DLSS placements, between presents on the Present path).
-  void ApplyLookConfig(std::chrono::steady_clock::time_point now);
-  std::optional<std::chrono::steady_clock::time_point> last_look_recording_;
+  // §3.12: between main-handle evaluates on the DLSS placements, between presents on the Present path). Split chain: of stage group `group`, with Result
+  // shaping on the last group only (decision Q5b) and Keep faces where it protects that group (Q5a).
+  void ApplyLookConfig(std::chrono::steady_clock::time_point now, uint32_t group);
+  std::array<std::optional<std::chrono::steady_clock::time_point>, STAGE_COUNT> last_look_recordings_;  // by stage group
 
   Microsoft::WRL::ComPtr<ID3D12Device> device_;
   std::unique_ptr<nr::Host> host_;
@@ -378,9 +435,19 @@ class DeviceContext {
   std::unique_ptr<sources::PresentSource> present_source_;
   std::unique_ptr<sources::AfterDlssSource> after_dlss_;  // shares present_source_'s NrPipeline
   std::unique_ptr<sources::PreSrSource> pre_sr_;          // after after_dlss_; shares present_source_'s NrPipeline
-  sources::WorkSizeSettle settle_;
+  // Split chain (design 3.4): what each stage (Stage order) keeps of its own: its settled work size, and its latest recording's result (Status's groups).
+  struct StageState {
+    sources::WorkSizeSettle settle;
+    nr::Size work;
+    nr::Size canvas;
+    bool nr_applied = false;
+    uint32_t passes_run = 0u;
+    std::string_view skip_reason;
+    sources::MotionSource motion_source = sources::MotionSource::NONE;
+  };
+  std::array<StageState, STAGE_COUNT> stages_;
   sources::WorkLayout present_layout_;
-  nr::Size work_size_;
+  nr::Size work_size_;  // pass 1's group's, as SettleLayout last settled it
   nr::Size canvas_size_;
   NVSDK_NGX_Feature main_feature_ = NVSDK_NGX_Feature_Reserved_Unknown;
   FrameTrigger trigger_;
@@ -389,6 +456,17 @@ class DeviceContext {
   ID3D12CommandQueue* present_queue_ = nullptr;
   FrameConfig config_;
   PlacementChoice placement_;
+  // Split chain (design 3.1): UpdateChain's; groups[0] is pass 1's, at `placement_`. `slices_` are the Session's, per group: the last runs to the end of
+  // the passes, so a one-group chain is exactly the single chain of before (every pass, every surplus idle feature too).
+  ChainPlan chain_;
+  std::array<nr::StageSlice, STAGE_COUNT> slices_ = {};
+  std::string present_cannot_;        // why a later group cannot run at Present: the latest BeginFrame's back buffer (design 6.1); empty: it can
+  uint64_t dlss_stage_token_ = 0u;    // the newest DLSS-stage recording's completion token in a split: a later Present group waits for it to complete
+  uint64_t last_dlss_token_ = 0u;     // fix round 2 (I1): the newest DLSS-stage recording's token, whatever the chain (marked when the chain splits)
+  // Fix round 1 (I1): a queue other than the current presents' that the game's DLSS-stage NR went to; while set, a later group never runs at Present.
+  ID3D12CommandQueue* other_dlss_queue_ = nullptr;
+  bool present_reset_owed_ = false;   // a later Present group skipped a frame: its next recording restarts its history
+  std::optional<bool> before_reset_;  // this evaluate's Before upscaling group's filtered reset, for the After DLSS group behind it
   std::string blocked_reason_;
   std::string dlss_unavailable_reason_;
   std::string output_message_;  // device removal, unsupported format or colour space
@@ -446,7 +524,9 @@ class DeviceContext {
   bool dlss_stages_ = false;           // Plan 18: ContextOptions::dlss_stages
   std::string after_dlss_problem_;     // Plan 18: NoteStageProblem's; empty while the stage can run
   std::string before_upscaling_problem_;
-  sources::WorkLayout bridged_layout_;  // Plan 18: the layout the latest Decide*Evaluate settled, for RecordBridgedStage
+  // Plan 18: the layout the latest Decide*Evaluate settled, for RecordBridgedStage. Split chain (Task 4): per DLSS stage ([0] Before upscaling, [1] After
+  // DLSS), as both hand-offs run in one evaluate.
+  std::array<sources::WorkLayout, 2> bridged_layouts_;
   // Plan 18 (fix round 1, M-2): NoteGameDeviceRemoved's text, kept apart from output_message_ (which every BeginFrame rebuilds), so the card and the latch
   // marker keep it. Status prefers it as the output problem.
   std::string game_device_removed_;

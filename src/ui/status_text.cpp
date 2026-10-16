@@ -1,6 +1,7 @@
 #include "ui/status_text.hpp"
 #include "nr/types.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <format>
 #include <utility>
@@ -25,9 +26,10 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   grey_for_dlss(&at(view.stage_options, SourcePick::AFTER_DLSS));
   OptionState& before = at(view.stage_options, SourcePick::BEFORE_UPSCALING);
   grey_for_dlss(&before);
-  if (selectable(before) && facts.ray_reconstruction) {
+  if (selectable(before) && facts.ray_reconstruction && facts.ray_reconstruction_after_dlss) {
     before = {.why = "The game's DLSS is Ray Reconstruction, which keeps NR after DLSS", .temporary = true};
   }
+  view.before_upscaling_on_rr = (facts.ray_reconstruction && !facts.ray_reconstruction_after_dlss);
   // Plan 18: a stage whose image the Direct3D 11 bridge cannot share is a fixed cause for that stage alone; it beats the temporary ones.
   const auto grey_fixed = [](OptionState* option, std::string_view fixed) {
     if (!fixed.empty() && (option->why.empty() || option->temporary)) {
@@ -135,8 +137,62 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   at(view.motion_options, view.motion) = {};
   at(view.resolution_options, view.resolution) = {};
 
+  // Split chain (Task 3): passes 2..N's "Runs at" rows. Where each pass runs is the context's chain; without one, the stored picks from pass 1's highlight,
+  // raised to the pass before's stage (DecideChain's never-backwards rule; its fallbacks need the engine's facts).
+  const uint32_t passes = std::clamp(facts.pass_count, 1u, MAX_PASSES);
+  std::array<SourcePick, MAX_PASSES> runs = {};
+  runs.fill(view.stage);
+  if (facts.chain) {
+    runs = *facts.chain;
+  } else if (facts.split_capable) {
+    for (uint32_t pass = 1u; pass < passes; ++pass) {
+      const PassStage stored = facts.stored_stages[pass - 1u];
+      runs[pass] = runs[pass - 1u];
+      if (stored != PassStage::SAME) {
+        runs[pass] = std::max(runs[pass - 1u], static_cast<SourcePick>(static_cast<uint32_t>(stored) - 1u));
+      }
+    }
+  }
+  view.split_capable = facts.split_capable;
+  const auto runs_at = [](SourcePick stage) -> std::string_view {
+    switch (stage) {
+      case SourcePick::BEFORE_UPSCALING: return "before upscaling";
+      case SourcePick::AFTER_DLSS:       return "after DLSS";
+      case SourcePick::PRESENT:          break;
+    }
+    return "at Present";
+  };
+  for (uint32_t pass = 1u; pass < passes; ++pass) {
+    PassStageRow& row = view.pass_stages[pass - 1u];
+    const SourcePick pass_before = runs[pass - 1u];
+    row.runs = runs[pass];
+    row.starts_group = (facts.split_capable && runs[pass] != pass_before);
+    view.chain_split = view.chain_split || (runs[pass] != runs[0]);
+    const PassStage stored = facts.stored_stages[pass - 1u];
+    const auto runs_pick = static_cast<PassStage>(static_cast<uint32_t>(runs[pass]) + 1u);
+    const bool runs_as_stored = (stored == runs_pick || (stored == PassStage::SAME && runs[pass] == pass_before));
+    row.shown = (runs_as_stored ? stored : runs_pick);
+    if (!facts.split_capable) {
+      for (PassStageOption& option : row.options) {
+        option = {.why = std::string(ONE_STAGE_REASON)};  // the highlight too: nothing here is a choice
+      }
+      continue;
+    }
+    for (uint32_t stage = 0u; stage < static_cast<uint32_t>(view.stage_options.size()); ++stage) {
+      PassStageOption& option = row.options[stage + 1u];
+      const auto pick = static_cast<SourcePick>(stage);
+      const OptionState& setup_option = view.stage_options[stage];
+      if (pick < pass_before) {
+        option = {.why = std::format("Runs the chain backwards: pass {} runs {}", pass, runs_at(pass_before))};
+      } else if (pick != pass_before && !setup_option.why.empty()) {
+        option = {.why = std::string(setup_option.why), .temporary = setup_option.temporary};  // never the pass before's stage, which always takes it
+      }
+    }
+    row.options[static_cast<size_t>(row.shown)] = {};  // what runs is possible by definition
+  }
+
   // Plan 15 fix round (minor 6): stopped for the session, nothing can run, the highlights included: every option of the three rows is greyed with the fixed
-  // reason (the card says it too), and there is no Why line.
+  // reason (the card says it too), and there is no Why line. Split chain fix round 1 (M5): the Runs at rows' too.
   if (!facts.stopped.empty()) {
     view.stopped = true;
     const auto stop = [&facts](auto& options) {
@@ -147,6 +203,11 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     stop(view.stage_options);
     stop(view.motion_options);
     stop(view.resolution_options);
+    for (PassStageRow& row : view.pass_stages) {  // fix round 1 (M5): the Runs at rows too
+      for (PassStageOption& option : row.options) {
+        option = {.why = std::string(facts.stopped)};
+      }
+    }
     return view;
   }
   // Plan 15: while held, the card says why NR waits (CardFacts::held), and a held context's card is never the working one, which alone draws the Why line.
@@ -264,7 +325,7 @@ LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
   } else {
     card.resolution = std::format("{}x{} of {}x{} ({}, {})", work.width, work.height, facts.frame.width, facts.frame.height, mode, upsampling);
   }
-  for (const std::string_view note : {facts.latch_note, facts.passes_note, facts.frame_generation_line}) {
+  for (const std::string_view note : {facts.latch_note, facts.passes_note, facts.chain_note, facts.frame_generation_line}) {
     if (!note.empty()) {
       card.note = std::string(note);
       break;

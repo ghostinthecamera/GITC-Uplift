@@ -160,6 +160,7 @@ BridgeFrame D3D11Bridge::BeginFrame(ID3D11Resource* back_buffer, bool enabled, b
     mask_failure_.reset();
     motion_failure_.reset();
     dlss_image_failure_.reset();  // Plan 18: re-enabling retries the DLSS stages' shares too
+    dlss_pre_image_failure_.reset();
     dlss_motion_failure_.reset();
     dlss_exposure_failure_.reset();
     dlss_swap_failure_.reset();
@@ -221,6 +222,17 @@ BridgeFrame D3D11Bridge::BeginFrame(ID3D11Resource* back_buffer, bool enabled, b
   const DXGI_FORMAT back_buffer_format = (description ? description->Format : DXGI_FORMAT_UNKNOWN);
   if (!problem_.empty()) return {.size = size, .format = back_buffer_format, .problem = problem_};
   return {.color = (present_copy ? color_.d3d12.Get() : nullptr), .size = size, .format = back_buffer_format};
+}
+
+void D3D11Bridge::GrowRingForSplit() {
+  const size_t before = side_->RingSize();
+  if (before >= D3D12Side::RING_MAX) return;
+  if (side_->GrowRing(D3D12Side::RING_MAX)) {
+    nr::Logf(nr::LogLevel::INFO, "Direct3D 11 bridge: the private command allocators grow from {} to {} for the split chain's hand-offs", before,
+             side_->RingSize());
+  } else if (!std::exchange(ring_growth_failed_, true)) {
+    nr::Log(nr::LogLevel::WARN, "Direct3D 11 bridge: the private command allocators could not grow for the split chain; some frames may skip NR");
+  }
 }
 
 bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const Recorder& record, bool dlss_motion) {
@@ -451,7 +463,8 @@ bool D3D11Bridge::DiagnosticWaitForGameSignal(DWORD cap_ms) {
 }
 
 uint64_t D3D11Bridge::SharedBytes() const {
-  return color_.bytes + mask_.bytes + motion_.bytes + dlss_image_.bytes + dlss_motion_.bytes + dlss_exposure_.bytes + dlss_swap_.bytes + RingBytes();
+  return color_.bytes + mask_.bytes + motion_.bytes + dlss_image_.bytes + dlss_pre_image_.bytes + dlss_motion_.bytes + dlss_exposure_.bytes + dlss_swap_.bytes
+         + RingBytes();
 }
 
 uint64_t D3D11Bridge::RingBytes() const {

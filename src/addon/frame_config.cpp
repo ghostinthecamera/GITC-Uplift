@@ -50,7 +50,17 @@ FrameConfig BuildFrameConfig(const FrameConfigInputs& inputs, ui::ControlsCoales
       .uplift_mv_lumenite = inputs.uplift_mv_lumenite,
       .pass_view_limit = (inputs.defaults_view ? ui::DefaultSettings().pass_count : 0u),
       .settings_generation = inputs.settings_generation,
+      // Split chain (2026-10-10): the later stage groups' own Resolution and "Keep faces here" (After DLSS, Present). `split_capable` is the add-on's.
+      .stage_resolution = {{{.mode = settings.resolution_mode_after_dlss, .scale = settings.resolution_scale_after_dlss,
+                              .slider_held = inputs.drag.resolution_scale_after_dlss},
+                             {.mode = settings.resolution_mode_present, .scale = settings.resolution_scale_present,
+                              .slider_held = inputs.drag.resolution_scale_present}}},
+      .stage_keep_faces = {settings.keep_faces_after_dlss, settings.keep_faces_present},
   };
+  // Split chain: passes 2..10's "Runs at", which the Defaults view keeps (PASS_STAGE).
+  for (size_t index = 0u; index < settings.passes.size(); ++index) {
+    config.pass_stages[index] = settings.passes[index].stage;
+  }
   // Keep faces: Face protection restarts the extra run's history, so a drag applies it at most every 100 ms, as Skin structure's does.
   config.look.keep_faces.protection = coalescer->FaceProtection(look_settings, inputs.drag.face_protection, now);
   return config;

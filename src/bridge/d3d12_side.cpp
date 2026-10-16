@@ -2,6 +2,7 @@
 
 #include <dxgi1_6.h>
 
+#include <algorithm>
 #include <atomic>
 #include <format>
 #include <utility>
@@ -122,7 +123,8 @@ std::unique_ptr<D3D12Side> D3D12Side::Create(LUID luid, ComPtr<ID3D12Device>* cr
   }
   side->queue_->SetName(L"Uplift private queue");
   side->progress_->SetName(L"Uplift progress fence");  // Plan 17: names DRED's breadcrumbs and page faults can show
-  for (Slot& slot : side->ring_) {
+  for (size_t index = 0u; index < RING; ++index) {
+    Slot& slot = side->ring_[index];
     if (FAILED(native->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator)))) {
       return fail("the private command allocators could not be created");
     }
@@ -201,6 +203,23 @@ HRESULT D3D12Side::CreateSharedFence(ComPtr<ID3D12Fence>* fence, HANDLE* handle)
   return S_OK;
 }
 
+bool D3D12Side::GrowRing(size_t slots) {
+  slots = std::min(slots, RING_MAX);
+  if (slots <= ring_size_) return true;
+  for (size_t index = ring_size_; index < slots; ++index) {
+    Slot& slot = ring_[index];
+    if (FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator)))) {
+      for (size_t made = ring_size_; made <= index; ++made) {
+        ring_[made] = {};  // never used: none was handed a list
+      }
+      return false;
+    }
+    slot.allocator->SetName(L"Uplift NR frame allocator");
+  }
+  ring_size_ = slots;  // the new slots are free (done = 0); the next slot keeps its place, so the ring runs on through them
+  return true;
+}
+
 bool D3D12Side::SlotFree() const {
   return progress_->GetCompletedValue() >= ring_[next_slot_].done;
 }
@@ -232,7 +251,7 @@ bool D3D12Side::SignalProgress(uint64_t value) {
   if (executed_ || signalled) {
     ring_[next_slot_].done = value;
     last_signalled_ = value;
-    next_slot_ = (next_slot_ + 1u) % RING;
+    next_slot_ = (next_slot_ + 1u) % ring_size_;
   }
   executed_ = false;
   return signalled;

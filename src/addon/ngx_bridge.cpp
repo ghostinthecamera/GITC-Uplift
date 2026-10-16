@@ -4,6 +4,7 @@
 
 #include <format>
 
+#include "addon/placement.hpp"
 #include "ngx_hooks/ngx_parameters.hpp"
 #include "nr/d3d11_handles.hpp"
 #include "nr/log.hpp"
@@ -80,8 +81,9 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
   // Plan 18: on Direct3D 11 only a bridge's context that watches records before upscaling; without one, nothing else is asked.
   if (call->api == ngx_hooks::NgxApi::D3D11 && d3d11_watching_.load(std::memory_order_relaxed) <= 0) return;
   const std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(call->handle);
-  // v2 design §3.9: SuperSampling only; Ray Reconstruction keeps NR after DLSS.
-  if (!record || record->feature != NVSDK_NGX_Feature_SuperSampling) return;
+  // v2 design §3.9: SuperSampling, and (split-chain design 11) Ray Reconstruction on Direct3D 12 and Vulkan: RR's Color is the same NGX key, so the colour
+  // swap below targets it unchanged.
+  if (!record || !PreSrFeatureAllowed(record->feature, call->api)) return;
   const void* const device = DeviceOf(call->api, call->list);
   if (device == nullptr) return;  // a list Uplift does not track
   if (registry_.MainHandle(device, routing_.SwapchainSize(device), call->api) != call->handle) return;  // Plan 18: within the evaluate's API
@@ -99,7 +101,7 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
 }
 
 void NgxBridge::OnColorSwapRejected(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* /*handle*/) {
-  // BeforeEvaluate already gated this call's handle on the main SuperSampling handle before it ever set
+  // BeforeEvaluate already gated this call's handle on the main SuperSampling (or allowed Ray Reconstruction) handle before it ever set
   // call->color, so ColorSwap only reaches here for that same handle: no need to re-check the registry.
   const void* const device = DeviceOf(api, list);
   if (device == nullptr) return;  // a list Uplift does not track

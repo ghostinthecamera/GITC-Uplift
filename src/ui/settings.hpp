@@ -163,7 +163,15 @@ enum class PedestalRemoval : uint32_t {
 
 inline constexpr uint32_t MAX_PASSES = 10u;
 
-// Pass n >= 2's own settings (v2 design §3.10, P4-P13), used only while it does not follow pass 1.
+// Split chain (2026-10-10): pass n >= 2's "Runs at", in stored-index order. SAME runs it where the pass before it runs (design Q1).
+enum class PassStage : uint32_t {
+  SAME = 0u,
+  BEFORE_UPSCALING = 1u,
+  AFTER_DLSS = 2u,
+  PRESENT = 3u,
+};
+
+// Pass n >= 2's own settings (v2 design §3.10, P4-P13), used only while it does not follow pass 1. `stage` applies either way.
 struct PassSettings {
   bool follow_pass1 = true;
   float intensity = 1.f;
@@ -174,6 +182,7 @@ struct PassSettings {
   bool auto_mask = true;
   float transfer_strength = 1.f;
   float color_strength = 1.f;
+  PassStage stage = PassStage::SAME;
   friend bool operator==(const PassSettings&, const PassSettings&) = default;
 };
 
@@ -227,6 +236,16 @@ struct Settings {
   ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
   float resolution_scale = 100.f;                         // Custom: % of the output, 25-100
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
+  // Split chain (2026-10-10): a later stage group's size (its first pass is not pass 1), keyed by stage; pass 1's group uses Resolution above. Before
+  // upscaling is always the first stage, so it has none.
+  ResolutionMode resolution_mode_after_dlss = ResolutionMode::FULL;
+  float resolution_scale_after_dlss = 100.f;
+  ResolutionMode resolution_mode_present = ResolutionMode::FULL;
+  float resolution_scale_present = 100.f;
+  // Split chain, owner's decision Q5a: Keep faces also protects a later stage group (its first pass runs twice). Pass 1's group is protected whenever
+  // Keep faces is on.
+  bool keep_faces_after_dlss = false;
+  bool keep_faces_present = false;
   bool pre_upscale = false;  // Before upscaling (pre-SR), off until E13
   std::array<PassSettings, MAX_PASSES - 1u> passes = {};  // passes 2..10
   look::LookSettings look;                                // Shape result and its rows

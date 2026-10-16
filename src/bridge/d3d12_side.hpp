@@ -39,6 +39,12 @@ class D3D12Side {
                        Microsoft::WRL::ComPtr<ID3D12Resource>* resource, HANDLE* handle);
   HRESULT CreateSharedFence(Microsoft::WRL::ComPtr<ID3D12Fence>* fence, HANDLE* handle);
   [[nodiscard]] bool SlotFree() const;     // the next allocator's last list finished (else: skip this frame)
+  // Split chain (fix round 2, I2): the ring grows to `slots` allocators (at most RING_MAX), never shrinks. The new ones are made beside the old ones, so no
+  // allocator in use moves. False when one could not be made (the ring stays as it was). Its size now: RingSize().
+  bool GrowRing(size_t slots);
+  [[nodiscard]] size_t RingSize() const { return ring_size_; }
+  static constexpr size_t RING = 8u;       // Plan 7 key decision c: the CPU runs up to DXGI's frame latency ahead; a busy ring skips NR for that frame
+  static constexpr size_t RING_MAX = 12u;  // fix round 2 (I2): a three-stage split makes three private lists per frame
   ID3D12GraphicsCommandList* BeginList();  // resets the next allocator and the list; null on failure
   bool ExecuteList();                      // closes and executes it; false (nothing submitted) when Close fails
   void CloseList();                        // closes an open list without executing it (a recording that threw)
@@ -71,8 +77,6 @@ class D3D12Side {
     Microsoft::WRL::ComPtr<IUnknown> partner;
     uint64_t release_at = 0u;
   };
-  // Plan 7 key decision c: the CPU runs up to DXGI's frame latency ahead; a busy ring skips NR for that frame.
-  static constexpr size_t RING = 8u;
 
   // Declared first, so released last: the device as made (without a device factory, ReShade's proxy in a game).
   Microsoft::WRL::ComPtr<ID3D12Device> created_;
@@ -81,7 +85,8 @@ class D3D12Side {
   // surfaces go by it (a shared fence can be moved ahead from the CPU by a Stop).
   Microsoft::WRL::ComPtr<ID3D12Fence> progress_;
   Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
-  std::array<Slot, RING> ring_;
+  std::array<Slot, RING_MAX> ring_;  // the first ring_size_ are made
+  size_t ring_size_ = RING;
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list_;
   std::vector<Retired> retired_;
   size_t next_slot_ = 0u;
