@@ -68,6 +68,8 @@ constexpr uintptr_t SNIPPET_310_8_LOG_CALLBACK_RVA = 0x1142750u;
 constexpr DWORD SNIPPET_310_8_IMAGE_SIZE = 0x9e42000u;
 constexpr uintptr_t SNIPPET_310_9_16_LOG_CALLBACK_RVA = 0x490a20u;
 constexpr DWORD SNIPPET_310_9_16_IMAGE_SIZE = 0xfe2f000u;
+// Shortfuse's FP16 build appends .nrcubin and preserves the original log slot and host logging code.
+constexpr DWORD SNIPPET_310_9_16_FP16_IMAGE_SIZE = 0x10779000u;
 
 struct ModuleReleaser {
   void operator()(HMODULE module) const { FreeLibrary(module); }
@@ -408,7 +410,8 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
     // the image; the checks run in this order so the slot is read last.
     if (!layout_310_8 && !layout_310_9_16) {
       Logf(LogLevel::WARN, "the snippet version {} has no known log layout; snippet logging stays off", file_version);
-    } else if (nt->OptionalHeader.SizeOfImage != expected_image_size) {
+    } else if (nt->OptionalHeader.SizeOfImage != expected_image_size
+               && !(layout_310_9_16 && nt->OptionalHeader.SizeOfImage == SNIPPET_310_9_16_FP16_IMAGE_SIZE)) {
       Logf(LogLevel::WARN, "the snippet image size {:#x} differs from the verified layout ({:#x}); snippet logging stays off",
            nt->OptionalHeader.SizeOfImage, expected_image_size);
     } else if (!slot_in_data_section) {

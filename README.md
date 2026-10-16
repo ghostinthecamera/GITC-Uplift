@@ -98,6 +98,16 @@ mode 0 uses a different mask combination and can produce little visible change. 
 Full mask-combination behavior on the compatibility runtime remains under validation: the donor pre-block kernels omit the new mask fields.
 Execution has been demonstrated at 1080p/D3D12, but fidelity against native Blackwell remains unverified.
 
+Shortfuse's separately supplied **compat-fp16 310.9.16 / CUDA 13.4.3** build is also supported. It keeps the same network weights and the
+310.9.16 kernel interfaces, with GPU payloads for SM75, SM86, SM89 and SM120. Uplift's native network diagnostic supports its expanded DLL layout.
+The supplied file was tested on RTX 4090 through both Direct3D 12 and native Vulkan; the other GPU generations have not been live-tested here.
+Select this DLL directly under Runtime path (Advanced), restart the game, and use Setup's network and mask-mode controls as usual. It replaces
+the selected runtime; it is not combined with Uplift's earlier experimental NVIDIA DLL patch.
+
+Native mask modes 0-3 were verified to produce different output with a native checker ControlMask in an isolated probe. Uplift forwards the mode,
+but its normal path does not bind that native mask; its existing UPLIFT_MASK remains composition after NR. Mode 1 remains the UI default.
+
+
 **Keep faces** (in Look) keeps NR's lighting and shading on characters, but stops NR reshaping their faces. It costs more:
 NR runs one more time per frame, and it needs more video memory (about 1 GB at 4K). How to tune it:
 [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide#keep-faces).
