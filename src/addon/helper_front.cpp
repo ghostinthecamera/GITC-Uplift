@@ -730,6 +730,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   const std::string_view api_name = ApiName(device_api);
   if (status != nullptr) {
     view->status_line = std::string(ipc::TextOf(status->status_line));
+    view->network_diagnostic = std::string(ipc::TextOf(status->network_diagnostic));
     if (const std::string_view line = ipc::TextOf(status->placement_line); !line.empty()) {
       view->placement_line = std::string(line);
     }

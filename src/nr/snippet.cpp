@@ -66,6 +66,8 @@ constexpr GUID UPLIFT_CORE_INIT_GUID = {0xfb71ea06, 0xb99c, 0x4d65, {0x9e, 0x59,
 // the compat and the ADA build); TimeDateStamp is not pinned.
 constexpr uintptr_t SNIPPET_310_8_LOG_CALLBACK_RVA = 0x1142750u;
 constexpr DWORD SNIPPET_310_8_IMAGE_SIZE = 0x9e42000u;
+constexpr uintptr_t SNIPPET_310_9_16_LOG_CALLBACK_RVA = 0x490a20u;
+constexpr DWORD SNIPPET_310_9_16_IMAGE_SIZE = 0xfe2f000u;
 
 struct ModuleReleaser {
   void operator()(HMODULE module) const { FreeLibrary(module); }
@@ -94,6 +96,9 @@ struct LogHook {
 };
 
 LogHook log_hook;
+
+// Created-feature messages are emitted on the calling thread; worker logs cannot overwrite this call's evidence.
+thread_local std::string* created_network = nullptr;
 
 // The runtime modules this Uplift module mapped (M9): the loaded Snippet's, and every module a
 // device loss abandoned. Read by IsUpliftRuntimeModule from game threads, hence the lock.
@@ -176,7 +181,18 @@ void NVSDK_CONV SnippetLog(
     if (line.ends_with('\n')) {
       line.remove_suffix(1u);
     }
-    Log(LogLevel::TRACE, line);
+    const bool network_diagnostic = line.find("DLSSNR: BuildActiveNetwork config=") != std::string_view::npos
+        || line.find("DLSSNR: Weight heap request ") != std::string_view::npos
+        || line.find("DLSSNR: Created feature ") != std::string_view::npos
+        || line.find("falling back to shipping default preset") != std::string_view::npos
+        || line.find("m_gpuArch = ") != std::string_view::npos;
+    Log(network_diagnostic ? LogLevel::INFO : LogLevel::TRACE, line);
+    if (created_network != nullptr && line.find("DLSSNR: Created feature ") != std::string_view::npos && line.ends_with(')')) {
+      const size_t arrow = line.rfind(" -> ");
+      if (arrow != std::string_view::npos) {
+        *created_network = line.substr(arrow + 4u, line.size() - arrow - 5u);
+      }
+    }
   } catch (...) {
     // Never let an exception reach the NVIDIA frame that invoked this callback.
   }
@@ -306,6 +322,7 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
 
   std::string file_version = "unknown";
   bool layout_310_8 = false;
+  bool layout_310_9_16 = false;
   DWORD version_handle = 0u;
   if (const DWORD version_size = GetFileVersionInfoSizeExW(FILE_VER_GET_NEUTRAL, snippet_path.c_str(), &version_handle);
       version_size != 0u) {
@@ -321,6 +338,7 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
       const uint32_t build = LOWORD(fixed->dwFileVersionLS);
       file_version = std::format("{}.{}.{}.{}", major, minor, patch, build);
       layout_310_8 = (major == 310u && minor == 8u && patch == 0u);
+      layout_310_9_16 = (major == 310u && minor == 9u && patch == 16u && build == 0u);
     }
   }
   SnippetConfig loaded_config = config;
@@ -369,28 +387,30 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
   }
 
   if (config_.enable_snippet_log) {
+    const uintptr_t log_callback_rva = (layout_310_9_16 ? SNIPPET_310_9_16_LOG_CALLBACK_RVA : SNIPPET_310_8_LOG_CALLBACK_RVA);
+    const DWORD expected_image_size = (layout_310_9_16 ? SNIPPET_310_9_16_IMAGE_SIZE : SNIPPET_310_8_IMAGE_SIZE);
     const auto base = reinterpret_cast<uintptr_t>(module_);
     const auto* const dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     const auto* const nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
     const uintptr_t image_end = base + nt->OptionalHeader.SizeOfImage;
     const std::span<const IMAGE_SECTION_HEADER> sections(IMAGE_FIRST_SECTION(nt), nt->FileHeader.NumberOfSections);
-    const bool slot_in_data_section = std::ranges::any_of(sections, [](const IMAGE_SECTION_HEADER& section) {
+    const bool slot_in_data_section = std::ranges::any_of(sections, [log_callback_rva](const IMAGE_SECTION_HEADER& section) {
       const bool writable = (section.Characteristics & IMAGE_SCN_MEM_WRITE) != 0u;
       const bool executable = (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0u;
-      return writable && !executable && section.VirtualAddress <= SNIPPET_310_8_LOG_CALLBACK_RVA
-             && SNIPPET_310_8_LOG_CALLBACK_RVA + sizeof(void*)
+      return writable && !executable && section.VirtualAddress <= log_callback_rva
+             && log_callback_rva + sizeof(void*)
                     <= uintptr_t{section.VirtualAddress} + section.Misc.VirtualSize;
     });
-    auto* const slot = reinterpret_cast<void**>(base + SNIPPET_310_8_LOG_CALLBACK_RVA);
+    auto* const slot = reinterpret_cast<void**>(base + log_callback_rva);
     // A write at the wrong address would corrupt an unrelated global of NVIDIA
-    // code in a game. Patch only the exact 310.8 layout, only inside a writable,
+    // code in a game. Patch only a verified version and image layout, only inside a writable,
     // non-executable section, and only while the slot is empty or points into
     // the image; the checks run in this order so the slot is read last.
-    if (!layout_310_8) {
-      Logf(LogLevel::WARN, "the snippet version {} is not 310.8.0.x; snippet logging stays off", file_version);
-    } else if (nt->OptionalHeader.SizeOfImage != SNIPPET_310_8_IMAGE_SIZE) {
-      Logf(LogLevel::WARN, "the snippet image size {:#x} differs from the 310.8 layout ({:#x}); snippet logging stays off",
-           nt->OptionalHeader.SizeOfImage, SNIPPET_310_8_IMAGE_SIZE);
+    if (!layout_310_8 && !layout_310_9_16) {
+      Logf(LogLevel::WARN, "the snippet version {} has no known log layout; snippet logging stays off", file_version);
+    } else if (nt->OptionalHeader.SizeOfImage != expected_image_size) {
+      Logf(LogLevel::WARN, "the snippet image size {:#x} differs from the verified layout ({:#x}); snippet logging stays off",
+           nt->OptionalHeader.SizeOfImage, expected_image_size);
     } else if (!slot_in_data_section) {
       Log(LogLevel::WARN,
           "the snippet log slot is not inside a writable, non-executable section; snippet logging stays off");
@@ -663,11 +683,16 @@ void Snippet::DestroyParameters(NVSDK_NGX_Parameter* parameters) const {
 }
 
 NVSDK_NGX_Result Snippet::CreateFeature(
-    ID3D12GraphicsCommandList* list, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle) const {
+    ID3D12GraphicsCommandList* list, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle, std::string* network) const {
   if (state_ != SnippetState::BOUND || api_ != SnippetApi::D3D12) return NVSDK_NGX_Result_FAIL_NotInitialized;
-  return GuardedCall([&] {
+  if (network != nullptr) network->clear();
+  std::string* const previous = created_network;
+  created_network = network;
+  const NVSDK_NGX_Result result = GuardedCall([&] {
     return reinterpret_cast<CreateFeatureFn>(create_feature_)(list, NVSDK_NGX_Feature_Reserved18, parameters, handle);
   });
+  created_network = previous;
+  return result;
 }
 
 NVSDK_NGX_Result Snippet::EvaluateFeature(
@@ -679,11 +704,16 @@ NVSDK_NGX_Result Snippet::EvaluateFeature(
 }
 
 NVSDK_NGX_Result Snippet::CreateFeatureVulkan(
-    VkCommandBuffer buffer, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle) const {
+    VkCommandBuffer buffer, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle, std::string* network) const {
   if (state_ != SnippetState::BOUND || api_ != SnippetApi::VULKAN) return NVSDK_NGX_Result_FAIL_NotInitialized;
-  return GuardedCall([&] {
+  if (network != nullptr) network->clear();
+  std::string* const previous = created_network;
+  created_network = network;
+  const NVSDK_NGX_Result result = GuardedCall([&] {
     return reinterpret_cast<VulkanCreateFeatureFn>(vk_create_feature_)(buffer, NVSDK_NGX_Feature_Reserved18, parameters, handle);
   });
+  created_network = previous;
+  return result;
 }
 
 NVSDK_NGX_Result Snippet::EvaluateFeatureVulkan(

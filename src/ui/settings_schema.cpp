@@ -11,7 +11,8 @@
 namespace uplift::ui {
 namespace {
 
-constexpr std::array<std::string_view, 3> MODELS = {"Model A", "Model B", "Model C"};
+constexpr std::array<std::string_view, 3> MODELS = {"Style A", "Style B", "Style C"};
+constexpr std::array<std::string_view, 3> NR_NETWORKS = {"Runtime default", "A: Legacy", "B: Small FP8"};
 constexpr std::array<std::string_view, 3> SOURCES = {"Auto", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 5> MOTION_VECTORS = {"Auto", "DLSS", "Launchpad", "None", "Lumenite"};  // stored-index order (Setup shows Lumenite after Launchpad)
 constexpr std::array<std::string_view, 7> QUALITY_MODES = {"Game", "Performance", "Balanced", "Quality",
@@ -117,8 +118,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "Style",
         .kind = SettingKind::CHOICE,
         .section = SettingSection::LOOK,
-        .label = "Model",
-        .tooltip = "The NR model. A change restarts NR's temporal history.",
+        .label = "Style",
+        .tooltip = "Processing style A/B/C (0/1/2), separate from the network preset in Setup. A change restarts NR's temporal history.",
         .choices = MODELS,
         .flags = RESTARTS_HISTORY,
         .get = [](const Settings& s) { return static_cast<double>(s.style); },
@@ -218,6 +219,19 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .choices = MASK_MODES,
         .get = [](const Settings& s) { return Index(s.mask); },
         .set = [](Settings& s, double v) { s.mask = FromIndex<MaskMode>(v); },
+    },
+    {
+        .key = "MaskBlendMode",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Native mask blend mode",
+        .tooltip = "Experimental NR 310.9.16 control, modes 0-3; default 1. Mode 0 uses a different mask combination and can produce little visible change. "
+                   "This is separate from Uplift's NR mask. NR 310.8 ignores it. Full mask-combination behavior on the Ada compatibility runtime remains under validation.",
+        .min = 0.0,
+        .max = 3.0,
+        .flags = RESTARTS_HISTORY,
+        .get = [](const Settings& s) { return static_cast<double>(s.mask_blend_mode); },
+        .set = [](Settings& s, double v) { s.mask_blend_mode = static_cast<uint32_t>(v); },
     },
     {
         .key = "UICorrection",
@@ -926,13 +940,14 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     },
     {
         .key = "Preset",
-        .kind = SettingKind::UINT,
-        .section = SettingSection::HIDDEN,
-        .label = "Preset",
-        .tooltip = "Stored and forwarded; no effect in NR 310.8.",
-        .min = 0.0,
-        .max = 15.0,
-        .flags = GREYED,
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::PLACEMENT,
+        .label = "Network preset",
+        .tooltip = "NR 310.9.16: preset A (1) selects Legacy; preset B (2) selects Small FP8. Runtime default uses B. C-G have no weights in this DLL. "
+                   "Changing the network recreates NR and resets history. Details shows the runtime-confirmed name and recorded evaluations. "
+                   "NR 310.8 always uses Legacy. This is separate from Style A/B/C in Look.",
+        .choices = NR_NETWORKS,
+        .flags = RESTARTS_HISTORY,
         .get = [](const Settings& s) { return static_cast<double>(s.preset); },
         .set = [](Settings& s, double v) { s.preset = static_cast<uint32_t>(v); },
     },
@@ -1384,8 +1399,8 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .key = key(2),
           .kind = SettingKind::CHOICE,
           .section = SettingSection::PASSES,
-          .label = "Model",
-          .tooltip = "This pass's NR model. A change restarts its history.",
+          .label = "Style",
+          .tooltip = "This pass's processing style A/B/C (0/1/2), separate from the network preset. A change restarts its history.",
           .choices = MODELS,
           .flags = RESTARTS_HISTORY,
           .get = &PassGet<Index, &PassSettings::style>,

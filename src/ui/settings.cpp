@@ -167,6 +167,7 @@ nr::Controls ToControls(const Settings& settings) {
       .auto_mask = settings.auto_mask,
       .skin_structure = settings.skin_structure,
       .style = settings.style,
+      .mask_blend_mode = settings.mask_blend_mode,
   };
 }
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
 
 #include <vulkan/vulkan.h>
 
@@ -30,7 +31,7 @@ struct SnippetConfig {
   std::filesystem::path application_data_path;  // NGX core app data, used only if Uplift initialises the core
   std::filesystem::path core_path_override;     // optional explicit _nvngx.dll
   bool allow_core_force_load = true;            // games without DLSS have no NGX core loaded
-  bool enable_snippet_log = true;               // route the 310.8 snippet's log callback into nr::Log
+  bool enable_snippet_log = true;               // route a verified snippet layout's log callback into nr::Log
   // Plan 7 (D3D11 design R15): also initialise an adopted core (one the game loaded) for this device, once, when the
   // device carries no UPLIFT_CORE_INIT_GUID mark. The D3D11 bridge's private device is one a D3D11 game's core never saw.
   // Plan 13: BindVulkan reads it too, once per VkDevice: a smoke's "game" device was never initialised by a core that a sibling
@@ -93,13 +94,13 @@ class Snippet {
   [[nodiscard]] NVSDK_NGX_Parameter* AllocateParameters() const;
   void DestroyParameters(NVSDK_NGX_Parameter* parameters) const;
   [[nodiscard]] NVSDK_NGX_Result CreateFeature(
-      ID3D12GraphicsCommandList* list, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle) const;
+      ID3D12GraphicsCommandList* list, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle, std::string* network = nullptr) const;
   [[nodiscard]] NVSDK_NGX_Result EvaluateFeature(
       ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters) const;
   // Plan 13: the Vulkan binding's create and evaluate on a command buffer. A distinct name rather than an overload: `nullptr` must stay
   // unambiguous for the Direct3D 12 forwarders above. Both refuse (FAIL_NotInitialized) unless bound to Vulkan.
   [[nodiscard]] NVSDK_NGX_Result CreateFeatureVulkan(
-      VkCommandBuffer buffer, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle) const;
+      VkCommandBuffer buffer, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle, std::string* network = nullptr) const;
   [[nodiscard]] NVSDK_NGX_Result EvaluateFeatureVulkan(
       VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters) const;
   // Shared by both bindings: the export it calls is the bound API's own.

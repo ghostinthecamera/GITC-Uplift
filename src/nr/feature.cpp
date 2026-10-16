@@ -40,14 +40,19 @@ NVSDK_NGX_Result Feature::Create(ID3D12GraphicsCommandList* list, const CreateIn
   parameters_->Set(keys::PRESET, info.preset);
   parameters_->Set(keys::SCALING_RATIO, 1.f);
   parameters_->Set(keys::PERF_QUALITY_VALUE, static_cast<int>(info.performance) - 1);
-  const NVSDK_NGX_Result result = snippet_.CreateFeature(list, parameters_, &handle_);
+  const NVSDK_NGX_Result result = snippet_.CreateFeature(list, parameters_, &handle_, &network_);
   if (NVSDK_NGX_FAILED(result) || handle_ == nullptr) {
     Logf(LogLevel::ERR, "CreateFeature {}x{} failed: {:#010x}", info.capacity.width, info.capacity.height, static_cast<uint32_t>(result));
     handle_ = nullptr;
     return NVSDK_NGX_FAILED(result) ? result : NVSDK_NGX_Result_FAIL_PlatformError;
   }
   capacity_ = info.capacity;
-  Logf(LogLevel::INFO, "NR feature created {}x{}", capacity_.width, capacity_.height);
+  enabled_evaluations_ = 0u;
+  last_enabled_ = false;
+  has_evaluation_ = false;
+  Logf(LogLevel::INFO, "NR feature created {}x{} (D3D12, preset request {}, handle {}); runtime network: {}",
+       capacity_.width, capacity_.height, info.preset, static_cast<const void*>(handle_),
+       network_.empty() ? std::string_view("unconfirmed: no native creation message") : std::string_view(network_));
   return result;
 }
 
@@ -77,13 +82,37 @@ NVSDK_NGX_Result Feature::Evaluate(ID3D12GraphicsCommandList* list, const Evalua
   parameters_->Set(keys::LOCAL_STRUCTURE, controls.local_structure);
   parameters_->Set(keys::GLOBAL_TONE, controls.global_tone);
   parameters_->Set(keys::USE_AUTO_MASK, controls.auto_mask ? 1 : 0);
+  parameters_->Set(keys::MASK_BLEND_MODE, controls.mask_blend_mode);
   parameters_->Set(keys::SKIN_STRUCTURE, controls.skin_structure);
   parameters_->Set(keys::STYLE, controls.style);
   parameters_->Set(keys::RESET, inputs.reset ? 1 : 0);
   parameters_->Set(keys::ENABLED, inputs.bypass ? 0 : 1);
   parameters_->Set(keys::UI_CORRECTION, inputs.ui_correction ? 1 : 0);
   parameters_->Set(keys::DEPTH_INVERTED, inputs.depth_inverted);
-  return snippet_.EvaluateFeature(list, handle_, parameters_);
+  const NVSDK_NGX_Result result = snippet_.EvaluateFeature(list, handle_, parameters_);
+  if (NVSDK_NGX_SUCCEED(result)) {
+    has_evaluation_ = true;
+    const bool enabled = !inputs.bypass && controls.intensity > 0.f;
+    if (enabled && (enabled_evaluations_ == 0u || !last_enabled_ || last_style_ != controls.style || last_mask_mode_ != controls.mask_blend_mode)) {
+      Logf(LogLevel::INFO, "NR diagnostic: enabled D3D12 evaluation recorded (NGX {:#010x}, handle {}, style {}, mask mode {}, intensity {}, character mask {}, motion {}, native control mask {}); runtime network: {}",
+           static_cast<uint32_t>(result), static_cast<const void*>(handle_), controls.style, controls.mask_blend_mode, controls.intensity,
+           controls.auto_mask, inputs.motion.resource != nullptr, inputs.control_mask.resource != nullptr,
+           network_.empty() ? std::string_view("unconfirmed") : std::string_view(network_));
+    }
+    if (enabled) ++enabled_evaluations_;
+    last_enabled_ = enabled;
+    last_style_ = controls.style;
+    last_mask_mode_ = controls.mask_blend_mode;
+  }
+  return result;
+}
+
+std::string Feature::Diagnostic() const {
+  if (handle_ == nullptr) return {};
+  const std::string_view network = network_.empty() ? "unconfirmed (no native creation message)" : std::string_view(network_);
+  if (!has_evaluation_) return std::format("NR pass 1 network: {} | awaiting evaluation", network);
+  return std::format("NR pass 1 network: {} | enabled calls recorded: {} | {} | style {} | native mask mode {}",
+                     network, enabled_evaluations_, last_enabled_ ? "enabled" : "bypassed / zero intensity", last_style_, last_mask_mode_);
 }
 
 NVSDK_NGX_Result Feature::Release() {

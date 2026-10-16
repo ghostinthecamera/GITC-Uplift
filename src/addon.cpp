@@ -3131,6 +3131,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
           view.api_line = entry.gl_bridge->StatusLine();
         }
         view.runtime_bytes = status.session.runtime_bytes;
+        view.network_diagnostic = status.session.network_diagnostic;
         view.effective_diffuse_white_nits = status.diffuse_white_nits;
         view.card = CardFor(state, entry, &status, view.status_line);
         // Plan 14: what runs, and the card's detail and notes (the working card's fixes hold only the passes note).

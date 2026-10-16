@@ -385,6 +385,7 @@ void Helper::FillStatus(ipc::Status* out) const {
   out->frame_width = status.frame.width;
   out->frame_height = status.frame.height;
   ipc::CopyText(out->session_message, session.message);
+  ipc::CopyText(out->network_diagnostic, session.network_diagnostic);
   ipc::CopyText(out->blocked, status.blocked);
   ipc::CopyText(out->output_problem, status.output_problem);
   ipc::CopyText(out->placement_note, status.placement_note);

@@ -11,8 +11,9 @@ GITC Uplift is not affiliated with NVIDIA or with ReShade.
 - An NVIDIA GeForce RTX graphics card with an up-to-date driver.
 - [ReShade](https://reshade.me) **with full add-on support** (the "Addon" version). Use the latest one: Vulkan and OpenGL games need
   6.8 or newer.
-- NVIDIA's DLSS-NR runtime, `nvngx_dlssnr.dll` version 310.8, which **you supply**. Uplift never includes NVIDIA files. You need a
-  version appropriate for your video card, as the default runtime only works on 50-series cards.
+- NVIDIA's DLSS-NR runtime, `nvngx_dlssnr.dll`, which **you supply**. Version 310.8 remains the tested runtime for older RTX cards;
+  310.9.16 has experimental controls below and contains GPU kernels for 50-series cards only. Uplift never includes NVIDIA files.
+  You need a version appropriate for your video card.
 
 ## Other DLSS5 add-ons
 
@@ -49,12 +50,14 @@ says why and what to do.
 
 A picture guide to every setting: [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide)
 
-**Setup** has three choices:
+**Setup** contains these controls:
 
 - **NR stage:** **Present** works in every game and processes the finished image. **After DLSS** (in games that use DLSS) runs inside
   the game's frame, before the HUD. **Before upscaling** is experimental.
 - **Motion vectors:** Auto picks for you. The others are DLSS (the game's own), Launchpad (iMMERSE Launchpad's), Lumenite
   (LumeniteFX's Kernel) and None.
+- **Native mask blend mode:** selects NR's native mask combination; the default is 1.
+- **Network preset:** A: Legacy or B: Small FP8 with NR 310.9.16.
 - **Resolution:** Full looks best. Lower settings are faster and use less memory.
 
 An option that can't work in your game right now is greyed out: hover over it to see why. Your choice is remembered and comes back by
@@ -63,6 +66,37 @@ itself when it can.
 In most games, if you turn DLSS off in the game, NR moves to Present by itself and comes back when DLSS is on again.
 
 The **Look** section below lets you tune the result to taste. When you switch NR off, it frees its memory after a few seconds.
+
+With **NR 310.9.16**, **Setup → Network preset** selects **Legacy** or **Small FP8**; **Runtime default** selects Small FP8 in that
+build. Legacy remains Uplift's default. Changing the network recreates NR and resets its history. **Setup → Native mask blend mode**
+exposes the experimental modes 0–3, separately from Uplift's own mask. NR 310.8 always uses its legacy network and ignores mask blend mode.
+
+Preset **A (1)** is Legacy and **B (2)** is Small FP8. Presets C-G have no weights in the supplied DLL. **Look → Style** selects the separate
+processing styles A/B/C (0/1/2), also available for independent later passes.
+
+**Details** reports pass 1's network name from NVIDIA's successful feature-creation message, the number of enabled evaluation calls recorded,
+and the last successful call's style and native mask mode. It reports an unconfirmed network when the runtime's logging layout or message is
+unavailable. The count verifies successful command recording, not GPU completion or image fidelity.
+
+At **Log level → Info** (the default), search **ReShade.log** for:
+
+- `snippet loaded`: the actual runtime path and version;
+- `BuildActiveNetwork config=` and `Weight heap request`: the selected graph and weight tensor count;
+- `DLSSNR: Created feature`: the runtime-resolved preset and network, including fallback;
+- `NR diagnostic: enabled`: a successful enabled evaluation, its network, style, mask mode and bound motion/mask inputs.
+
+Small FP8's runtime name is `hnet-crazy-cuckoo-small-fp8`, preset 2, with 77 weight tensors (113,907,200 aligned bytes in the supplied build).
+The tensor allocation figure is not total VRAM. Evaluations are reported per feature, including later passes and Keep faces, and when style
+or native mask mode changes. These lines also reach ReShade.log when NR runs in the helper process.
+
+Depth and bidirectional distortion are not bound by Uplift. Native guided upsampling has no verified activation path; reduced resolution uses
+Uplift's own upsampling. Global tone and the hidden native Performance setting have no verified effect and remain hidden.
+
+The **stock** 310.9.16 DLL has no Ada GPU kernels: bypassing its architecture check alone still fails to load its FP8 network on an RTX 4090.
+The separately supplied Ada compatibility prototype executes Small FP8 using donor Ada kernels. Native mask blend mode defaults to **1**;
+mode 0 uses a different mask combination and can produce little visible change. Existing saved choices are preserved.
+Full mask-combination behavior on the compatibility runtime remains under validation: the donor pre-block kernels omit the new mask fields.
+Execution has been demonstrated at 1080p/D3D12, but fidelity against native Blackwell remains unverified.
 
 **Keep faces** (in Look) keeps NR's lighting and shading on characters, but stops NR reshaping their faces. It costs more:
 NR runs one more time per frame, and it needs more video memory (about 1 GB at 4K). How to tune it:

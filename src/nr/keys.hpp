@@ -37,6 +37,7 @@ inline constexpr char LOCAL_TONE[] = "DLSSNR.LocalToneStrength";
 inline constexpr char LOCAL_STRUCTURE[] = "DLSSNR.LocalStructureStrength";
 inline constexpr char GLOBAL_TONE[] = "DLSSNR.GlobalToneStrength";
 inline constexpr char USE_AUTO_MASK[] = "DLSSNR.UseAutoMask";
+inline constexpr char MASK_BLEND_MODE[] = "DLSSNR.MaskBlendMode";
 inline constexpr char SKIN_STRUCTURE[] = "DLSSNR.SkinStructureStrength";
 inline constexpr char STYLE[] = "DLSSNR.Style";
 inline constexpr char RESET[] = "DLSSNR.Reset";

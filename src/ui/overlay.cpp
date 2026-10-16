@@ -790,6 +790,8 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   }
   changed |= DrawSourceRow(view, settings, state);
   changed |= DrawMotionRow(view, settings, state);
+  changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state);
+  changed |= DrawRow(*FindSetting("Preset"), view, settings, state);
   changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state);
   changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state);
   changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state);
@@ -905,6 +907,12 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   // everything, so its content does not depend on the card's state; a working card repeats its details lines.
   if (ImGui::CollapsingHeader("Details")) {
     ImGui::TextUnformatted(view.status_line.c_str());
+    if (!view.network_diagnostic.empty()) {
+      ImGui::TextWrapped("%s", view.network_diagnostic.c_str());
+      ImGui::TextDisabled("Calls count successful command recordings; see ReShade.log for each feature and network change.");
+    }
+    ImGui::TextWrapped("Native inputs: depth and bidirectional distortion are not bound. Native guided upsampling is not enabled; reduced resolution uses Uplift's own upsampling.");
+    ImGui::TextWrapped("Native mask blend mode defaults to 1. Full mask-combination behavior on the Ada compatibility runtime remains under validation. Global tone and native Performance have no verified effect.");
     // Plan 14: the engine's own lines, which the rows no longer show under themselves.
     for (const std::string* line : {&view.placement_line, &view.chain_line, &view.motion_line, &view.work_line, &view.exposure_line}) {
       if (!line->empty()) {

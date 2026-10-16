@@ -61,6 +61,7 @@ struct Controls {
   bool auto_mask = true;
   float skin_structure = 1.f;  // -1 = same as local_structure
   uint32_t style = 0u;         // 0..2 = Model A/B/C
+  uint32_t mask_blend_mode = 0u;
 };
 
 }  // namespace uplift::nr

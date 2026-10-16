@@ -43,6 +43,7 @@ struct SessionStatus {
   std::optional<uint64_t> runtime_bytes;
   uint64_t bytes_per_megapixel = 0u;  // the budget's calibrated per-megapixel cost (k)
   std::string message;
+  std::string network_diagnostic;
   bool suspended = false;
   // Config grace minus elapsed, floored at 0; filled only while `state == GRACE`, else zero.
   std::chrono::milliseconds grace_remaining{0};

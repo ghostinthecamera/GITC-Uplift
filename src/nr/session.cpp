@@ -122,8 +122,17 @@ void Session::SetPassCount(uint32_t passes) {
 }
 
 void Session::SetCreateOptions(uint32_t preset, uint32_t performance) {
+  const bool network_changed = (preset_ != preset);
   preset_ = preset;
   performance_ = performance;
+  if (!network_changed) return;
+  // All passes and Keep faces share the runtime pool; the existing retired-feature wait prevents old and new networks from overlapping.
+  RetireAllFeatures();
+  for (StageState& stage : stages_) {
+    stage.small_since.reset();
+  }
+  ResetAllStages();
+  budget_.ResetYield();
 }
 
 void Session::SetChain(std::span<const StageSlice> groups) {
@@ -877,6 +886,7 @@ SessionStatus Session::Status() const {
   if (const auto first = std::ranges::find_if(features_, [](const auto& feature) { return feature != nullptr; }); first != features_.end()) {
     status.capacity = (*first)->Capacity();
   }
+  if (features_[0]) status.network_diagnostic = features_[0]->Diagnostic();
   status.runtime_bytes = runtime_bytes_;
   status.bytes_per_megapixel = budget_.BytesPerMegapixel();
   status.message = message_;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "nr/snippet.hpp"
 #include "nr/types.hpp"
 
@@ -39,6 +41,7 @@ class FeatureInterface {
   virtual void Abandon() = 0;
   [[nodiscard]] virtual bool Created() const = 0;
   [[nodiscard]] virtual Size Capacity() const = 0;
+  [[nodiscard]] virtual std::string Diagnostic() const { return {}; }
 };
 
 class Feature final : public FeatureInterface {
@@ -54,12 +57,19 @@ class Feature final : public FeatureInterface {
   void Abandon() override;
   [[nodiscard]] bool Created() const override { return handle_ != nullptr; }
   [[nodiscard]] Size Capacity() const override { return capacity_; }
+  [[nodiscard]] std::string Diagnostic() const override;
 
  private:
   const Snippet& snippet_;
   NVSDK_NGX_Parameter* parameters_ = nullptr;
   NVSDK_NGX_Handle* handle_ = nullptr;
   Size capacity_;
+  std::string network_;
+  uint64_t enabled_evaluations_ = 0u;
+  uint32_t last_style_ = 0u;
+  uint32_t last_mask_mode_ = 0u;
+  bool last_enabled_ = false;
+  bool has_evaluation_ = false;
 };
 
 }  // namespace uplift::nr
