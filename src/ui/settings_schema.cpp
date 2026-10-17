@@ -108,7 +108,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::FLOAT,
         .section = SettingSection::LOOK,
         .label = "Intensity",
-        .tooltip = "How strongly NR changes the image. Ctrl+click to type a value above 1.",
+        .tooltip = "How strongly NR changes the image, from 0 (off) to 1 (full). NR goes no further than 1: for a stronger result, raise "
+                   "Edit strength in Result shaping.",
         .min = 0.0,
         .max = 10.0,
         .ui_max = 1.0,
@@ -1392,7 +1393,8 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .kind = SettingKind::FLOAT,
           .section = SettingSection::PASSES,
           .label = "Intensity",
-          .tooltip = "How strongly this pass changes the image. Ctrl+click to type a value above 1.",
+          .tooltip = "How strongly this pass changes the image, from 0 (off) to 1 (full). NR goes no further than 1: for a stronger "
+                     "result, raise Edit strength in Result shaping.",
           .min = 0.0,
           .max = 10.0,
           .ui_max = 1.0,
