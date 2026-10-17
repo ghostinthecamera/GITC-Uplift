@@ -224,6 +224,12 @@ reason.
 - **Multisampled images (MSAA):** DX9 and OpenGL need the `Uplift` technique turned on. DX10 and 32-bit DX12 can't use MSAA with NR:
   turn it off in the game.
 
+### DLSS motion vectors at Present
+
+The 1.4.1 testing build removes camera-jitter motion from DLSS vectors at Present on DX12 and Vulkan when the game marks those vectors as jittered. It uses the game's current and previous render-resolution jitter values; no new setting is required. Vectors not marked jittered keep their existing handling.
+
+For a flicker report, set **Advanced → Log level → Debug**, reproduce it for a few seconds and include `ReShade.log`. The first DLSS summary reports `jittered yes/no`; `Present motion` lines show current, older and missing copies, busy-copy counts and the latest correction. The DX12 line also counts pipeline reset hints. An affected-game test is still needed to confirm whether jitter was its flicker source.
+
 ### Passes at different stages
 
 With **Pass count** 2 or more, each Pass section starts with **Runs at**: where in the game's frame that pass runs (by default, with the

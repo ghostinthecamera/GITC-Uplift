@@ -133,6 +133,9 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
     return TriggerPoint::NONE;
   }
   config_ = config;
+  if (!config.session.enabled) {
+    present_jitter_.Reset();
+  }
   controls_ = config.controls;
   last_present_ = now;
   if (core_hold_.Resume(config.upscaler_creates)) {
@@ -213,6 +216,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   const std::optional<uint32_t> present_group = GroupAt(Stage::PRESENT);
   if (!present_group || !config.motion_vectors) {
     present_source_->Pipeline().ReleaseMotionCopies();
+    present_jitter_.Reset();
   }
   // 1.0.1 (fix round 1, minor 2): Launchpad's converted motion goes the same way once the Present path cannot bind UPLIFT_MV.
   if (!present_group || !config.launchpad_motion) {
@@ -416,6 +420,7 @@ bool DeviceContext::NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chr
     const bool present_group = GroupAt(Stage::PRESENT).has_value();
     if (!present_group || !config_.motion_vectors) {
       present_source_->Pipeline().ReleaseMotionCopies();
+      present_jitter_.Reset();
     }
     if (!present_group || !config_.launchpad_motion) {
       present_source_->Pipeline().ReleaseLaunchpadMotion();
@@ -429,6 +434,7 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
                                                       std::chrono::steady_clock::time_point now) {
   const std::optional<bool> before_reset = std::exchange(before_reset_, std::nullopt);  // this evaluate's, from BeforeDlssEvaluate
   if (!NoteMainEvaluate(frame, now)) return {.reason = "device removed"};
+  const ngx_hooks::MotionJitterOffset jitter = present_jitter_.Update(frame);
   // Amendment 7 (Key decision 7): copy the game's motion vectors on its list for the present that closes this frame: with Source = Present, and (split
   // chain) for a later group at Present.
   const auto copy_motion = [&]() -> sources::PipelineResult {
@@ -441,7 +447,9 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
       return sources::PipelineResult{
           .recorded = present_source_->Pipeline().RecordMotionCopy(list, {.resource = frame.motion_vectors, .rect = frame.motion_region},
                                                                    frame.mv_scale_x * config_.motion_scale_x,
-                                                                   frame.mv_scale_y * config_.motion_scale_y, config_.dlss_motion_upside_down),
+                                                                   frame.mv_scale_y * config_.motion_scale_y, config_.dlss_motion_upside_down,
+                                                                   jitter.x * static_cast<float>(frame.motion_region.width) * config_.motion_scale_x,
+                                                                   jitter.y * static_cast<float>(frame.motion_region.height) * config_.motion_scale_y),
       };
     });
     if (copied.recorded) {

@@ -1,6 +1,7 @@
 #include "ngx_hooks/dlss_capture.hpp"
 
 #include <cmath>
+#include <utility>
 
 #include "ngx_hooks/ngx_parameters.hpp"
 #include "nr/d3d11_handles.hpp"
@@ -83,6 +84,19 @@ nr::Rect ResolveVkOutputRegion(const DlssFrame& frame, const VkDlssResources& co
   if (frame.output == nullptr || copies.output.Type != NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW) return {};
   const NVSDK_NGX_ImageViewInfo_VK& output = copies.output.Resource.ImageViewInfo;
   return {.x = 0u, .y = 0u, .width = output.Width, .height = output.Height};
+}
+
+MotionJitterOffset MotionJitterTracker::Update(const DlssFrame& frame) {
+  if (!frame.snapshot.MvJittered() || frame.render.Empty() || !std::isfinite(frame.jitter_x) || !std::isfinite(frame.jitter_y)) {
+    Reset();
+    return {};
+  }
+  const Sample current = {.serial = frame.serial, .x = frame.jitter_x / static_cast<float>(frame.render.width),
+                          .y = frame.jitter_y / static_cast<float>(frame.render.height)};
+  const auto previous = std::exchange(previous_, current);
+  if (!previous || previous->serial != current.serial || frame.reset) return {};
+  // Motion points current -> previous: jittered motion contains previous jitter minus current jitter (NGX guide 3.6/3.7).
+  return {.x = current.x - previous->x, .y = current.y - previous->y};
 }
 
 bool ResetMerger::Filter(bool game_reset, std::chrono::steady_clock::time_point now) {

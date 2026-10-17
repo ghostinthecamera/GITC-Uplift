@@ -4,6 +4,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -130,7 +131,8 @@ class NrPipeline final : private nr::PassResolver {
   // region's own pixels by `scale_x/y`) on the game's list, for the present that closes the current
   // frame. False when nothing was recorded.
   // 1.1.6: `flip_y` when DLSS's images are upside down against the back buffer (ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN).
-  bool RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y, bool flip_y = false);
+  bool RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y, bool flip_y = false,
+                        float offset_x = 0.f, float offset_y = 0.f);
   // Frees the intermediates now when the GPU has passed the newest recording that used them (a drain to OFF
   // normally has); otherwise hands them to the timeline, which frees them once it does. Also the look set,
   // the mask copy and the exposure state too.
@@ -306,6 +308,24 @@ class NrPipeline final : private nr::PassResolver {
     ExposureReport exposure_report;
     MotionSource present_motion = MotionSource::NONE;  // the last present's provider
   };
+  struct PresentMotionCounters {
+    uint64_t evaluates = 0u;
+    uint64_t presents = 0u;
+    uint64_t copies = 0u;
+    uint64_t skipped_input = 0u;
+    uint64_t skipped_ring = 0u;
+    uint64_t skipped_slot = 0u;
+    uint64_t own = 0u;
+    uint64_t older = 0u;
+    uint64_t missed = 0u;
+    uint64_t age_max = 0u;
+    uint64_t lag_max = 0u;
+    uint64_t resets = 0u;
+    float offset_x = 0.f;
+    float offset_y = 0.f;
+    std::chrono::steady_clock::time_point since;
+  };
+
   // Amendment 7, deepened by I-2 (Plan 4 fix round 4): copies indexed by the frame the next present closes. The flicker fix (2026-10-08): four slots, grown
   // to eight once a copy is skipped for a slot still read (a lag past 3; fix round 1, M6), and a present without its own binds the
   // newest at most PRESENT_MOTION_MAX_AGE frames older (present_motion_ring.hpp), so the motion source never switches for a missed copy.
@@ -376,6 +396,7 @@ class NrPipeline final : private nr::PassResolver {
   uint64_t last_present_frame_ = 0u;
   bool allocation_failure_logged_ = false;
   MotionCopies motion_copies_;
+  PresentMotionCounters present_motion_counters_;
   LaunchpadMotion launchpad_motion_;
   DlssPresentMotion dlss_present_motion_;  // Plan 18 (fix round 1, M-1)
 };

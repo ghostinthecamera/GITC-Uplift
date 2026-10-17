@@ -453,6 +453,7 @@ class DeviceContext {
   FrameTrigger trigger_;
   ngx_hooks::FrameGenDetector frame_generation_;
   ngx_hooks::ResetMerger reset_merger_;
+  ngx_hooks::MotionJitterTracker present_jitter_;
   ID3D12CommandQueue* present_queue_ = nullptr;
   FrameConfig config_;
   PlacementChoice placement_;

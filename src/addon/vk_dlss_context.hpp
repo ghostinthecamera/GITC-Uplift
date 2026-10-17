@@ -326,6 +326,7 @@ class VkDlssContext {
   std::optional<ngx_hooks::CreateSnapshot> main_snapshot_;
   NVSDK_NGX_Feature main_feature_ = NVSDK_NGX_Feature_Reserved_Unknown;
   ngx_hooks::ResetMerger reset_merger_;
+  ngx_hooks::MotionJitterTracker present_jitter_;
   std::optional<std::chrono::steady_clock::time_point> last_main_evaluate_;
   std::optional<std::chrono::steady_clock::time_point> last_game_list_recording_;
   std::array<std::optional<std::chrono::steady_clock::time_point>, STAGE_COUNT> last_look_recordings_;  // Plan 14: the stabiliser's frame time, by group
@@ -401,6 +402,8 @@ class VkDlssContext {
     uint64_t own = 0u;            // presents that bound their own frame's copy
     uint64_t older = 0u;          // presents that bound an older copy (PRESENT_MOTION_MAX_AGE)
     uint64_t missed = 0u;         // presents with no copy that recent
+    float offset_x = 0.f;
+    float offset_y = 0.f;
     uint64_t lag_min = UINT64_MAX;
     uint64_t lag_max = 0u;
     std::optional<std::chrono::steady_clock::time_point> since;

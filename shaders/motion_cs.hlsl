@@ -13,8 +13,8 @@ cbuffer MotionConstants : register(b0) {
   float scale_x;       // MV.Scale × MotionScale × image / region: vectors land in destination pixels
   float scale_y;
   uint flip_y;         // 1.1.6: 1 when the source is upside down against the destination (DLSS's vectors at Present in some engines, Unity's for one)
-  uint reserved1;
-  uint reserved2;
+  float offset_x;      // jitter compensation in destination pixels, after MV scale and before flipping
+  float offset_y;
   uint reserved3;
   uint reserved4;
   uint reserved5;
@@ -45,6 +45,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     read.y = region.y - 1u - read.y;  // the source's rows run the other way
   }
   float2 motion = motion_source.Load(int3(uint2(region_x, region_y) + read, 0)).xy * float2(scale_x, scale_y);
+  const float2 offset = float2(offset_x, offset_y);
+  if (any(offset != 0.f)) {
+    motion += offset;
+  }
   if (flip_y != 0u) {
     motion.y = -motion.y;  // and so does its vertical motion
   }

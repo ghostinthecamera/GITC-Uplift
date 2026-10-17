@@ -46,8 +46,8 @@ std::string FormatDlssSummary(const DlssSummary& s) {
   const std::string feature = (s.feature == NVSDK_NGX_Feature_SuperSampling       ? std::string("DLSS-SR")
                                : s.feature == NVSDK_NGX_Feature_RayReconstruction ? std::string("Ray Reconstruction")
                                                                                   : std::format("feature {}", static_cast<int>(s.feature)));
-  const std::string motion = (s.motion_vectors ? std::format("{}x{} ({}), {}, scale {} x {}", s.motion.width, s.motion.height, s.motion_format,
-                                                             (s.snapshot.MvLowRes() ? "low-res" : "output-res"), s.mv_scale_x, s.mv_scale_y)
+  const std::string motion = (s.motion_vectors ? std::format("{}x{} ({}), {}, scale {} x {}, jittered {}", s.motion.width, s.motion.height, s.motion_format,
+                                                             (s.snapshot.MvLowRes() ? "low-res" : "output-res"), s.mv_scale_x, s.mv_scale_y, s.snapshot.MvJittered() ? "yes" : "no")
                                                : std::string("none"));
   const std::string file = (s.dlss_file.empty() ? std::string("not loaded as nvngx_dlss.dll")
                                                 : std::format("{} ({})", s.dlss_file, (s.dlss_version.empty() ? "version unknown" : s.dlss_version)));

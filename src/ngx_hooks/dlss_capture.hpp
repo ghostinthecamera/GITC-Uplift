@@ -62,6 +62,25 @@ struct VkDlssResources {
 // image view: Width x Height); empty when neither is known.
 [[nodiscard]] nr::Rect ResolveVkOutputRegion(const DlssFrame& frame, const VkDlssResources& copies);
 
+struct MotionJitterOffset {
+  float x = 0.f;  // normalized image coordinates, added after MV scale has converted the raw vectors
+  float y = 0.f;
+};
+
+class MotionJitterTracker {
+ public:
+  [[nodiscard]] MotionJitterOffset Update(const DlssFrame& frame);
+  void Reset() { previous_.reset(); }
+
+ private:
+  struct Sample {
+    uint64_t serial = 0u;
+    float x = 0.f;
+    float y = 0.f;
+  };
+  std::optional<Sample> previous_;
+};
+
 // The game's Reset as NR's reset hint (v2 design §3.1): the first Reset of a burst passes, and any
 // further Reset within `window` of the last one that passed is merged, because a burst of history
 // resets shows as pops.

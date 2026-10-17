@@ -267,6 +267,9 @@ TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& c
     return TriggerPoint::NONE;
   }
   config_ = config;
+  if (!config.session.enabled) {
+    present_jitter_.Reset();
+  }
   present_frame_ = present;
   if (vk_host_ != nullptr) {
     vk_host_->SetInitializeCoreForDevice(config.vk_initialize_core);  // Plan 19: read at the Session's next load
@@ -356,6 +359,7 @@ TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& c
     NotePresentMotionSecond(now);
   } else {
     pipeline_->ReleasePresentMotion();
+    present_jitter_.Reset();
     present_motion_logged_ = false;
     present_motion_counters_ = {};  // fix round 1 (M2): the next window starts when the copies are asked for again
   }
@@ -1004,6 +1008,7 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
   }
   dlss_seen_ = true;
   last_main_evaluate_ = now;
+  const ngx_hooks::MotionJitterOffset jitter = present_jitter_.Update(frame);
   main_snapshot_ = frame.snapshot;
   main_feature_ = frame.feature;
   if (dlss_off_.OnEvaluate(true) && std::exchange(dlss_off_logged_, false)) {
@@ -1096,6 +1101,8 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
   if (config_.present_motion_copy && (pass1_present || later_present_copy)) {
     PresentMotionCounters& counters = present_motion_counters_;
     ++counters.evaluates;
+    counters.offset_x = jitter.x * static_cast<float>(motion_region.width) * config_.motion_scale_x;
+    counters.offset_y = jitter.y * static_cast<float>(motion_region.height) * config_.motion_scale_y;
     const nr::Timeline& timeline = completion_->Timeline();
     const uint64_t current = timeline.CurrentFrame();
     const uint64_t completed = timeline.CompletedFrame();
@@ -1110,7 +1117,9 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
       const sources::PresentMotionWrite write =
           pipeline_->RecordPresentMotion(buffer, {.view = vectors.ImageView, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, motion_region,
                                          frame.mv_scale_x * config_.motion_scale_x, frame.mv_scale_y * config_.motion_scale_y, current + 1u,
-                                         config_.dlss_motion_upside_down);  // a throw leaves the token open
+                                         config_.dlss_motion_upside_down,
+                                         jitter.x * static_cast<float>(motion_region.width) * config_.motion_scale_x,
+                                         jitter.y * static_cast<float>(motion_region.height) * config_.motion_scale_y);  // a throw leaves the token open
       const bool copied = (write == sources::PresentMotionWrite::WRITTEN);
       switch (write) {
         case sources::PresentMotionWrite::WRITTEN:   ++counters.copies; break;
@@ -1545,6 +1554,7 @@ void VkDlssContext::Teardown() {
     ring_->Destroy();  // Plan 19: the idle covers the effect queue, where Uplift's own command buffers ran
   }
   pipeline_->ReleasePresentMotion();
+  present_jitter_.Reset();
   pipeline_->ReleaseIntermediates();
   if (!core_shut_down_) {
     session_->OnDeviceDestroyed();  // the flush (immediate now), the features' release, Shutdown1, the unload
@@ -1616,9 +1626,9 @@ void VkDlssContext::NotePresentMotionSecond(std::chrono::steady_clock::time_poin
   if (counters.presents > 0u || counters.evaluates > 0u) {
     nr::Logf(nr::LogLevel::TRACE,
              "Vulkan: Present motion: {} evaluates for {} presents; {} copies, skipped {} (input) {} (ring slot) {} (slot's last use); presents bound {} own, "
-             "{} older, {} none; GPU lag at the evaluates {}..{} frames",
+             "{} older, {} none; GPU lag at the evaluates {}..{} frames; latest jitter correction {} x {} px",
              counters.evaluates, counters.presents, counters.copies, counters.skipped_input, counters.skipped_ring, counters.skipped_slot, counters.own,
-             counters.older, counters.missed, (counters.lag_min == UINT64_MAX ? 0u : counters.lag_min), counters.lag_max);
+             counters.older, counters.missed, (counters.lag_min == UINT64_MAX ? 0u : counters.lag_min), counters.lag_max, counters.offset_x, counters.offset_y);
   }
   counters = {.since = now};
 }

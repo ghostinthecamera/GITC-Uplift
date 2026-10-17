@@ -163,7 +163,7 @@ class VkNrPipeline final : private nr::PassResolver {
   // 1.1.6: `flip_y` when DLSS's images are upside down against the back buffer (ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN).
   // Present-motion flicker fix: says why no copy was made (the per-second counters).
   PresentMotionWrite RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x, float scale_y,
-                                         uint64_t frame, bool flip_y = false);
+                                         uint64_t frame, bool flip_y = false, float offset_x = 0.f, float offset_y = 0.f);
   // The copy for `frame` (PickPresentMotion: its own, else the newest at most PRESENT_MOTION_MAX_AGE frames older, whose age goes to `age`), or an empty one;
   // stamps its last use with the current mark (NR or the bridge reads it in this frame).
   [[nodiscard]] vk::NrImage PresentMotion(uint64_t frame, uint64_t* age = nullptr);

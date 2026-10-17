@@ -79,6 +79,8 @@ struct VkMotionPass {
   nr::Size canvas;                      // the target's size: the image plus mirrored padding
   float scale_x = 1.f;                  // multiplies the vectors into target pixels
   float scale_y = 1.f;
+  float offset_x = 0.f;  // added in destination pixels, before any vertical flip
+  float offset_y = 0.f;
   bool flip_y = false;                  // 1.1.6: `source` is upside down against `target` (motion_cs.hlsl)
 };
 
