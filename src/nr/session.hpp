@@ -105,7 +105,7 @@ class Session {
 
   void SetEnabled(bool enabled);
   void SetPassCount(uint32_t passes);
-  void SetCreateOptions(uint32_t preset, uint32_t performance);
+  void SetCreateOptions(const std::array<uint32_t, MAX_PASSES>& presets, uint32_t performance);
   // Spec §12 Advanced settings; they take effect from the next Tick or Evaluate.
   void SetGrace(std::chrono::milliseconds grace) { config_.grace = grace; }
   void SetAutoResume(bool auto_resume) { config_.auto_resume = auto_resume; }
@@ -187,6 +187,7 @@ class Session {
     bool reset_pending = true;
     // Keep faces (2026-10-08): the stage's twin, live only while Keep faces asks for it here. Under the budget it yields before any pass drops.
     std::unique_ptr<FeatureInterface> face_feature;
+    uint32_t face_preset = 0u;
     FacesPause faces_pause = FacesPause::NONE;
     bool faces_requested = false;       // the latest Evaluate wanted the twin (Status's faces_note)
     uint64_t faces_surface_bytes = 0u;  // the latest FaceTwin::surface_bytes
@@ -239,7 +240,7 @@ class Session {
   uint32_t create_result_ = 0u;  // Plan 19 T6: SessionStatus::create_result
   uint32_t pass_count_ = 1u;
   uint32_t passes_limit_ = 10u;
-  uint32_t preset_ = 1u;
+  std::array<uint32_t, MAX_PASSES> presets_ = {};
   uint32_t performance_ = 3u;
   uint32_t consecutive_failures_ = 0u;
   uint32_t retry_attempts_ = 0u;  // automatic retries since the last recovery, settings change or Retry now

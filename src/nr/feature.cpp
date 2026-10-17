@@ -107,12 +107,12 @@ NVSDK_NGX_Result Feature::Evaluate(ID3D12GraphicsCommandList* list, const Evalua
   return result;
 }
 
-std::string Feature::Diagnostic() const {
+std::string Feature::Diagnostic(uint32_t pass) const {
   if (handle_ == nullptr) return {};
   const std::string_view network = network_.empty() ? "unconfirmed (no native creation message)" : std::string_view(network_);
-  if (!has_evaluation_) return std::format("NR pass 1 network: {} | awaiting evaluation", network);
-  return std::format("NR pass 1 network: {} | enabled calls recorded: {} | {} | style {} | native mask mode {}",
-                     network, enabled_evaluations_, last_enabled_ ? "enabled" : "bypassed / zero intensity", last_style_, last_mask_mode_);
+  if (!has_evaluation_) return std::format("NR pass {} network: {} | awaiting evaluation", pass, network);
+  return std::format("NR pass {} network: {} | enabled calls recorded: {} | {} | style {} | native mask mode {}",
+                     pass, network, enabled_evaluations_, last_enabled_ ? "enabled" : "bypassed / zero intensity", last_style_, last_mask_mode_);
 }
 
 NVSDK_NGX_Result Feature::Release() {

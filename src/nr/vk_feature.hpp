@@ -21,7 +21,7 @@ class VkFeature final : public FeatureInterface {
   void Abandon() override;
   [[nodiscard]] bool Created() const override { return handle_ != nullptr; }
   [[nodiscard]] Size Capacity() const override { return capacity_; }
-  [[nodiscard]] std::string Diagnostic() const override;
+  [[nodiscard]] std::string Diagnostic(uint32_t pass) const override;
 
  private:
   const Snippet& snippet_;

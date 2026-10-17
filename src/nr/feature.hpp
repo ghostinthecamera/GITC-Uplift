@@ -41,7 +41,7 @@ class FeatureInterface {
   virtual void Abandon() = 0;
   [[nodiscard]] virtual bool Created() const = 0;
   [[nodiscard]] virtual Size Capacity() const = 0;
-  [[nodiscard]] virtual std::string Diagnostic() const { return {}; }
+  [[nodiscard]] virtual std::string Diagnostic(uint32_t /*pass*/) const { return {}; }
 };
 
 class Feature final : public FeatureInterface {
@@ -57,7 +57,7 @@ class Feature final : public FeatureInterface {
   void Abandon() override;
   [[nodiscard]] bool Created() const override { return handle_ != nullptr; }
   [[nodiscard]] Size Capacity() const override { return capacity_; }
-  [[nodiscard]] std::string Diagnostic() const override;
+  [[nodiscard]] std::string Diagnostic(uint32_t pass) const override;
 
  private:
   const Snippet& snippet_;

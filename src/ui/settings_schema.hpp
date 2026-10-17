@@ -40,13 +40,14 @@ inline constexpr uint32_t RESTARTS_HISTORY = 1u << 0u;  // a change restarts NR'
 inline constexpr uint32_t NEXT_START = 1u << 1u;        // applies from the next game start
 inline constexpr uint32_t NEXT_DLSS_CREATE = 1u << 2u;  // applies when the game next creates its DLSS feature
 inline constexpr uint32_t GREYED = 1u << 3u;            // shown read-only: no effect in NR 310.8
-inline constexpr uint32_t PASS_SWITCH = 1u << 4u;       // a pass's "Same as pass 1" or "Runs at": always written, shown while it follows pass 1
+inline constexpr uint32_t PASS_SWITCH = 1u << 4u;       // a pass's look-sharing, stage or network selection: always written, shown while it follows pass 1
 inline constexpr uint32_t BOOKKEEPING = 1u << 5u;       // hidden state Uplift writes itself: Restore all keeps it
 inline constexpr uint32_t APPLY_ON_RELEASE = 1u << 6u;  // a SliderInt row: shows its value while held, applies it once on release
 // Split chain (2026-10-10): a pass's "Runs at". Never part of the Defaults view: moving a pass to another stage rebuilds NR's features.
 inline constexpr uint32_t PASS_STAGE = 1u << 7u;
 // 2026-10-17: a FLOAT whose slider's range is its meaning (a share of the output, a blend): Ctrl+click cannot type past the slider's end.
 inline constexpr uint32_t SLIDER_RANGE_ONLY = 1u << 8u;
+inline constexpr uint32_t NETWORK_PRESET = 1u << 9u;  // creation configuration, independent of look sharing and Compare
 }  // namespace setting_flags
 
 // 2026-10-17: how far past its slider's end a FLOAT accepts a typed value (Ctrl+click), as a multiple of that end.
@@ -85,7 +86,7 @@ void ResetSection(Settings* settings, SettingSection section);
 // Plan 6 (v2 design §3.16, D6): the look group the Defaults view swaps -- the whole of LOOK (Intensity, the
 // Model rows, Pass Count and every pass's own rows included), RESULT, LIMITS and PASSES. Mask and UI
 // correction are not part of it: ui-review.md §3 moved them out of LOOK into their own MASK section. Nor is a
-// pass's "Runs at" (setting_flags::PASS_STAGE).
+// pass's "Runs at" or network selection (PASS_STAGE / NETWORK_PRESET).
 [[nodiscard]] bool InDefaultsView(const SettingDescriptor& descriptor);
 // `mine` with the look group at its built-in values. A view only: nothing ever saves it.
 [[nodiscard]] Settings DefaultsView(Settings mine);

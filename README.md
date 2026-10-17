@@ -231,6 +231,20 @@ pass before). Passes before upscaling run at the game's render resolution, so th
 pass 2 at Present. This works in native DX12 and DX11 DLSS games, and in Vulkan games with **Vulkan NR at Present** on Native;
 elsewhere every pass runs at one stage. More in [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide#passes-at-different-stages).
 
+### A different network per pass
+
+With NR 310.9.16, each Pass 2–10 section has **Network preset** beside **Runs at**:
+
+- **Same as pass 1** inherits the Setup network (the default, including for existing configurations).
+- **A: Legacy** or **B: Small FP8** selects that pass's network independently.
+
+For example, select Legacy in Setup with Before upscaling, then Small FP8 and After DLSS for pass 2.
+**Same look as pass 1** shares the look controls; it leaves the network and placement selections independent.
+Changing a network recreates the feature pool and resets its histories. Keep faces uses its stage group's first-pass network.
+**Details** reports the runtime-confirmed network and recorded evaluation count for every created, requested pass.
+NR 310.8 greys every network selector and displays Legacy, preserving saved selections for a newer runtime.
+Mixed chains use a conservative memory estimate; they do not promise smaller VRAM reservations for Small FP8.
+
 ### Settings in ReShade.ini
 
 Settings live in the game's `ReShade.ini`, under `[Uplift]`. Most are in the Uplift tab; these are the ones you may need by hand:
@@ -249,6 +263,7 @@ Settings live in the game's `ReShade.ini`, under `[Uplift]`. Most are in the Upl
 | `GraceSeconds` | `5` | **Grace (seconds)** (Advanced): how long NR keeps its memory after you switch it off, so a quick toggle doesn't reload it. |
 | `VramCheck` | `0` | **Video memory check** (Advanced): `0` Careful leaves the game its budget and pauses NR when the game needs the memory back; `1` Relaxed lets NR go about 1 GB past the game's budget; `2` Off never checks, like other DLSS-NR add-ons. Relaxed and Off can stutter in games that really use all their video memory. |
 | `KeepFaces` | `0` | **Keep faces** (Look): `1` keeps NR's lighting and shading on characters, but stops NR reshaping their faces. NR runs one more time per frame, and needs about 1 GB more video memory at 4K. |
+| `Pass2Preset` ... `Pass10Preset` | `0` | Per-pass network: `0` inherits Setup, `1` Legacy, `2` Small FP8. Independent of look sharing; requires NR 310.9.16. |
 | `Pass2Stage` ... `Pass10Stage` | `0` | **Runs at** (each Pass section): `0` the same stage as the pass before, `1` Before upscaling, `2` After DLSS, `3` Present. A pass never runs before the pass before it, and a stage that can't run right now uses the nearest one that can. |
 | `ResolutionAfterDlss`, `ResolutionPresent` | `0` | **Resolution at After DLSS** / **at Present**: the size for the passes at that stage when pass 1 runs earlier. `0` Full, `1` Quality, `2` Balanced, `3` Performance, `4` Match game, `5` Custom. |
 | `ResolutionScaleAfterDlss`, `ResolutionScalePresent` | `100` | **Custom scale** for those, 25 to 100 (%). |

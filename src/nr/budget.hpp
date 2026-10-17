@@ -68,6 +68,7 @@ class Budget {
   // feature, e.g. its stats delta minus StatsOvercountBytes() plus the 8 B/px
   // capacity buffer that create-time stats omit (spike E6).
   void Calibrate(Size size, uint64_t measured_feature_bytes);
+  void ResetCalibration() { bytes_per_megapixel_ = config_.bytes_per_megapixel; }
   [[nodiscard]] uint64_t StatsOvercountBytes() const { return config_.stats_overcount_bytes; }
   [[nodiscard]] uint64_t FirstUseBytes() const { return config_.first_use_bytes; }  // what Fit charges while the first use is pending
   // Call at 1 Hz while NR is active.

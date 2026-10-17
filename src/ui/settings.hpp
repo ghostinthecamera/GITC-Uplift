@@ -171,7 +171,7 @@ enum class PassStage : uint32_t {
   PRESENT = 3u,
 };
 
-// Pass n >= 2's own settings (v2 design §3.10, P4-P13), used only while it does not follow pass 1. `stage` applies either way.
+// Pass n >= 2's own settings (v2 design §3.10, P4-P13), used only while it does not follow pass 1. `stage` and `preset` apply either way.
 struct PassSettings {
   bool follow_pass1 = true;
   float intensity = 1.f;
@@ -183,6 +183,7 @@ struct PassSettings {
   float transfer_strength = 1.f;
   float color_strength = 1.f;
   PassStage stage = PassStage::SAME;
+  uint32_t preset = 0u;  // 0 = inherit Setup; 1 = Legacy; 2 = Small FP8
   friend bool operator==(const PassSettings&, const PassSettings&) = default;
 };
 
@@ -295,7 +296,7 @@ void SetMotionPick(Settings* settings, MotionPick pick);
 struct SessionOptions {
   bool enabled = false;
   uint32_t pass_count = 1u;
-  uint32_t preset = 1u;
+  std::array<uint32_t, MAX_PASSES> presets = {};
   uint32_t performance = 3u;
   std::chrono::milliseconds grace{5000};
   bool auto_resume = true;

@@ -245,7 +245,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   session_->SetAutoResume(options.auto_resume);
   session_->SetMarginOverride(options.margin_override_bytes);
   session_->SetVramCheck(options.vram_check);
-  session_->SetCreateOptions(options.preset, options.performance);
+  session_->SetCreateOptions(options.presets, options.performance);
   session_->SetPassCount(options.pass_count);
   session_->NoteFacesWanted(config.look.keep_faces.enabled);  // Keep faces fix round 2 (4): its off edge, even on a frame NR then skips
   for (uint32_t group = 1u; group < chain_.group_count; ++group) {

@@ -13,6 +13,7 @@ namespace {
 
 constexpr std::array<std::string_view, 3> MODELS = {"Style A", "Style B", "Style C"};
 constexpr std::array<std::string_view, 3> NR_NETWORKS = {"Runtime default", "A: Legacy", "B: Small FP8"};
+constexpr std::array<std::string_view, 3> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8"};
 constexpr std::array<std::string_view, 3> SOURCES = {"Auto", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 5> MOTION_VECTORS = {"Auto", "DLSS", "Launchpad", "None", "Lumenite"};  // stored-index order (Setup shows Lumenite after Launchpad)
 constexpr std::array<std::string_view, 7> QUALITY_MODES = {"Game", "Performance", "Balanced", "Quality",
@@ -47,6 +48,7 @@ using setting_flags::BOOKKEEPING;
 using setting_flags::GREYED;
 using setting_flags::NEXT_DLSS_CREATE;
 using setting_flags::NEXT_START;
+using setting_flags::NETWORK_PRESET;
 using setting_flags::PASS_STAGE;
 using setting_flags::PASS_SWITCH;
 using setting_flags::RESTARTS_HISTORY;
@@ -953,7 +955,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
                    "Changing the network recreates NR and resets history. Details shows the runtime-confirmed name and recorded evaluations. "
                    "NR 310.8 always uses Legacy. This is separate from Style A/B/C in Look.",
         .choices = NR_NETWORKS,
-        .flags = RESTARTS_HISTORY,
+        .flags = RESTARTS_HISTORY | NETWORK_PRESET,
         .get = [](const Settings& s) { return static_cast<double>(s.preset); },
         .set = [](Settings& s, double v) { s.preset = static_cast<uint32_t>(v); },
     },
@@ -1328,16 +1330,16 @@ void PassSet(Settings& s, double v) {
   }
 }
 
-constexpr size_t PASS_ROW_COUNT = 10u;
+constexpr size_t PASS_ROW_COUNT = 11u;
 constexpr size_t LATER_PASS_COUNT = MAX_PASSES - 1u;
 
-// The 90 per-pass keys ("Pass2FollowPass1".."Pass10Stage"), built once: every per-pass
+// The 99 per-pass keys ("Pass2FollowPass1".."Pass10Preset"), built once: every per-pass
 // SettingDescriptor::key points into this array, which must outlive them (function-local static).
 const std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT>& PassKeyStrings() {
   static const std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT> keys = [] {
     constexpr std::array<std::string_view, PASS_ROW_COUNT> SUFFIXES = {
         "FollowPass1", "Intensity", "Style", "LocalTone", "LocalStructure", "SkinStructure", "AutoMask",
-        "TransferStrength", "ColorStrength", "Stage",
+        "TransferStrength", "ColorStrength", "Stage", "Preset",
     };
     std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT> result;
     for (size_t index = 0u; index < LATER_PASS_COUNT; ++index) {
@@ -1370,7 +1372,7 @@ const std::array<std::array<std::string_view, 4>, LATER_PASS_COUNT>& PassStageCh
   return choices;
 }
 
-// Pass n = Index + 2's ten rows, in the order settings.cpp's SaveSettings and the overlay's Pass tree expect.
+// Pass n = Index + 2's rows, in the order settings.cpp's SaveSettings and the overlay's Pass tree expect.
 template <size_t Index>
 std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
   constexpr auto PASS = static_cast<uint8_t>(Index + 2u);
@@ -1381,8 +1383,8 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .key = key(0),
           .kind = SettingKind::BOOL,
           .section = SettingSection::PASSES,
-          .label = "Same as pass 1",
-          .tooltip = "Off gives this pass its own settings below.",
+          .label = "Same look as pass 1",
+          .tooltip = "Off gives this pass its own look settings. Runs at and Network preset are independent.",
           .flags = PASS_SWITCH,
           .get = &PassGet<Index, &PassSettings::follow_pass1>,
           .set = &PassSet<Index, &PassSettings::follow_pass1>,
@@ -1504,6 +1506,19 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .set = &PassSet<Index, &PassSettings::stage>,
           .pass = PASS,
       },
+      {
+          .key = key(10),
+          .kind = SettingKind::CHOICE,
+          .section = SettingSection::PASSES,
+          .label = "Network preset",
+          .tooltip = "Same as pass 1 inherits the Setup network. A selects Legacy; B selects Small FP8. Independent of look sharing. "
+                     "Changing the network recreates NR and resets history. Details reports each pass's runtime-confirmed network. NR 310.8 only provides Legacy.",
+          .choices = PASS_NETWORKS,
+          .flags = PASS_SWITCH | NETWORK_PRESET | RESTARTS_HISTORY,
+          .get = &PassGet<Index, &PassSettings::preset>,
+          .set = &PassSet<Index, &PassSettings::preset>,
+          .pass = PASS,
+      },
   });
 }
 
@@ -1571,7 +1586,7 @@ void ResetSection(Settings* settings, SettingSection section) {
 }
 
 bool InDefaultsView(const SettingDescriptor& descriptor) {
-  if ((descriptor.flags & setting_flags::PASS_STAGE) != 0u) return false;
+  if ((descriptor.flags & (setting_flags::PASS_STAGE | setting_flags::NETWORK_PRESET)) != 0u) return false;
   switch (descriptor.section) {
     case SettingSection::LOOK:
     case SettingSection::RESULT:

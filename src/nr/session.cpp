@@ -121,11 +121,12 @@ void Session::SetPassCount(uint32_t passes) {
   }
 }
 
-void Session::SetCreateOptions(uint32_t preset, uint32_t performance) {
-  const bool network_changed = (preset_ != preset);
-  preset_ = preset;
+void Session::SetCreateOptions(const std::array<uint32_t, MAX_PASSES>& presets, uint32_t performance) {
+  const bool network_changed = (presets_ != presets);
+  presets_ = presets;
   performance_ = performance;
   if (!network_changed) return;
+  budget_.ResetCalibration();  // another network must not inherit a cheaper calibration from the previous configuration
   // All passes and Keep faces share the runtime pool; the existing retired-feature wait prevents old and new networks from overlapping.
   RetireAllFeatures();
   for (StageState& stage : stages_) {
@@ -538,7 +539,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
       rebuild = true;
     }
   }
-  if (stage.face_feature && !Fits(chain.size, stage.face_feature->Capacity())) {
+  if (stage.face_feature && (!Fits(chain.size, stage.face_feature->Capacity()) || (faces_wanted && stage.face_preset != presets_[slice.first]))) {
     rebuild = true;
   }
   if (!rebuild && first_live != nullptr) {
@@ -607,15 +608,17 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
     *reason = "budget";
     return false;
   }
-  const auto create = [&](std::unique_ptr<FeatureInterface>* created) -> NVSDK_NGX_Result {
+  const auto create = [&](std::unique_ptr<FeatureInterface>* created, uint32_t preset) -> NVSDK_NGX_Result {
     auto feature = host_.NewFeature();
     const auto before = host_.QueryRuntimeBytes();
     last_use_mark_ = timeline_.MarkNow();  // Create is recorded on this frame's list, win or lose
-    const NVSDK_NGX_Result result = feature->Create(list, {.capacity = chain.size, .preset = preset_, .performance = performance_});
+    const NVSDK_NGX_Result result = feature->Create(list, {.capacity = chain.size, .preset = preset, .performance = performance_});
     if (NVSDK_NGX_FAILED(result)) return result;
     first_use_paid_ = true;
     const auto after = host_.QueryRuntimeBytes();
-    if (before && after && *after > *before + budget_.StatsOvercountBytes()) {
+    if (std::ranges::all_of(presets_, [](uint32_t requested) { return requested == 1u; })
+        && before && after && *after > *before + budget_.StatsOvercountBytes()) {
+      // Legacy-only calibration: Small FP8 has different weights and pooled costs. Mixed/default configurations keep the conservative estimate.
       // Create-time stats exclude the 8 B/px capacity buffer a feature adds at its
       // first smaller frame (E6); keep charging it (spec §6.2).
       budget_.Calibrate(chain.size,
@@ -627,7 +630,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
   uint32_t live = live_before;
   for (uint32_t index = slice.first; index < wanted_end && live < target; ++index) {
     if (features_[index]) continue;
-    if (const NVSDK_NGX_Result result = create(&features_[index]); NVSDK_NGX_FAILED(result)) {
+    if (const NVSDK_NGX_Result result = create(&features_[index], presets_[index]); NVSDK_NGX_FAILED(result)) {
       create_failed_ = true;
       create_result_ = static_cast<uint32_t>(result);
       EnterFailed(std::format("NR feature creation failed: {:#010x}", static_cast<uint32_t>(result)));
@@ -641,10 +644,11 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
   }
   if (need_face && face_fits) {
     // Fix round 1 (C2): a twin that cannot be created never turns NR off; the passes run on without it until Keep faces is toggled or NR reloads.
-    if (const NVSDK_NGX_Result result = create(&stage.face_feature); NVSDK_NGX_FAILED(result)) {
+    if (const NVSDK_NGX_Result result = create(&stage.face_feature, presets_[slice.first]); NVSDK_NGX_FAILED(result)) {
       stage.faces_pause = FacesPause::FAILED_CREATE;
       Logf(LogLevel::ERR, "Keep faces stopped: its extra NR run could not start ({:#010x}); NR runs on without it", static_cast<uint32_t>(result));
     } else {
+      stage.face_preset = presets_[slice.first];
       Logf(LogLevel::INFO, "Keep faces: its extra NR run started (pass {} runs twice)", slice.first + 1u);
     }
   } else if (need_face) {
@@ -887,7 +891,15 @@ SessionStatus Session::Status() const {
   if (const auto first = std::ranges::find_if(features_, [](const auto& feature) { return feature != nullptr; }); first != features_.end()) {
     status.capacity = (*first)->Capacity();
   }
-  if (features_[0]) status.network_diagnostic = features_[0]->Diagnostic();
+  for (uint32_t index = 0u; index < pass_count_; ++index) {
+    if (!features_[index]) continue;
+    const std::string diagnostic = features_[index]->Diagnostic(index + 1u);
+    if (diagnostic.empty()) continue;
+    if (!status.network_diagnostic.empty()) {
+      status.network_diagnostic += '\n';
+    }
+    status.network_diagnostic += diagnostic;
+  }
   status.runtime_bytes = runtime_bytes_;
   status.bytes_per_megapixel = budget_.BytesPerMegapixel();
   status.message = message_;

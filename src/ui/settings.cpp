@@ -79,7 +79,7 @@ void MigrateSettings(Settings* settings) {
 
 void SaveSettings(const Settings& settings, ConfigStore* store) {
   for (const SettingDescriptor& descriptor : SettingsSchema()) {
-    // v2 design D6: a pass that follows pass 1 writes only its switch, and (split chain, 2026-10-10) its Runs at: both are PASS_SWITCH rows.
+    // A pass sharing its look still writes its look-sharing switch, stage and network selection (PASS_SWITCH rows).
     if (descriptor.pass != 0u && (descriptor.flags & setting_flags::PASS_SWITCH) == 0u
         && settings.passes[descriptor.pass - 2u].follow_pass1) {
       continue;
@@ -172,10 +172,16 @@ nr::Controls ToControls(const Settings& settings) {
 }
 
 SessionOptions ToSessionOptions(const Settings& settings) {
+  std::array<uint32_t, MAX_PASSES> presets;
+  presets[0] = settings.preset;
+  for (size_t index = 0u; index < settings.passes.size(); ++index) {
+    const uint32_t own = settings.passes[index].preset;
+    presets[index + 1u] = (own == 0u ? settings.preset : own);
+  }
   return {
       .enabled = settings.enabled,
       .pass_count = settings.pass_count,
-      .preset = settings.preset,
+      .presets = presets,
       .performance = settings.performance,
       .grace = std::chrono::milliseconds(std::lround(settings.grace_seconds * 1000.f)),
       .auto_resume = settings.auto_resume,

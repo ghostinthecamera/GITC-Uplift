@@ -131,7 +131,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const bool keep_faces_row = (descriptor.key == "KeepFaces" || descriptor.key == "FaceProtection" || descriptor.key == "LightingScale"
                                || descriptor.key == "ShowFaceMask" || keep_faces_tuning || keep_faces_here);
   const std::string_view disabled_reason =
-      (descriptor.key == "Preset" && view.legacy_runtime)                   ? std::string_view("NR 310.8 only provides the Legacy network.")
+      ((descriptor.flags & setting_flags::NETWORK_PRESET) != 0u && view.legacy_runtime)                   ? std::string_view("NR 310.8 only provides the Legacy network.")
       : (descriptor.key == "MaskBlendMode" && view.legacy_runtime)            ? std::string_view("NR 310.8 does not support native mask blend mode.")
       : (descriptor.key == "StateRestore" && !view.dlss_unavailable.empty())   ? std::string_view(view.dlss_unavailable)
       : (descriptor.key == "UseD3D9Ex" && !view.d3d9ex_unavailable.empty())    ? std::string_view(view.d3d9ex_unavailable)
@@ -253,7 +253,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       }
       case SettingKind::CHOICE: {
         int value = static_cast<int>(descriptor.get(*settings));
-        if (descriptor.key == "Preset" && view.legacy_runtime) value = 1;
+        if ((descriptor.flags & setting_flags::NETWORK_PRESET) != 0u && view.legacy_runtime) value = 1;
         if (descriptor.choices.size() <= 3u) {
           // User decision: at most three short choices draws as the RadioRow segmented control above,
           // never a Combo (Model, Upsampling, Stabilise, NR mask, UI correction and the like).
@@ -834,7 +834,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
       }
     }
     const std::string tree_label =
-        std::format("Pass {}{}{}###pass{}", pass, (follows ? " (same as pass 1)" : ""), runs_at, pass);
+        std::format("Pass {}{}{}###pass{}", pass, (follows ? " (same look as pass 1)" : ""), runs_at, pass);
     if (ImGui::TreeNode(tree_label.c_str())) {
       const auto is_stage_row = [](const SettingDescriptor& descriptor) { return (descriptor.flags & setting_flags::PASS_STAGE) != 0u; };
       for (const SettingDescriptor& descriptor : SettingsSchema()) {
@@ -842,6 +842,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
           changed |= DrawPassStageRow(descriptor, view, settings);
         }
       }
+      changed |= DrawRow(*FindSetting(std::format("Pass{}Preset", pass)), view, settings, state);
       if (stage_row.starts_group && stage_row.runs != SourcePick::BEFORE_UPSCALING) {  // Before upscaling is always pass 1's stage
         const bool after_dlss = (stage_row.runs == SourcePick::AFTER_DLSS);
         for (const std::string_view key : {(after_dlss ? "ResolutionAfterDlss" : "ResolutionPresent"), (after_dlss ? "ResolutionScaleAfterDlss" : "ResolutionScalePresent"),
@@ -850,7 +851,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
         }
       }
       for (const SettingDescriptor& descriptor : SettingsSchema()) {
-        if (descriptor.pass == pass && !is_stage_row(descriptor)) {
+        if (descriptor.pass == pass && !is_stage_row(descriptor) && (descriptor.flags & setting_flags::NETWORK_PRESET) == 0u) {
           changed |= DrawRow(descriptor, view, settings, state);
         }
       }

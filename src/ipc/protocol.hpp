@@ -15,8 +15,10 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // 6 (Plan 14): Status::placement, motion_source, dlss_motion_gap, launchpad_gap, resolution_applied, upsampling and the work, canvas and frame sizes
 // (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read; 7 (Plan 17): Status::exposure_line (+256 bytes).
 // 8: Frame::uplift_mv_lumenite (+8 bytes); 9: Status::network_diagnostic (+256 bytes); 10: Status::legacy_runtime (+8 with alignment).
-inline constexpr uint32_t PROTOCOL_VERSION = 10u;
+// 11: network diagnostics for all ten passes (+3840 bytes).
+inline constexpr uint32_t PROTOCOL_VERSION = 11u;
 inline constexpr size_t TEXT_BYTES = 256u;
+inline constexpr size_t NETWORK_DIAGNOSTIC_BYTES = 4096u;
 inline constexpr size_t PATH_BYTES = 1024u;
 inline constexpr size_t BUILD_ID_BYTES = 64u;
 inline constexpr size_t SETTINGS_BYTES = 16384u;
@@ -187,7 +189,7 @@ struct Status {
   char ui_correction_note[TEXT_BYTES] = {};
   char transport_line[TEXT_BYTES] = {};  // the helper's half of the Details line
   char exposure_line[TEXT_BYTES] = {};   // Plan 17: ContextStatus::exposure_line
-  char network_diagnostic[TEXT_BYTES] = {};
+  char network_diagnostic[NETWORK_DIAGNOSTIC_BYTES] = {};
 };
 
 struct Reply {
@@ -235,7 +237,7 @@ struct ControlBlock {
   LogRing log;
 };
 
-inline constexpr size_t CONTROL_BLOCK_BYTES = 56408u;  // protocol 10 adds Status::legacy_runtime (8 bytes with alignment)
+inline constexpr size_t CONTROL_BLOCK_BYTES = 60248u;  // protocol 11 expands the per-pass network diagnostics
 static_assert(sizeof(ControlBlock) == CONTROL_BLOCK_BYTES, "the add-on and the helper disagree on the control block");
 static_assert(offsetof(ControlBlock, request) % 8u == 0u && offsetof(ControlBlock, reply) % 8u == 0u);
 // Both processes use the Interlocked*64 functions on it, which need 8 alignment on x86 too.
