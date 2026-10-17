@@ -50,6 +50,7 @@ using setting_flags::NEXT_START;
 using setting_flags::PASS_STAGE;
 using setting_flags::PASS_SWITCH;
 using setting_flags::RESTARTS_HISTORY;
+using setting_flags::SLIDER_RANGE_ONLY;
 
 template <class Enum>
 double Index(Enum value) {
@@ -482,6 +483,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "The work size for Resolution = Custom, in percent of the output. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
+        .flags = SLIDER_RANGE_ONLY,  // a share of the output: 100 % at most
         .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale); },
         .set = [](Settings& s, double v) { s.resolution_scale = static_cast<float>(v); },
     },
@@ -517,6 +519,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "The work size for Resolution at After DLSS = Custom, in percent of the output. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
+        .flags = SLIDER_RANGE_ONLY,  // a share of the output: 100 % at most
         .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale_after_dlss); },
         .set = [](Settings& s, double v) { s.resolution_scale_after_dlss = static_cast<float>(v); },
     },
@@ -540,6 +543,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "The work size for Resolution at Present = Custom, in percent of the output. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
+        .flags = SLIDER_RANGE_ONLY,  // a share of the output: 100 % at most
         .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale_present); },
         .set = [](Settings& s, double v) { s.resolution_scale_present = static_cast<float>(v); },
     },
@@ -770,6 +774,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
                    "is more even between scenes. A broken game exposure always falls back to the meter.",
         .min = 0.0,
         .max = 1.0,
+        .flags = SLIDER_RANGE_ONLY,  // a blend: 100 % is the meter alone
         .get = [](const Settings& s) { return static_cast<double>(s.auto_exposure_blend); },
         .set = [](Settings& s, double v) { s.auto_exposure_blend = static_cast<float>(v); },
     },
@@ -1629,7 +1634,16 @@ bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& sett
 
 double DescriptorMax(const SettingDescriptor& descriptor) {
   if (descriptor.kind == SettingKind::CHOICE) return static_cast<double>(descriptor.choices.size()) - 1.0;
+  // Owner, 2026-10-17: a value typed with Ctrl+click may go past the slider's end, up to ten times it (or `max` when that is higher already, as
+  // Intensity's 10), except where the slider's range is the meaning (SLIDER_RANGE_ONLY). The radii only pick pyramid levels, clamped to those that exist.
+  if (descriptor.kind == SettingKind::FLOAT && (descriptor.flags & setting_flags::SLIDER_RANGE_ONLY) == 0u && SliderMax(descriptor) > 0.0) {
+    return std::max(descriptor.max, TYPED_PAST_SLIDER * SliderMax(descriptor));
+  }
   return descriptor.max;
+}
+
+double SliderMax(const SettingDescriptor& descriptor) {
+  return (descriptor.ui_max > 0.0 ? descriptor.ui_max : descriptor.max);
 }
 
 }  // namespace uplift::ui

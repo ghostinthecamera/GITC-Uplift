@@ -105,7 +105,7 @@ Settings Sanitized(Settings settings) {
       if (descriptor.kind == SettingKind::CHOICE || descriptor.kind == SettingKind::KEY) {
         ResetSetting(&settings, descriptor);
       } else {
-        descriptor.set(settings, std::clamp(value, descriptor.min, descriptor.max));
+        descriptor.set(settings, std::clamp(value, descriptor.min, DescriptorMax(descriptor)));
       }
     }
   }

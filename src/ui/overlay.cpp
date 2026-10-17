@@ -218,7 +218,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         // 2026-10-09: AutoExposureBlend is stored 0..1 and shown as 0-100 %.
         const float shown_scale = (descriptor.key == "AutoExposureBlend" ? 100.f : 1.f);
         float value = static_cast<float>(descriptor.get(*settings)) * shown_scale;
-        const float high = static_cast<float>(descriptor.ui_max > 0.0 ? descriptor.ui_max : descriptor.max) * shown_scale;
+        const float high = static_cast<float>(SliderMax(descriptor)) * shown_scale;  // Ctrl+click may type past it (DescriptorMax)
         const bool resolution_scale = (descriptor.key == "ResolutionScale" || descriptor.key == "ResolutionScaleAfterDlss"
                                        || descriptor.key == "ResolutionScalePresent");
         const char* const format = (descriptor.key == "GraceSeconds" ? "%.1f"

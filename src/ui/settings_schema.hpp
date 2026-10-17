@@ -45,7 +45,12 @@ inline constexpr uint32_t BOOKKEEPING = 1u << 5u;       // hidden state Uplift w
 inline constexpr uint32_t APPLY_ON_RELEASE = 1u << 6u;  // a SliderInt row: shows its value while held, applies it once on release
 // Split chain (2026-10-10): a pass's "Runs at". Never part of the Defaults view: moving a pass to another stage rebuilds NR's features.
 inline constexpr uint32_t PASS_STAGE = 1u << 7u;
+// 2026-10-17: a FLOAT whose slider's range is its meaning (a share of the output, a blend): Ctrl+click cannot type past the slider's end.
+inline constexpr uint32_t SLIDER_RANGE_ONLY = 1u << 8u;
 }  // namespace setting_flags
+
+// 2026-10-17: how far past its slider's end a FLOAT accepts a typed value (Ctrl+click), as a multiple of that end.
+inline constexpr double TYPED_PAST_SLIDER = 10.0;
 
 // One persisted setting (v2 design §3.16): the single description load, save, sanitising, resets
 // and the overlay rows all read.
@@ -58,7 +63,7 @@ struct SettingDescriptor {
   double min = 0.0;
   double max = 1.0;
   std::optional<double> special;              // one valid value outside [min, max]: 0 = automatic, -1 = same as Structure
-  double ui_max = 0.0;                        // FLOAT: the slider's end when below `max` (Ctrl+click types up to `max`); 0 = max
+  double ui_max = 0.0;                        // FLOAT: the slider's end when below `max`; 0 = max. Ctrl+click types up to DescriptorMax
   std::span<const std::string_view> choices;  // CHOICE: the labels, in stored-index order
   uint32_t flags = 0u;
   double (*get)(const Settings&) = nullptr;  // every kind but TEXT; BOOL is 0 or 1, CHOICE the index
@@ -88,8 +93,10 @@ void ResetSection(Settings* settings, SettingSection section);
 void RestoreAllDefaults(Settings* settings);
 // The value as the overlay shows it: "1.00", "on", "Model A", "automatic", "none", "empty".
 [[nodiscard]] std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settings& settings);
-// The largest valid value: `max`, or the last choice index for a CHOICE.
+// The largest valid value: `max`, the last choice index for a CHOICE, or for a FLOAT what Ctrl+click may type past its slider (TYPED_PAST_SLIDER).
 [[nodiscard]] double DescriptorMax(const SettingDescriptor& descriptor);
+// A FLOAT slider's end: `ui_max` when set, else `max`.
+[[nodiscard]] double SliderMax(const SettingDescriptor& descriptor);
 // The colour fixes' exposure rows the overlay hides (ui-review.md §3 rule 1) while `settings`' Input exposure makes them moot: Adaptation and its rates unless
 // Metered or Auto; 2026-10-09: Auto exposure unless Auto, and Blend unless Auto's Blend.
 [[nodiscard]] bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings);
