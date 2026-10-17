@@ -324,6 +324,7 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
 
   std::string file_version = "unknown";
   bool layout_310_8 = false;
+  bool legacy_runtime = false;
   bool layout_310_9_16 = false;
   DWORD version_handle = 0u;
   if (const DWORD version_size = GetFileVersionInfoSizeExW(FILE_VER_GET_NEUTRAL, snippet_path.c_str(), &version_handle);
@@ -339,6 +340,7 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
       const uint32_t patch = HIWORD(fixed->dwFileVersionLS);
       const uint32_t build = LOWORD(fixed->dwFileVersionLS);
       file_version = std::format("{}.{}.{}.{}", major, minor, patch, build);
+      legacy_runtime = (major == 310u && minor == 8u);
       layout_310_8 = (major == 310u && minor == 8u && patch == 0u);
       layout_310_9_16 = (major == 310u && minor == 9u && patch == 16u && build == 0u);
     }
@@ -369,6 +371,7 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
     return NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
   }
   config_ = std::move(loaded_config);
+  legacy_runtime_ = legacy_runtime;
   module_ = module.release();
   init_ext_ = init_ext;
   create_feature_ = create_feature;

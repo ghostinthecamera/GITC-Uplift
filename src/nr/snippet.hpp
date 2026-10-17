@@ -115,6 +115,7 @@ class Snippet {
   [[nodiscard]] VkDevice VulkanDevice() const { return vk_device_; }
   [[nodiscard]] const std::filesystem::path& CorePath() const { return core_path_; }
   [[nodiscard]] bool CoreInitializedByUplift() const { return core_initialized_by_uplift_; }
+  [[nodiscard]] bool LegacyRuntime() const { return legacy_runtime_; }
 
  private:
   bool AttachCore(ID3D12Device* device);
@@ -130,6 +131,7 @@ class Snippet {
   SnippetState state_ = SnippetState::UNLOADED;
   SnippetApi api_ = SnippetApi::NONE;
   bool abandoned_ = false;  // Abandon() ran: this instance refuses to Load() again
+  bool legacy_runtime_ = false;  // Last loaded version; kept across unload so the controls stay unavailable while NR is off.
   HMODULE module_ = nullptr;
   ID3D12Device* device_ = nullptr;
   VkDevice vk_device_ = VK_NULL_HANDLE;

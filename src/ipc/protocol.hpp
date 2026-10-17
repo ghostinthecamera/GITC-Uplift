@@ -14,8 +14,8 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // 5 (Plan 12): Api::OPENGL, Api::D3D12, Handles::color_bytes (and FENCED's mask_bytes and motion_bytes), Reply::to12_completed and to11_completed;
 // 6 (Plan 14): Status::placement, motion_source, dlss_motion_gap, launchpad_gap, resolution_applied, upsampling and the work, canvas and frame sizes
 // (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read; 7 (Plan 17): Status::exposure_line (+256 bytes).
-// 8: Frame::uplift_mv_lumenite (+8 bytes); 9: Status::network_diagnostic (+256 bytes).
-inline constexpr uint32_t PROTOCOL_VERSION = 9u;
+// 8: Frame::uplift_mv_lumenite (+8 bytes); 9: Status::network_diagnostic (+256 bytes); 10: Status::legacy_runtime (+8 with alignment).
+inline constexpr uint32_t PROTOCOL_VERSION = 10u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t PATH_BYTES = 1024u;
 inline constexpr size_t BUILD_ID_BYTES = 64u;
@@ -174,6 +174,7 @@ struct Status {
   uint32_t canvas_height = 0u;
   uint32_t frame_width = 0u;  // ContextStatus::frame: what the resolution mode scales
   uint32_t frame_height = 0u;
+  uint32_t legacy_runtime = 0u;
   char session_message[TEXT_BYTES] = {};
   char blocked[TEXT_BYTES] = {};
   char output_problem[TEXT_BYTES] = {};
@@ -234,7 +235,7 @@ struct ControlBlock {
   LogRing log;
 };
 
-inline constexpr size_t CONTROL_BLOCK_BYTES = 56400u;  // protocol 9 adds Status::network_diagnostic (256 bytes)
+inline constexpr size_t CONTROL_BLOCK_BYTES = 56408u;  // protocol 10 adds Status::legacy_runtime (8 bytes with alignment)
 static_assert(sizeof(ControlBlock) == CONTROL_BLOCK_BYTES, "the add-on and the helper disagree on the control block");
 static_assert(offsetof(ControlBlock, request) % 8u == 0u && offsetof(ControlBlock, reply) % 8u == 0u);
 // Both processes use the Interlocked*64 functions on it, which need 8 alignment on x86 too.

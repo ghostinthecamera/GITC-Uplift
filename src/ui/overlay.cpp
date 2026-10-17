@@ -131,7 +131,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const bool keep_faces_row = (descriptor.key == "KeepFaces" || descriptor.key == "FaceProtection" || descriptor.key == "LightingScale"
                                || descriptor.key == "ShowFaceMask" || keep_faces_tuning || keep_faces_here);
   const std::string_view disabled_reason =
-      (descriptor.key == "StateRestore" && !view.dlss_unavailable.empty())     ? std::string_view(view.dlss_unavailable)
+      (descriptor.key == "Preset" && view.legacy_runtime)                   ? std::string_view("NR 310.8 only provides the Legacy network.")
+      : (descriptor.key == "MaskBlendMode" && view.legacy_runtime)            ? std::string_view("NR 310.8 does not support native mask blend mode.")
+      : (descriptor.key == "StateRestore" && !view.dlss_unavailable.empty())   ? std::string_view(view.dlss_unavailable)
       : (descriptor.key == "UseD3D9Ex" && !view.d3d9ex_unavailable.empty())    ? std::string_view(view.d3d9ex_unavailable)
       : (descriptor.key == "VulkanNr" && !view.vulkan_nr_unavailable.empty()) ? std::string_view(view.vulkan_nr_unavailable)
       : (keep_faces_row && !view.keep_faces_unavailable.empty())               ? std::string_view(view.keep_faces_unavailable)
@@ -251,6 +253,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       }
       case SettingKind::CHOICE: {
         int value = static_cast<int>(descriptor.get(*settings));
+        if (descriptor.key == "Preset" && view.legacy_runtime) value = 1;
         if (descriptor.choices.size() <= 3u) {
           // User decision: at most three short choices draws as the RadioRow segmented control above,
           // never a Combo (Model, Upsampling, Stabilise, NR mask, UI correction and the like).

@@ -29,6 +29,7 @@ class RealHost final : public Host {
                   D3D12_RESOURCE_STATES after) override;
 
   [[nodiscard]] const Snippet& GetSnippet() const { return snippet_; }
+  [[nodiscard]] bool LegacyRuntime() const override { return snippet_.LegacyRuntime(); }
 
  private:
   Microsoft::WRL::ComPtr<ID3D12Device> device_;

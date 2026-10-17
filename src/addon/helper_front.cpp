@@ -731,6 +731,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   if (status != nullptr) {
     view->status_line = std::string(ipc::TextOf(status->status_line));
     view->network_diagnostic = std::string(ipc::TextOf(status->network_diagnostic));
+    view->legacy_runtime = status->legacy_runtime != 0u;
     if (const std::string_view line = ipc::TextOf(status->placement_line); !line.empty()) {
       view->placement_line = std::string(line);
     }

@@ -17,6 +17,7 @@ namespace uplift::ui {
 struct OverlayView {
   std::string status_line;
   std::string network_diagnostic;
+  bool legacy_runtime = false;
   uint64_t intermediate_bytes = 0u;
   std::optional<uint64_t> runtime_bytes;  // the NR runtime's own allocation, when its stats report it
   float effective_diffuse_white_nits = 0.f;

@@ -70,6 +70,8 @@ The **Look** section below lets you tune the result to taste. When you switch NR
 With **NR 310.9.16**, **Setup → Network preset** selects **Legacy** or **Small FP8**; **Runtime default** selects Small FP8 in that
 build. Legacy remains Uplift's default. Changing the network recreates NR and resets its history. **Setup → Native mask blend mode**
 exposes the experimental modes 0–3, separately from Uplift's own mask. NR 310.8 always uses its legacy network and ignores mask blend mode.
+Once Uplift identifies a loaded 310.8 runtime, both controls are greyed out with an explanation; the network row shows Legacy. Saved choices
+are preserved for a newer runtime. Changing Runtime path applies on the next game start.
 
 Preset **A (1)** is Legacy and **B (2)** is Small FP8. Presets C-G have no weights in the supplied DLL. **Look → Style** selects the separate
 processing styles A/B/C (0/1/2), also available for independent later passes.

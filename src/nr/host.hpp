@@ -23,6 +23,7 @@ class Host {
   virtual std::unique_ptr<FeatureInterface> NewFeature() = 0;
   virtual MemoryInfo QueryMemory() = 0;
   virtual std::optional<uint64_t> QueryRuntimeBytes() = 0;
+  [[nodiscard]] virtual bool LegacyRuntime() const { return false; }
   virtual std::chrono::steady_clock::time_point Now() = 0;
   virtual void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
                           D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) = 0;
