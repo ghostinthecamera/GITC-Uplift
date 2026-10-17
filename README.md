@@ -226,6 +226,8 @@ reason.
 
 ### DLSS motion vectors at Present
 
+Version 1.4.2 preserves the submitted DLSS render/output dimensions when NGX rewrites its parameter block during feature creation. This fixes partial-image NR coverage after DLSS observed in Forspoken. Output subrect origins and dynamic render dimensions retain their existing handling.
+
 The 1.4.1 testing build removes camera-jitter motion from DLSS vectors at Present on DX12 and Vulkan when the game marks those vectors as jittered. It uses the game's current and previous render-resolution jitter values; no new setting is required. Vectors not marked jittered keep their existing handling.
 
 For a flicker report, set **Advanced → Log level → Debug**, reproduce it for a few seconds and include `ReShade.log`. The first DLSS summary reports `jittered yes/no`; `Present motion` lines show current, older and missing copies, busy-copy counts and the latest correction. The DX12 line also counts pipeline reset hints. An affected-game test is still needed to confirm whether jitter was its flicker source.

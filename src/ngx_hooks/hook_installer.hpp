@@ -7,12 +7,14 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <shared_mutex>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "ngx_hooks/feature_registry.hpp"
 #include "ngx_hooks/ngx_api.hpp"
 #include "nr/ngx.hpp"
 
@@ -45,6 +47,7 @@ struct CreateCall {
   const void* caller = nullptr;
   std::vector<SavedParameter> saved;  // BeforeCreate records every value it changes here
   bool override_rejected = false;     // the create failed with the overrides, so it ran again without them
+  std::optional<CreateSnapshot> submitted;  // dimensions submitted for the final original-call attempt; other metadata is read after creation
 };
 
 // One hooked EvaluateFeature call before the original runs (v2 design §3.9).

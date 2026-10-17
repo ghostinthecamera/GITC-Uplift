@@ -13,6 +13,7 @@
 #include "addon/placement.hpp"
 #include "addon/reshade_version.hpp"
 #include "nr/d3d11_handles.hpp"
+#include "nr/log.hpp"
 #include "nr/vk_handles.hpp"
 
 namespace uplift::addon {
@@ -20,7 +21,9 @@ namespace {
 
 std::string DescribeD3D12(ID3D12Resource* resource) {
   if (resource == nullptr) return "none";
-  return std::format("DXGI_FORMAT {}", static_cast<int>(resource->GetDesc().Format));
+  const D3D12_RESOURCE_DESC description = resource->GetDesc();
+  return std::format("DXGI_FORMAT {}, resource {}x{}, flags {:#x}", static_cast<int>(description.Format), description.Width, description.Height,
+                     static_cast<uint32_t>(description.Flags));
 }
 
 std::string DescribeD3D11(ID3D12Resource* punned) {
@@ -67,6 +70,17 @@ DlssSummary SummarizeEvaluate(ngx_hooks::NgxApi api, const ngx_hooks::DlssFrame&
     }
     return DescribeD3D12(resource);
   };
+  if (api == ngx_hooks::NgxApi::D3D12) {
+    nr::Logf(nr::LogLevel::INFO,
+             "DLSS size diagnostic first evaluate: handle {}, serial {}; stored create render {}x{} -> output {}x{}; active render {}x{}; "
+             "color region ({},{}) {}x{}, motion region ({},{}) {}x{}, output region ({},{}) {}x{}; color [{}], output [{}], motion [{}]",
+             static_cast<const void*>(frame.handle), frame.serial, frame.snapshot.render.width, frame.snapshot.render.height,
+             frame.snapshot.output.width, frame.snapshot.output.height, frame.render.width, frame.render.height,
+             frame.color_region.x, frame.color_region.y, frame.color_region.width, frame.color_region.height,
+             frame.motion_region.x, frame.motion_region.y, frame.motion_region.width, frame.motion_region.height,
+             frame.output_region.x, frame.output_region.y, frame.output_region.width, frame.output_region.height,
+             describe(frame.color), describe(frame.output), describe(frame.motion_vectors));
+  }
   DlssSummary summary = {
       .api = (api == ngx_hooks::NgxApi::D3D11 ? "Direct3D 11" : api == ngx_hooks::NgxApi::VULKAN ? "Vulkan" : "Direct3D 12"),
       .device = device,

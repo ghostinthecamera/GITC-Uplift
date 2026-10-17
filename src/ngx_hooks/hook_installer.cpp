@@ -192,12 +192,25 @@ NVSDK_NGX_Result RunCreate(CreateCall call, NVSDK_NGX_Handle** out_handle, Origi
     LogObserverFailure(ObserverCall::CREATE, nullptr);
     restore_quietly(parameters, &call);
   }
-  NVSDK_NGX_Result result = original();
+  const auto create = [&] {
+    call.submitted.reset();
+    try {
+      if (parameters != nullptr && KindOf(call.feature) == FeatureKind::UPSCALER) {
+        call.submitted = ReadCreateSnapshot(*parameters);
+      }
+    } catch (const std::exception& e) {
+      LogObserverFailure(ObserverCall::CREATE, e.what());
+    } catch (...) {
+      LogObserverFailure(ObserverCall::CREATE, nullptr);
+    }
+    return original();
+  };
+  NVSDK_NGX_Result result = create();
   if (!call.saved.empty() && NVSDK_NGX_FAILED(result)) {
     // A DLSS-SR override NGX rejects must never cost the game its DLSS: ask again with its own values.
     restore_quietly(parameters, &call);
     call.override_rejected = true;
-    result = original();
+    result = create();
   }
   try {
     observer->AfterCreate(call, ((out_handle != nullptr && NVSDK_NGX_SUCCEED(result)) ? *out_handle : nullptr), result);

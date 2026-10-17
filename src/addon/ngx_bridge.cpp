@@ -71,7 +71,18 @@ void NgxBridge::AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle*
       (call.api == ngx_hooks::NgxApi::VULKAN ? routing_.DeviceOfVk(call.list, call.vk_device)
        : call.api == ngx_hooks::NgxApi::D3D11 ? routing_.DeviceOfD3D11(call.list)
                                               : routing_.DeviceOf(call.list));
-  registry_.OnCreate(handle, call.feature, device, ngx_hooks::ReadCreateSnapshot(*call.parameters), call.api);
+  ngx_hooks::CreateSnapshot snapshot = ngx_hooks::ReadCreateSnapshot(*call.parameters);
+  if (call.submitted) {
+    if (snapshot.render != call.submitted->render || snapshot.output != call.submitted->output) {
+      nr::Logf(nr::LogLevel::INFO,
+               "DLSS creation dimensions changed during NGX call (handle {}): returned render {}x{} -> output {}x{}; preserving submitted render {}x{} -> output {}x{}",
+               static_cast<const void*>(handle), snapshot.render.width, snapshot.render.height, snapshot.output.width, snapshot.output.height,
+               call.submitted->render.width, call.submitted->render.height, call.submitted->output.width, call.submitted->output.height);
+    }
+    snapshot.render = call.submitted->render;
+    snapshot.output = call.submitted->output;
+  }
+  registry_.OnCreate(handle, call.feature, device, snapshot, call.api);
 }
 
 void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
