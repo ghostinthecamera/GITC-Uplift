@@ -60,6 +60,8 @@ A picture guide to every setting: [the wiki](https://github.com/ghostinthecamera
 - **Network preset:** A: Legacy or B: Small FP8 with NR 310.9.16.
 - **Resolution:** Full looks best. Lower settings are faster and use less memory.
 
+**NR stage** and **Resolution** are independent. After DLSS reads the game's upscaled output. **Full** runs NR at that output resolution; **Quality**, **Balanced** and **Performance** process a smaller copy and apply the result across the complete output image.
+
 An option that can't work in your game right now is greyed out: hover over it to see why. Your choice is remembered and comes back by
 itself when it can.
 
@@ -76,8 +78,8 @@ are preserved for a newer runtime. Changing Runtime path applies on the next gam
 Preset **A (1)** is Legacy and **B (2)** is Small FP8. Presets C-G have no weights in the supplied DLL. **Look → Style** selects the separate
 processing styles A/B/C (0/1/2), also available for independent later passes.
 
-**Details** reports pass 1's network name from NVIDIA's successful feature-creation message, the number of enabled evaluation calls recorded,
-and the last successful call's style and native mask mode. It reports an unconfirmed network when the runtime's logging layout or message is
+**Details** reports each created, requested pass's network name from NVIDIA's successful feature-creation message, its number of enabled evaluation calls recorded,
+and its last successful call's style and native mask mode. It reports an unconfirmed network when the runtime's logging layout or message is
 unavailable. The count verifies successful command recording, not GPU completion or image fidelity.
 
 At **Log level → Info** (the default), search **ReShade.log** for:
@@ -224,13 +226,15 @@ reason.
 - **Multisampled images (MSAA):** DX9 and OpenGL need the `Uplift` technique turned on. DX10 and 32-bit DX12 can't use MSAA with NR:
   turn it off in the game.
 
-### DLSS motion vectors at Present
+### After DLSS image coverage
 
 Version 1.4.2 preserves the submitted DLSS render/output dimensions when NGX rewrites its parameter block during feature creation. This fixes partial-image NR coverage after DLSS observed in Forspoken. Output subrect origins and dynamic render dimensions retain their existing handling.
 
-The 1.4.1 testing build removes camera-jitter motion from DLSS vectors at Present on DX12 and Vulkan when the game marks those vectors as jittered. It uses the game's current and previous render-resolution jitter values; no new setting is required. Vectors not marked jittered keep their existing handling.
+### DLSS motion vectors at Present
 
-For a flicker report, set **Advanced → Log level → Debug**, reproduce it for a few seconds and include `ReShade.log`. The first DLSS summary reports `jittered yes/no`; `Present motion` lines show current, older and missing copies, busy-copy counts and the latest correction. The DX12 line also counts pipeline reset hints. An affected-game test is still needed to confirm whether jitter was its flicker source.
+DLSS motion vectors at Present on DX12 and Vulkan have camera-jitter motion removed when the game marks those vectors as jittered. It uses the game's current and previous render-resolution jitter values; no new setting is required. Vectors not marked jittered keep their existing handling.
+
+For a flicker report, set **Advanced → Log level → Debug**, reproduce it for a few seconds and include `ReShade.log`. The first DLSS summary reports `jittered yes/no`; `Present motion` lines show current, older and missing copies, busy-copy counts and the latest correction. The DX12 line also counts pipeline reset hints.
 
 ### Passes at different stages
 
