@@ -71,7 +71,18 @@ double Flag(bool value) {
 constexpr std::string_view PRESET_TOOLTIP =
     "The DLSS render preset for this quality mode (J-M). Applies when the game next creates its DLSS feature.";
 
+constexpr std::array<std::string_view, 2> LANGUAGES = {"English", "简体中文"};
+
 const auto BASE_ROWS = std::to_array<SettingDescriptor>({
+    {
+        .key = "Language",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::HIDDEN,
+        .label = "Language",
+        .choices = LANGUAGES,
+        .get = [](const Settings& s) { return Index(s.language); },
+        .set = [](Settings& s, double v) { s.language = FromIndex<Language>(v); },
+    },
     {
         .key = ENABLED_KEY,
         .kind = SettingKind::BOOL,
@@ -693,10 +704,33 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::ADVANCED,
         .label = "Present with frame generation",
-        .tooltip = "Lets the Present placement run NR while frame generation is on: on every presented frame, generated "
-                   "ones included, at twice the cost or more. Its result on generated frames is not guaranteed.",
+        .tooltip = "Runs NR at Present on generated frames too. Can dramatically reduce FPS and the benefit of frame generation. "
+                   "Shows a performance warning before enabling.",
+        .enable_warning = "NR will run on every presented frame, including the frames created by frame generation.\n\n"
+                          "This can dramatically reduce FPS and wipe out much of frame generation's performance benefit. At 3x or 4x "
+                          "frame generation, each Present pass may run three or four times per game-rendered frame. Higher resolutions "
+                          "and more Present passes increase the cost further.\n\n"
+                          "NR at After DLSS runs before frame generation and avoids processing the generated frames. "
+                          "The result of NR on generated frames is not guaranteed.",
         .get = [](const Settings& s) { return Flag(s.present_with_frame_gen); },
         .set = [](Settings& s, double v) { s.present_with_frame_gen = (v != 0.0); },
+    },
+    {
+        .key = "AllowCrossQueuePasses",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::ADVANCED,
+        .label = "Allow cross-queue passes (DX12, experimental)",
+        .tooltip = "Allows a DX12 split between a DLSS stage and Present when they use different GPU queues. May reduce FPS or cause "
+                   "image problems. With frame generation, Present with frame generation must also be enabled.",
+        .enable_warning = "Allows a pass at After DLSS or Before upscaling and a later pass at Present to run on different GPU queues "
+                          "in a 64-bit Direct3D 12 game.\n\n"
+                          "This can reduce FPS and increase latency as the passes compete for the same GPU. The cost depends on the game, "
+                          "network and resolution.\n\n"
+                          "Experimental: image differences or instability are possible. Turn this off if you see problems.\n\n"
+                          "With frame generation, Present with frame generation must also be enabled. That option has its own potentially "
+                          "much larger performance cost.",
+        .get = [](const Settings& s) { return Flag(s.allow_cross_queue_passes); },
+        .set = [](Settings& s, double v) { s.allow_cross_queue_passes = (v != 0.0); },
     },
     {
         .key = "Encoding",

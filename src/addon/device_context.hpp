@@ -58,6 +58,7 @@ struct FrameConfig {
   float color_strength = 1.f;
   ui::PlacementSource source = ui::PlacementSource::AUTO;
   bool present_with_frame_gen = false;  // spec §11: the Present path runs with frame generation only when set
+  bool allow_cross_queue_passes = false;
   bool motion_vectors = true;           // MotionVectors is not None, or must act like it is (ui-review.md Q1(a):
                                          // MotionVectors == Launchpad while placement is inside the game's frame)
   bool motion_vectors_want_launchpad = false;  // ui-review.md Q1(a): MotionVectors == Launchpad (or Lumenite), for the motion

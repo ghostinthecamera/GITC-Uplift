@@ -2956,6 +2956,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     const api::device_api overlay_device_api = runtime->get_device()->get_api();
     // Plan 13 (the user's decision 1): on Vulkan, Before upscaling and After DLSS are explicit choices, offered where native NR can run.
     view.dlss_explicit = (overlay_device_api == api::device_api::vulkan);
+    view.cross_queue_passes_available = (sizeof(void*) == 8u && overlay_device_api == api::device_api::d3d12);
     // Plan 14 (design §1): Setup's facts. The stored preference here; what is possible and what runs below, per path; the draw resolves them.
     ui::SetupFacts facts;
     std::string after_dlss_problem;  // Plan 18: Setup's facts view these; they outlive FinishSetup
@@ -3194,6 +3195,8 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         addon::DeleteLatchMarker(state.latch_marker_path);
       }
       SaveAndApply(&state);
+    } else if (state.overlay.language_changed) {
+      ui::SaveSettings(state.settings, &state.config);
     }
     // Plan 6 (D11): Retry now, decided by the card's button; never after a removal or a teardown
     // (DeviceContext::RetryNow's own guard).

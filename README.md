@@ -126,6 +126,19 @@ The shaders are optional:
   - Then set **Motion vectors** to Auto, or pick Launchpad or Lumenite. With both turned on, Auto uses Launchpad.
 - **`UpliftMask.fx`** is an example mask that limits NR to parts of the image.
 
+## Interface language
+
+Use the dropdown at the top right of the Uplift window, on the Enable/hotkey row, to select **English** or **简体中文 / Chinese**.
+English is the default. The choice is saved in the existing `ReShade.ini` (`[Uplift] Language=0` for English, `1` for Simplified Chinese).
+Translations are compiled into the addons; there are no language packs or extra files. Language changes do not restart NR or change its look.
+
+Chinese text uses ReShade's existing font support. When ReShade uses Chinese, including System Default on a Chinese Windows installation, it normally selects a compatible font automatically. If characters appear as boxes, select a Chinese-capable **Global font** in ReShade's Settings;
+Microsoft YaHei (`C:\Windows\Fonts\msyh.ttc`), when installed, covers this interface. English ReShade with this font and Chinese text was checked on ReShade 6.8.
+Uplift does not change ReShade's language or font settings automatically. The dropdown's tooltip also gives this advice in English.
+
+Technical identifiers, model names, configuration keys and diagnostic logs retain their canonical wording. The Chinese wording is based on the supplied
+community translation, integrated into the current addon.
+
 ## What works where
 
 | | DX12 | DX11 | DX10 | DX9 | Vulkan | OpenGL |
@@ -242,6 +255,22 @@ With **Pass count** 2 or more, each Pass section starts with **Runs at**: where 
 pass before). Passes before upscaling run at the game's render resolution, so they cost less: for example, pass 1 Before upscaling and
 pass 2 at Present. This works in native DX12 and DX11 DLSS games, and in Vulkan games with **Vulkan NR at Present** on Native;
 elsewhere every pass runs at one stage. More in [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide#passes-at-different-stages).
+
+### Experimental passes across DX12 queues
+
+**Advanced -> Allow cross-queue passes (DX12, experimental)** lets a later pass stay at Present when the game's DLSS and Present use
+separate GPU queues, including with frame generation. It is off by default; disabling it restores the existing fallback to the DLSS stage.
+This option is for 64-bit DX12 games. Vulkan keeps its existing queue restriction.
+
+Both this option and **Present with frame generation** show separate confirmation windows when enabled:
+
+- **Cross-queue passes** can lower FPS or increase latency as the passes compete for the GPU. Image differences or instability are possible.
+- **Present with frame generation** can have a dramatic cost: every Present pass also processes generated frames, potentially three or four
+  times per game-rendered frame at 3x/4x FG. This can wipe out much of frame generation's performance benefit.
+
+With FG on, both options must be enabled to keep an After DLSS / Present split across queues. Select **Enable anyway** in each warning to
+apply it; **Keep disabled**, the close button and Escape leave the setting off. No additional copies, runtime or CPU waits are added by the
+cross-queue option. The two stages use the game's existing image handoff; compatibility and cost depend on the game and runtime.
 
 ### A different network per pass
 

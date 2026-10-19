@@ -45,6 +45,7 @@ struct OverlayView {
   // Plan 13 (the user's decision 1): a Vulkan device, where Auto stays at Present and Before upscaling and After DLSS are explicit choices
   // (SourcePickOf's `explicit_dlss`); their tips name the one-time cost.
   bool dlss_explicit = false;
+  bool cross_queue_passes_available = false;
   // Plan 9 (design §2.9): the Direct3D 9Ex row. `d3d9ex_unavailable` non-empty greys it ("Only for 32-bit Direct3D 9
   // games" in gitc-uplift.addon32, "Only for Direct3D 9 games" in gitc-uplift.addon64 since Plan 10) and is what shows under it; otherwise
   // `d3d9ex_readout` ("Now: ...") does.
@@ -71,6 +72,7 @@ struct OverlayView {
 // Panel state kept across frames.
 struct OverlayState {
   DragState drag;
+  bool language_changed = false;
   bool capturing_key = false;
   // Set on the frame a new hotkey is captured. That key press is still "pressed" in the same
   // frame's input snapshot, so the hotkey handler must skip it once instead of toggling Enable.
@@ -78,6 +80,7 @@ struct OverlayState {
   // 1.1.0: when DrawOverlay last showed the capture; a capture not shown for a moment (the overlay closed, another tab) ends (ExpireKeyCapture).
   std::chrono::steady_clock::time_point capture_seen;
   bool defaults_view = false;   // Plan 6 (D6): session only; the add-on keeps it when the overlay closes
+  std::string_view enable_warning_key;  // requested checkbox confirmation; ImGui owns the open modal
   bool confirm_restore = false;  // G2: the first click of Restore all defaults
   bool retry_now = false;        // D11: the add-on calls DeviceContext::RetryNow after DrawOverlay and clears it
   // An APPLY_ON_RELEASE slider being held: the value it shows. The setting keeps the applied one until release.

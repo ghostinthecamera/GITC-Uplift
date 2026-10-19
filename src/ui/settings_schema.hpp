@@ -61,6 +61,7 @@ struct SettingDescriptor {
   SettingSection section = SettingSection::TOP;
   std::string_view label;
   std::string_view tooltip;
+  std::string_view enable_warning;  // BOOL: confirmation text shown before a checkbox enables the setting
   double min = 0.0;
   double max = 1.0;
   std::optional<double> special;              // one valid value outside [min, max]: 0 = automatic, -1 = same as Structure

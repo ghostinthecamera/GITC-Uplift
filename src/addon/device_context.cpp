@@ -309,11 +309,10 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   if (frame_generation_.State().active && !config_.present_with_frame_gen) return skip("frame generation is on");
   // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before its source copy and encode.
   if (group > 0u && !session_->SliceRuns(slices_[group])) return skip(SliceSkipReason(group));
-  // Split chain (fix round 1, I1): two features of one NR runtime never run at once, and nothing ever makes a queue wait on the GPU (with the game's DLSS on
-  // an async queue that can deadlock). DLSS-stage NR on another queue latches Present off for later groups (UpdateChain); until that shows, a later Present
-  // group runs only once every earlier DLSS-stage recording off the present queue has completed, else it skips this frame. On the present queue itself the
-  // queue's order keeps them apart.
-  if (group > 0u && !timeline_->StageWorkDone(dlss_stage_token_, present_queue_)) return skip("waiting for the earlier stages' NR");
+  // Default: keep distinct queues apart until UpdateChain remaps Present. The experimental opt-in uses the game's existing image handoff; it adds no wait.
+  if (group > 0u && !config_.allow_cross_queue_passes && !timeline_->StageWorkDone(dlss_stage_token_, present_queue_)) {
+    return skip("waiting for the earlier stages' NR");
+  }
   host->FlushPending();
   ApplyLookConfig(last_present_.value_or(std::chrono::steady_clock::now()), group);
   host->TargetBarrier(entry_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -621,17 +620,15 @@ void DeviceContext::UpdateChain() {
   }
   facts.cannot[static_cast<size_t>(Stage::BEFORE_UPSCALING)] = before_cause;
   facts.cannot[static_cast<size_t>(Stage::AFTER_DLSS)] = (dlss_cause.empty() ? std::string_view(after_dlss_problem_) : dlss_cause);
-  // Fix round 1 (I1): DLSS-stage NR seen on another queue than the presents keeps Present off for later groups: their passes join the DLSS stage, so NR
-  // never runs on two queues at once (no GPU wait can order them safely). Checked only while a split is stored, against the queue presenting now: BeginFrame
-  // updated present_queue_ before this, so a later Present group never records on a new queue before this check. With frame generation the presents
-  // come from its own queue, and may come back to the game's when it stops; Present is allowed again only then (no DLSS-stage list ever went there).
+  // Observe the game's queues even while opted in, so disabling the experiment immediately restores the existing remap without waiting for a new recording.
   if (present_queue_ != nullptr && SplitStored()) {
     ID3D12CommandQueue* const other = timeline_->StageQueueOtherThan(present_queue_);
     if (other != other_dlss_queue_) {
       if (other != nullptr) {
-        nr::Logf(nr::LogLevel::INFO, "Direct3D 12: the game's DLSS runs on another queue ({}) than its presents ({}){}: passes stored at Present run at the "
-                 "DLSS stage", static_cast<const void*>(other), static_cast<const void*>(present_queue_),
-                 (frame_generation_.State().active ? " with frame generation on" : ""));
+        nr::Logf(nr::LogLevel::INFO, "Direct3D 12: the game's DLSS runs on another queue ({}) than its presents ({}){}: {}",
+                 static_cast<const void*>(other), static_cast<const void*>(present_queue_),
+                 (frame_generation_.State().active ? " with frame generation on" : ""),
+                 (config_.allow_cross_queue_passes ? "experimental cross-queue passes allowed" : "passes stored at Present run at the DLSS stage"));
       } else {
         nr::Logf(nr::LogLevel::INFO, "Direct3D 12: the presents ({}) are on the game's DLSS queue again: passes stored at Present run there again",
                  static_cast<const void*>(present_queue_));
@@ -644,7 +641,7 @@ void DeviceContext::UpdateChain() {
     present_cause = present_cannot_;
   } else if (frame_generation_.State().active && !config_.present_with_frame_gen) {
     present_cause = "frame generation is on";
-  } else if (other_dlss_queue_ != nullptr) {
+  } else if (!config_.allow_cross_queue_passes && other_dlss_queue_ != nullptr) {
     present_cause = (frame_generation_.State().active ? FRAME_GEN_QUEUE_REASON : OTHER_QUEUE_REASON);
   }
   facts.cannot[static_cast<size_t>(Stage::PRESENT)] = present_cause;

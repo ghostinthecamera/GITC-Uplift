@@ -161,6 +161,8 @@ enum class PedestalRemoval : uint32_t {
   ALWAYS = 2u,
 };
 
+enum class Language : uint32_t { ENGLISH = 0u, SIMPLIFIED_CHINESE = 1u };
+
 inline constexpr uint32_t MAX_PASSES = 10u;
 
 // Split chain (2026-10-10): pass n >= 2's "Runs at", in stored-index order. SAME runs it where the pass before it runs (design Q1).
@@ -190,6 +192,7 @@ struct PassSettings {
 // Every setting persisted in ReShade.ini [Uplift] (spec §12, v2 design §5), with their defaults.
 // ui/settings_schema.cpp describes each field once; load, save, sanitising and the overlay read it.
 struct Settings {
+  Language language = Language::ENGLISH;
   bool enabled = false;
   uint32_t enable_key = 0u;  // Win32 virtual-key code; 0 = no hotkey
   float intensity = 1.f;     // slider 0-1; typed values up to 10 pass through
@@ -227,6 +230,7 @@ struct Settings {
   std::array<DlssPresetOverride, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_presets = {};
   AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
   bool present_with_frame_gen = false;
+  bool allow_cross_queue_passes = false;
   float motion_scale_x = 1.f;  // multiplies DLSSNR.MVecScaleX; negative flips the axis
   float motion_scale_y = 1.f;
   DepthDirection depth_direction = DepthDirection::GAME;

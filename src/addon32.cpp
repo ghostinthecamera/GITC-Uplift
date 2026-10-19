@@ -425,6 +425,8 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     }
     if (ui::DrawOverlay(view, &state.settings, &state.overlay)) {
       SaveAndApply(&state);
+    } else if (state.overlay.language_changed) {
+      ui::SaveSettings(state.settings, &state.config);
     }
     // Retry now, decided by the card's button: a stopped helper starts afresh; otherwise the next FRAME carries it.
     if (std::exchange(state.overlay.retry_now, false)) {

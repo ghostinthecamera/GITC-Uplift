@@ -22,6 +22,7 @@ FrameConfig BuildFrameConfig(const FrameConfigInputs& inputs, ui::ControlsCoales
       .color_strength = settings.color_strength,
       .source = settings.source,
       .present_with_frame_gen = settings.present_with_frame_gen,
+      .allow_cross_queue_passes = settings.allow_cross_queue_passes,
       // Launchpad and (2026-10-08) Lumenite feed the presented image only: inside the game's frame either runs on DLSS's own vectors.
       .motion_vectors = (settings.motion_vectors == ui::MotionVectorSource::AUTO
                          || settings.motion_vectors == ui::MotionVectorSource::DLSS
