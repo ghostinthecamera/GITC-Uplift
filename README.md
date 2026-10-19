@@ -139,6 +139,8 @@ Uplift does not change ReShade's language or font settings automatically. The dr
 Technical identifiers, model names, configuration keys and diagnostic logs retain their canonical wording. The Chinese wording is based on the supplied
 community translation, integrated into the current addon.
 
+To contribute or update translations, see [Contributing translations](CONTRIBUTING.md), including how to find and fill pending English placeholders.
+
 ## What works where
 
 | | DX12 | DX11 | DX10 | DX9 | Vulkan | OpenGL |
