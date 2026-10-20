@@ -171,7 +171,6 @@ class NrPipeline final : private nr::PassResolver {
   struct LookSurfaces {
     LookPlan plan;
     look::Atlas atlas;
-    Texture change;                         // own_change: RGBA16F at the image size
     Texture basis;                          // κ_M, RG16F
     Texture gauss;                          // the pyramid atlas, RGBA16F
     Texture peaks;                          // the max-pyramid atlas, R16F
@@ -197,7 +196,8 @@ class NrPipeline final : private nr::PassResolver {
   // (the game's exposure beside the meter's target).
   struct MeterState {
     Texture state;
-    bool snap = true;  // the next meter snaps: a new texture, or a settings change
+    std::optional<MeterBasis> basis;
+    bool snap = true;  // new exposure state or a changed metering basis
     nr::Mark last_use;
   };
   // What the encode and the decode read as their exposure (InputExposure).
@@ -235,8 +235,8 @@ class NrPipeline final : private nr::PassResolver {
 
   // After NR: what the decode reads as t1.
   struct AfterNr {
-    ID3D12Resource* texture = nullptr;            // NR's output, or the (shaped) change field
-    std::optional<color::Upsampling> upsampling;  // set: `texture` is the change field
+    ID3D12Resource* texture = nullptr;            // the (shaped) change field
+    std::optional<color::Upsampling> upsampling;  // unset: direct reads; set: resample the change field
     bool ok = true;                               // false: the change pass could not be recorded
   };
 
@@ -247,17 +247,18 @@ class NrPipeline final : private nr::PassResolver {
   bool EnsureFaces(nr::Size canvas);
   // Keep faces: the recombination of one pass (`pass.changed` rewritten), on the recording's slot: the pyramid of its weighted change, then the combine.
   void RecordFaces(ID3D12GraphicsCommandList* list, color::FacesPass pass);
-  [[nodiscard]] LookPlan LookPlanFor(nr::Size image, bool reduced) const;  // sources::PlanLook for this device and this set
-  bool EnsureLook(const LookPlan& plan);       // false: the look (and C at Full) is skipped this recording
+  [[nodiscard]] LookPlan LookPlanFor(nr::Size image) const;  // sources::PlanLook for this device and this set
+  bool EnsureLook(const LookPlan& plan);       // false: optional shaping is skipped this recording
   void RetireMask();
   [[nodiscard]] uint32_t ShaderOptions() const;  // the encode's and the decodes' shader_options
+  void NoteMeterBasis(uint8_t stage, color::Encoding encoding, float input_scale);
   ExposureChoice ChooseExposure(color::Encoding encoding, ID3D12Resource* game_texture, float game_factor);
   // The meter (and, for Auto's check, the copy of its state into the readback ring) before the encode.
   void RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, color::MeterPass pass, const ExposureChoice& exposure);
   void PollExposureChecks();  // reads the samples the GPU has passed into the set's auto_exposure
   ID3D12Resource* BoundMask(uint32_t slot);  // the mask copy for this recording, or null
   AfterNr RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
-                        ID3D12Resource* nr_output, bool reduced, bool look_ready, color::Upsampling upsampling,
+                        ID3D12Resource* nr_output, uint32_t passes_run, bool reduced, bool look_ready, color::Upsampling upsampling,
                         const color::StabilizeMotion& motion, bool reset);
 
   LookConfig config_;
@@ -285,7 +286,7 @@ class NrPipeline final : private nr::PassResolver {
     Texture model_a;
     Texture model_b;
     Texture zero_motion;
-    Texture change;         // the image size: only below the output size
+    Texture change;         // required RGBA16F change field at the image size
     Texture canvas_motion;  // the canvas size: only with SetPlan::canvas_motion
     Texture private_color;  // pre-SR only
     SetPlan plan;

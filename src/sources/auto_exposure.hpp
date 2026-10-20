@@ -10,6 +10,15 @@
 
 namespace uplift::sources {
 
+// The meaning of metered values is independent of the processing image's dimensions.
+struct MeterBasis {
+  uint8_t stage = 0u;
+  color::Encoding encoding = color::Encoding::AUTO;
+  color::Primaries primaries = color::Primaries::AUTO;
+  float input_scale = 0.f;
+  friend bool operator==(const MeterBasis&, const MeterBasis&) = default;
+};
+
 // Plan 17 (1.0.1 design §2): one look at the game's DLSS exposure beside Uplift's meter, read back from the meter's state a few frames after it was written.
 struct ExposureSample {
   float texture_value = 1.f;  // the game's ExposureTexture texel (1 without one)

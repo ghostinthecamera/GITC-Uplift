@@ -17,7 +17,7 @@ cbuffer DecodeConstants : register(b0) {
   uint origin_y;
   uint width;          // the region: the output size
   uint height;
-  uint upsampling;     // 0: NR ran at the output size and t1 is its output; 1 Classic, 2 Edge-aware: t1 is the change field
+  uint upsampling;     // change-field reads: 0 direct, 1 Classic, 2 Edge-aware
   uint source_x;       // the region's top-left corner in the source
   uint source_y;
   uint options;        // Plan 5: OPTION_* (the primaries, Consistent transfer, the mask)
@@ -32,7 +32,7 @@ UPLIFT_IMAGE_FORMAT(UPLIFT_VK_TARGET_FORMAT) RWTexture2D<float4> target_texture 
 Texture2D<float4> source_texture : register(t0);
 #define UPLIFT_LOAD_SOURCE(pixel) source_texture.Load(int3((pixel), 0))
 #endif
-Texture2D<float4> nr_texture : register(t1);
+Texture2D<float4> change_texture : register(t1);
 Texture2D<float> exposure_texture : register(t2);
 Texture2D<float4> mask_texture : register(t3);  // Plan 5 (§3.13): Uplift's copy of UPLIFT_MASK, read with OPTION_MASK
 
@@ -46,8 +46,8 @@ float3 ChangeBilinear(float2 position, uint2 size) {
   const int2 first = int2(floor(clamped));
   const int2 last = min(first + 1, int2(size) - 1);
   const float2 fraction = clamped - float2(first);
-  const float3 top = lerp(nr_texture.Load(int3(first, 0)).xyz, nr_texture.Load(int3(last.x, first.y, 0)).xyz, fraction.x);
-  const float3 bottom = lerp(nr_texture.Load(int3(first.x, last.y, 0)).xyz, nr_texture.Load(int3(last, 0)).xyz, fraction.x);
+  const float3 top = lerp(change_texture.Load(int3(first, 0)).xyz, change_texture.Load(int3(last.x, first.y, 0)).xyz, fraction.x);
+  const float3 bottom = lerp(change_texture.Load(int3(first.x, last.y, 0)).xyz, change_texture.Load(int3(last, 0)).xyz, fraction.x);
   return lerp(top, bottom, fraction.y);
 }
 
@@ -62,7 +62,7 @@ float3 ChangeEdgeAware(float2 position, uint2 size, float guide) {
       const int2 tap = base + int2(x, y);
       const float2 gap = abs(position - float2(tap));  // not `distance`: an HLSL intrinsic
       const float spatial = max(1.f - gap.x / SPATIAL_RADIUS, 0.f) * max(1.f - gap.y / SPATIAL_RADIUS, 0.f);
-      const float4 change = nr_texture.Load(int3(clamp(tap, int2(0, 0), int2(size) - 1), 0));
+      const float4 change = change_texture.Load(int3(clamp(tap, int2(0, 0), int2(size) - 1), 0));
       const float difference = guide - change.w;
       const float weight = spatial * exp(-difference * difference / (2.f * RANGE_SIGMA * RANGE_SIGMA));
       if (weight > 0.f && all(isfinite(change))) {
@@ -94,21 +94,19 @@ float4 DecodePixel(uint2 pixel) {
   const float4 source = UPLIFT_LOAD_SOURCE(uint2(source_x, source_y) + pixel);
   precise float scale = input_scale * GameExposure(has_exposure, exposure_texture.Load(int3(0, 0, 0)), exposure_factor);
   const uint primaries = options & OPTION_PRIMARIES_MASK;
-  if (upsampling == 0u) {
-    return float4(DecodeModel(encoding, primaries, source.rgb, nr_texture.Load(int3(pixel, 0)).rgb, scale, transfer_strength,
-                              color_strength),
-                  source.a);
-  }
-  uint2 size;
-  nr_texture.GetDimensions(size.x, size.y);
-  const float2 position = (float2(pixel) + 0.5f) * (float2(size) / float2(width, height)) - 0.5f;  // p_w
   float3 change;
-  if (upsampling == 2u) {
-    // g(p): the guide at this output pixel, with M recomputed here the way encode computes it.
-    const float3 model = EncodeModel(encoding, primaries, source.rgb, scale);
-    change = ChangeEdgeAware(position, size, log2(max(Luminance(SrgbDecode(model)), 0.f) + ChangeEpsilon(encoding)));
+  if (upsampling == 0u) {
+    change = change_texture.Load(int3(pixel, 0)).xyz;
   } else {
-    change = ChangeBilinear(position, size);
+    uint2 size;
+    change_texture.GetDimensions(size.x, size.y);
+    const float2 position = (float2(pixel) + 0.5f) * (float2(size) / float2(width, height)) - 0.5f;
+    if (upsampling == 2u) {
+      const float3 model = EncodeModel(encoding, primaries, source.rgb, scale);
+      change = ChangeEdgeAware(position, size, log2(max(Luminance(SrgbDecode(model)), 0.f) + ChangeEpsilon(encoding)));
+    } else {
+      change = ChangeBilinear(position, size);
+    }
   }
   // v2 design §3.13, step 11: the mask scales the final change at this pixel, so 0 is exactly the original.
   if ((options & OPTION_MASK) != 0u) {

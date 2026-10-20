@@ -330,9 +330,9 @@ bool ColorPipeline::RecordEncode(ID3D12GraphicsCommandList* list, uint32_t slot,
 bool ColorPipeline::RecordChange(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangePass& pass) {
   if (!SlotInRange(slot, "RecordChange")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + CHANGE_TABLE;
-  WriteTable(base, {{pass.encode.source, pass.encode.source_view_format}, {pass.nr_output}, ExposureView(pass.encode.exposure)},
+  WriteTable(base, {{pass.encode.source, pass.encode.source_view_format}, {pass.nr_output}, ExposureView(pass.encode.exposure), {pass.model_input}},
              {{pass.change}, {pass.basis, DXGI_FORMAT_R16G16_FLOAT}});
-  DispatchCompute(list, encode_pipeline_.Get(), EncodeConstants(pass.encode, 1u, pass.basis != nullptr), base, pass.encode.width,
+  DispatchCompute(list, encode_pipeline_.Get(), EncodeConstants(pass.encode, (pass.model_input != nullptr ? 2u : 1u), pass.basis != nullptr), base, pass.encode.width,
                   pass.encode.height);
   return true;
 }

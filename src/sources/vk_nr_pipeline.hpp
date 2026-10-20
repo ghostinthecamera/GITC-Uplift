@@ -86,8 +86,7 @@ class VkNrPipeline final : private nr::PassResolver {
 
   bool Initialize(std::string* error);
   // Plan 14 (design §3.2): the look stage, the colour fixes (InputExposure included: Auto or Game binds DLSS's exposure texture and scale, Metered the meter's
-  // state, Manual none), the mask and passes 2..10's model controls and own strengths for the next recordings, with Δt per recording. A changed colour fix
-  // makes the meter snap to its target (v2 design §3.14).
+  // state, Manual none), the mask and passes 2..10's model controls and own strengths for the next recordings, with Δt per recording.
   void SetLookConfig(const LookConfig& config);
   // The device can load and store the look's R16F and RGBA32F images (RGBA16F is native NR's own requirement); without them the look stage, the meter and the
   // per-pass strengths are skipped, as on a Direct3D 12 device without typed UAV loads.
@@ -195,7 +194,7 @@ class VkNrPipeline final : private nr::PassResolver {
     vk::NrImage zero_motion;    // MotionVectors = None (or Before upscaling's canvas without readable vectors)
     vk::NrImage canvas_motion;  // Before upscaling in a canvas: the game's vectors copied in, mirrored like the image
     vk::NrImage private_color;  // Before upscaling: RGBA16F at the game's Color dimensions, what DLSS reads as Color
-    vk::NrImage change;         // Plan 14: RGBA16F at `image`, below the output size and always before upscaling (Direct3D 12's main-set C)
+    vk::NrImage change;         // required RGBA16F change field at `image`
     nr::Size size;              // A and B: the canvas NR runs at (the work image, padded before upscaling below the floor)
     nr::Size image;             // the work image: the region resampled to this size
     nr::Size output;            // After DLSS: the output region the set was made for; Before upscaling: the work image (I-1)
@@ -213,7 +212,6 @@ class VkNrPipeline final : private nr::PassResolver {
   struct LookSurfaces {
     LookPlan plan;
     look::Atlas atlas;
-    vk::NrImage change;                         // own_change: RGBA16F at the image size
     vk::NrImage basis;                          // κ_M, RG16F
     vk::NrImage gauss;                          // the pyramid atlas, RGBA16F
     vk::NrImage peaks;                          // the max-pyramid atlas, R16F
@@ -252,8 +250,8 @@ class VkNrPipeline final : private nr::PassResolver {
 
   // After NR: what the decode reads as t1.
   struct AfterNr {
-    VkImageView view = VK_NULL_HANDLE;            // NR's output, or the (shaped) change field
-    std::optional<color::Upsampling> upsampling;  // set: `view` is the change field
+    VkImageView view = VK_NULL_HANDLE;            // the (shaped) change field
+    std::optional<color::Upsampling> upsampling;  // unset: direct reads; set: resample the change field
     bool ok = true;                               // false: the change pass could not be recorded
   };
 
@@ -261,7 +259,8 @@ class VkNrPipeline final : private nr::PassResolver {
   // frames in GENERAL, as the stabiliser's histories do. Plan 17: 2x1, the second texel Auto's check (the game's exposure beside the meter's target).
   struct MeterState {
     vk::NrImage state;
-    bool snap = true;      // the next meter snaps: a new image, or a changed colour fix
+    std::optional<MeterBasis> basis;
+    bool snap = true;      // new exposure state or a changed metering basis
     bool carried = false;  // moved UNDEFINED -> GENERAL (once)
     nr::Mark last_use;
   };
@@ -363,9 +362,9 @@ class VkNrPipeline final : private nr::PassResolver {
   // Keep faces, before a recording's Session evaluate: the twin's surfaces and `frame_inputs->faces` while it is on (and can run), else its surfaces go.
   // Call before OpenRecording, which opens the surfaces. Split chain: the twin of `slice`'s first pass, at its stage (decision Q5a).
   void PrepareFaces(nr::Size canvas, const nr::Controls& controls, const nr::StageSlice& slice, nr::FrameInputs* frame_inputs);
-  // The look set for `plan`, made now unless it is the one held. False (logged once): the look (and C at the output size) is skipped this recording.
+  // The look set for `plan`, made now unless it is the one held. False (logged once): optional shaping is skipped this recording.
   bool EnsureLook(const LookPlan& plan);
-  [[nodiscard]] LookPlan LookPlanFor(nr::Size image, bool reduced) const;  // sources::PlanLook for this device and this set
+  [[nodiscard]] LookPlan LookPlanFor(nr::Size image) const;  // sources::PlanLook for this device and this set
   [[nodiscard]] uint32_t ShaderOptions() const;                            // the encode's and the decode's shader_options
   [[nodiscard]] color::VkSampledView BoundMask(uint32_t slot);             // the mask copy for this recording, or none
   // A global memory dependency: everything written before `source_stage` is visible to everything after (every Uplift image stays in GENERAL).
@@ -379,6 +378,7 @@ class VkNrPipeline final : private nr::PassResolver {
   void HandToNgx(VkCommandBuffer buffer, const vk::NrImage& image) const;
   // The game's exposure texture as a sampled view (SHADER_READ_ONLY_OPTIMAL), or empty when it is not an image view.
   [[nodiscard]] static color::VkSampledView GameExposureView(const NVSDK_NGX_Resource_VK* exposure);
+  void NoteMeterBasis(uint8_t stage, color::Encoding encoding, float input_scale);
   // Direct3D 12's ChooseExposure: the game's exposure, the meter's state (made now when it is wanted and the device can), or none. Call before OpenRecording.
   ExposureChoice ChooseExposure(color::Encoding encoding, const NVSDK_NGX_Resource_VK* game_texture, float game_factor);
   // The meter before the encode (`pass`'s state, snap, smoothing, rates and Δt are filled here), then a barrier so the encode reads what it wrote. False: no
@@ -390,9 +390,8 @@ class VkNrPipeline final : private nr::PassResolver {
   [[nodiscard]] static color::VkStabilizeMotion StabilizeMotionOf(const nr::FrameInputs& inputs);
   // The target's input scale, and NR's history restarting when the encoding or the scale changed (Plan 2 final review M4).
   float NoteEncoding(const VkDlssTarget& target);
-  // Direct3D 12's RecordAfterNr: the change field and the look stage after NR, or NR's own output for the full-size restore. Ends with the look's writes
-  // visible to the decode.
-  AfterNr RecordAfterNr(VkCommandBuffer buffer, uint32_t slot, const color::VkEncodePass& encode, VkImageView nr_output, bool reduced, bool look_ready,
+  // Generate the required change field, optionally shape it, and make the writes visible to composition.
+  AfterNr RecordAfterNr(VkCommandBuffer buffer, uint32_t slot, const color::VkEncodePass& encode, VkImageView nr_output, uint32_t passes_run, bool reduced, bool look_ready,
                         color::Upsampling upsampling, const color::VkStabilizeMotion& motion, bool reset);
   void LogAllocationFailure(nr::Size size);  // once until an allocation works again
 

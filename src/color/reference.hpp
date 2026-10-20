@@ -52,12 +52,6 @@ struct Lab {
 [[nodiscard]] float GameExposure(bool has_texture, float texture_value, float factor);
 // Model domain (spike E3): sRGB-encoded BT.709 in [0,1]. `primaries`: SourcePrimaries (Plan 5).
 [[nodiscard]] Rgb EncodeModel(Encoding encoding, Rgb value, float input_scale, Primaries primaries = Primaries::AUTO);
-// Spec §7 restore (amendment 6): NR's luminance ratio and normalised OkLab chroma change applied
-// to the original pixel. sRGB returns `nr_output` unchanged. A non-finite result returns `value`
-// instead (Plan 2 final review M2). `primaries`: SourcePrimaries (Plan 5).
-[[nodiscard]] Rgb DecodeModel(Encoding encoding, Rgb value, Rgb nr_output, float input_scale,
-                              float transfer_strength, float color_strength, Primaries primaries = Primaries::AUTO);
-
 // shaders/change_common.hlsli (v2 design §3.7, §3.10, §3.14): NR's change, the compose, the per-pass resolve.
 struct ChangeTexel {
   float stops = 0.f;     // a

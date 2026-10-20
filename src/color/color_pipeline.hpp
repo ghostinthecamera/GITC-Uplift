@@ -43,7 +43,7 @@ struct EncodePass {
 struct DecodePass {
   ID3D12Resource* source = nullptr;     // original pixels, readable by pixel shaders
   DXGI_FORMAT source_view_format = DXGI_FORMAT_UNKNOWN;
-  ID3D12Resource* nr_output = nullptr;  // RGBA16F model domain, readable by pixel shaders
+  ID3D12Resource* nr_output = nullptr;  // RGBA16F change field, readable by pixel shaders
   ID3D12Resource* target = nullptr;     // RENDER_TARGET
   DXGI_FORMAT target_view_format = DXGI_FORMAT_UNKNOWN;
   bool target_view_srgb = false;
@@ -55,7 +55,7 @@ struct DecodePass {
   float color_strength = 1.f;
   ID3D12Resource* exposure = nullptr;
   float exposure_factor = 1.f;
-  std::optional<Upsampling> upsampling;  // set: nr_output is the change field at the work size
+  std::optional<Upsampling> upsampling;  // unset: direct change-field reads; set: resample from the work size
   uint32_t options = 0u;                              // Plan 5: shader_options (the primaries, Consistent)
   float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
@@ -66,7 +66,7 @@ struct DecodePass {
 struct ComputeDecodePass {
   ID3D12Resource* source = nullptr;  // the source copy, NON_PIXEL_SHADER_RESOURCE
   DXGI_FORMAT source_view_format = DXGI_FORMAT_UNKNOWN;
-  ID3D12Resource* nr_output = nullptr;  // RGBA16F model domain, NON_PIXEL_SHADER_RESOURCE
+  ID3D12Resource* nr_output = nullptr;  // RGBA16F change field, NON_PIXEL_SHADER_RESOURCE
   ID3D12Resource* target = nullptr;     // UNORDERED_ACCESS
   DXGI_FORMAT target_uav_format = DXGI_FORMAT_UNKNOWN;
   uint32_t origin_x = 0u;  // the region's top-left corner in the target
@@ -81,7 +81,7 @@ struct ComputeDecodePass {
   float exposure_factor = 1.f;
   uint32_t source_x = 0u;  // the region's top-left corner in `source`
   uint32_t source_y = 0u;
-  std::optional<Upsampling> upsampling;  // set: nr_output is the change field at the work size
+  std::optional<Upsampling> upsampling;  // unset: direct change-field reads; set: resample from the work size
   uint32_t options = 0u;                              // Plan 5: shader_options (the primaries, Consistent)
   float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
@@ -95,6 +95,7 @@ struct ChangePass {
   ID3D12Resource* nr_output = nullptr;  // RGBA16F model domain, NON_PIXEL_SHADER_RESOURCE, the canvas size
   ID3D12Resource* change = nullptr;     // RGBA16F, UNORDERED_ACCESS, the image size
   ID3D12Resource* basis = nullptr;  // Plan 5: RG16F, UNORDERED_ACCESS: NR's input chroma κ_M, for the look; null = none
+  ID3D12Resource* model_input = nullptr;  // preserved FP16 NR input when one pass ran; otherwise recompute from encode.source
 };
 
 // Amendment 7 and v2 design §3.9: the game's motion vectors into an Uplift RG16F texture, in its pixels.

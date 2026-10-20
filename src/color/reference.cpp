@@ -269,35 +269,6 @@ Rgb EncodeModel(Encoding encoding, Rgb value, float input_scale, Primaries prima
   return SrgbEncode(GamutClip(NeutwoLuminance(scene)));
 }
 
-Rgb DecodeModel(Encoding encoding, Rgb value, Rgb nr_output, float input_scale, float transfer_strength,
-                float color_strength, Primaries primaries) {
-  if (encoding == Encoding::SRGB || encoding == Encoding::AUTO) return (IsFinite(nr_output) ? nr_output : value);
-  const Rgb original = ToSceneLinear(encoding, value, input_scale, primaries);
-  if (!IsFinite(original)) return value;
-  // A may have been overwritten by pass 2, so recompute what NR was given, rounded as A stored it.
-  const Rgb linear_in = SrgbDecode(QuantizeHalf(EncodeModel(encoding, value, input_scale, primaries)));
-  const Rgb linear_nr = SrgbDecode(nr_output);
-  const float luminance_in = Luminance(linear_in);
-  const float ratio = (luminance_in > BLACK ? std::clamp(Luminance(linear_nr) / luminance_in, RATIO_MIN, RATIO_MAX) : 1.f);
-  const Rgb scaled = original * (1.f + (ratio - 1.f) * transfer_strength);
-  Rgb restored = scaled;
-  const Lab lab_scaled = LinearToOkLab(scaled);
-  const Lab lab_in = LinearToOkLab(linear_in);
-  const Lab lab_nr = LinearToOkLab(linear_nr);
-  if (color_strength > 0.f && lab_scaled.l > BLACK && lab_in.l > BLACK && lab_nr.l > BLACK) {
-    const float a = lab_scaled.a / lab_scaled.l + color_strength * (lab_nr.a / lab_nr.l - lab_in.a / lab_in.l);
-    const float b = lab_scaled.b / lab_scaled.l + color_strength * (lab_nr.b / lab_nr.l - lab_in.b / lab_in.l);
-    restored = OkLabToLinear({lab_scaled.l, a * lab_scaled.l, b * lab_scaled.l});
-    const float luminance_restored = Luminance(restored);
-    const float luminance_target = Luminance(scaled);
-    if (luminance_restored > BLACK && luminance_target > BLACK) {
-      restored = restored * (luminance_target / luminance_restored);
-    }
-  }
-  const Rgb decoded = FromSceneLinear(encoding, restored, input_scale, primaries);
-  return (IsFinite(decoded) ? decoded : value);
-}
-
 ChangeTexel ChangeField(Encoding encoding, Rgb model_in, Rgb model_out, bool near_black_guard) {
   const float epsilon = ChangeEpsilon(encoding);
   const Rgb linear_in = SrgbDecode(model_in);

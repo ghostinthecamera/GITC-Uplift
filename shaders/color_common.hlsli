@@ -190,36 +190,4 @@ float3 EncodeModel(uint encoding, uint primaries, float3 value, float input_scal
   return SrgbEncode(GamutClip(NeutwoLuminance(scene)));
 }
 
-// Spec §7 restore (Plan 2 amendment 6).
-float3 DecodeModel(uint encoding, uint primaries, float3 value, float3 nr_output, float input_scale, float transfer_strength,
-                   float color_strength) {
-  // Plan 2 final review M2: a non-finite result never reaches the game's image; the source value does.
-  if (encoding == ENCODING_AUTO || encoding == ENCODING_SRGB) return (all(isfinite(nr_output)) ? nr_output : value);
-  const float3 original = ToSceneLinear(encoding, primaries, value, input_scale);
-  if (!all(isfinite(original))) return value;
-  // A may have been overwritten by pass 2: recompute what NR was given, rounded as A stored it.
-  // `precise` keeps this bit-identical to encode_cs.hlsl's computation of the same expression.
-  precise float3 recomputed_model = QuantizeHalf(EncodeModel(encoding, primaries, value, input_scale));
-  const float3 linear_in = SrgbDecode(recomputed_model);
-  const float3 linear_nr = SrgbDecode(nr_output);
-  const float luminance_in = Luminance(linear_in);
-  const float ratio = (luminance_in > BLACK ? clamp(Luminance(linear_nr) / luminance_in, RATIO_MIN, RATIO_MAX) : 1.f);
-  const float3 scaled = original * (1.f + (ratio - 1.f) * transfer_strength);
-  float3 restored = scaled;
-  const float3 lab_scaled = LinearToOkLab(scaled);
-  const float3 lab_in = LinearToOkLab(linear_in);
-  const float3 lab_nr = LinearToOkLab(linear_nr);
-  if (color_strength > 0.f && lab_scaled.x > BLACK && lab_in.x > BLACK && lab_nr.x > BLACK) {
-    const float2 chroma = lab_scaled.yz / lab_scaled.x + color_strength * (lab_nr.yz / lab_nr.x - lab_in.yz / lab_in.x);
-    restored = OkLabToLinear(float3(lab_scaled.x, chroma * lab_scaled.x));
-    const float luminance_restored = Luminance(restored);
-    const float luminance_target = Luminance(scaled);
-    if (luminance_restored > BLACK && luminance_target > BLACK) {
-      restored *= luminance_target / luminance_restored;
-    }
-  }
-  const float3 decoded = FromSceneLinear(encoding, primaries, restored, input_scale);
-  return (all(isfinite(decoded)) ? decoded : value);
-}
-
 #endif  // UPLIFT_COLOR_COMMON_HLSLI

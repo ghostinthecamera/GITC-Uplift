@@ -267,7 +267,7 @@ struct Settings {
   color::Primaries source_primaries = color::Primaries::AUTO;
   color::NeuralTransfer neural_transfer = color::NeuralTransfer::BOUNDED_RATIO;
   float chroma_clamp = 0.f;
-  bool near_black_guard = false;  // key decision 1: off keeps Plan 4's output
+  bool near_black_guard = false;
   PedestalRemoval pedestal_removal = PedestalRemoval::OFF;
   bool dlss_placement_blocked = false;       // hidden: the device-removal latch (v2 design §3.2)
   uint32_t config_version = CONFIG_VERSION;  // hidden: the version the loaded file declared

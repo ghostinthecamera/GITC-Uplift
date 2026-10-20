@@ -44,14 +44,14 @@ struct VkEncodePass {
   uint32_t options = 0u;        // shader_options (the primaries, the near-black guard)
 };
 
-// The decode (v2 design §3.4 step 5): NR's output at Full, or (Plan 14) the change field composed with the original pixel.
+// Compose the change field with the original pixel, using direct reads when dimensions match.
 struct VkDecodePass {
   // In place (After DLSS): `source` is empty and `target` is DLSS's Output, a storage view in GENERAL of `target_format` (one of OutputVariantOf's) that
   // also holds the original pixels. Otherwise (Before upscaling): `source` is the game's Color, sampled, and `target` is Uplift's RGBA16F private colour.
   VkSampledView source;
   VkImageView target = VK_NULL_HANDLE;
   VkFormat target_format = VK_FORMAT_R16G16B16A16_SFLOAT;
-  VkImageView nr_output = VK_NULL_HANDLE;  // NR's output (A or B), or the change field: RGBA16F, GENERAL
+  VkImageView nr_output = VK_NULL_HANDLE;  // change field: RGBA16F, GENERAL
   uint32_t origin_x = 0u;                  // the region's top-left corner in the target
   uint32_t origin_y = 0u;
   uint32_t width = 0u;  // the region: the output size
@@ -64,7 +64,7 @@ struct VkDecodePass {
   float exposure_factor = 1.f;
   uint32_t source_x = 0u;  // the region's top-left corner in the source (in place: the target)
   uint32_t source_y = 0u;
-  std::optional<Upsampling> upsampling;  // Plan 14: set: `nr_output` is the change field at the work size
+  std::optional<Upsampling> upsampling;  // unset: direct change-field reads; set: resample from the work size
   uint32_t options = 0u;                 // shader_options (the primaries, Consistent)
   float chroma_clamp = 0.f;              // Plan 14 (F14): stops; 0 = off
   VkSampledView mask;                    // Plan 14 (§3.13): the mask copy, SHADER_READ_ONLY_OPTIMAL; null = none
@@ -91,6 +91,7 @@ struct VkChangePass {
   VkImageView nr_output = VK_NULL_HANDLE;  // RGBA16F model domain, GENERAL, the canvas size
   VkImageView change = VK_NULL_HANDLE;     // RGBA16F storage, GENERAL, the image size
   VkImageView basis = VK_NULL_HANDLE;      // RG16F storage, GENERAL: NR's input chroma κ_M, for the look; null = none
+  VkImageView model_input = VK_NULL_HANDLE;  // preserved FP16 NR input when one pass ran; otherwise recompute from encode.source
 };
 
 // Plan 14 (v2 design §3.12): the Gaussian pyramid of C and the max pyramid of ℓ_M, levels 1..K, in two atlases. Every image GENERAL.

@@ -13,7 +13,7 @@ cbuffer MeterConstants : register(b0) {
   uint source_y;
   uint source_width;
   uint source_height;
-  uint snap;             // jump to the target: the first frame, a settings change, a rebuild
+  uint snap;             // jump to the target: new exposure state or a changed metering basis
   uint smooth;           // ExposureAdapt: 0 Off (the target every frame), 1 Smooth
   float brighter_rate;   // stops per second toward a darker exposure
   float darker_rate;     // stops per second toward a brighter exposure

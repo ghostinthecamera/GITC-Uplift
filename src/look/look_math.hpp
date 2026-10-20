@@ -35,7 +35,7 @@ struct ShapeSettings {
 
 // Shape result and its rows (v2 design §5 "Look · Result", "Limits and stability"). All live: none restarts NR's history.
 struct LookSettings {
-  bool enabled = false;  // ShapeResult: off leaves NR's output exactly as Plan 4's
+  bool enabled = false;
   ShapeSettings shape;
   float detail_radius = 2.f;  // % of the work image's height: where broad change ends
   StabilizeMode stabilize = StabilizeMode::OFF;

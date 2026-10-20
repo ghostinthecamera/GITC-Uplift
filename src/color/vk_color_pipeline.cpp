@@ -511,9 +511,10 @@ bool VkColorPipeline::RecordChange(VkCommandBuffer buffer, uint32_t slot, const 
   bindings.sampled[0] = (in_place ? VkSampledView{} : VkSampledView{.view = encode.source, .layout = encode.source_layout});
   bindings.sampled[1] = Own(pass.nr_output);
   bindings.sampled[2] = encode.exposure;
+  bindings.sampled[3] = Own(pass.model_input);
   bindings.storage = {pass.change, pass.basis, (in_place ? encode.source : VK_NULL_HANDLE)};
   // The change mode runs at the work image, not the canvas.
-  Dispatch(buffer, pipeline, slot, CHANGE_PASS, EncodeConstants(encode, 1u, pass.basis != VK_NULL_HANDLE), bindings, encode.width, encode.height);
+  Dispatch(buffer, pipeline, slot, CHANGE_PASS, EncodeConstants(encode, (pass.model_input != VK_NULL_HANDLE ? 2u : 1u), pass.basis != VK_NULL_HANDLE), bindings, encode.width, encode.height);
   return true;
 }
 

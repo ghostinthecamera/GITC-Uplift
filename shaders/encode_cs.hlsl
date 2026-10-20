@@ -15,7 +15,7 @@ cbuffer EncodeConstants : register(b0) {
   uint source_height;
   uint canvas_width;   // the model texture: the image plus mirrored padding
   uint canvas_height;
-  uint change_mode;    // 1: write NR's change field (t1 = NR's output) at the image size instead
+  uint change_mode;    // 0: encode; 1: extract changes with recomputed input; 2: extract changes with preserved FP16 input
   uint options;        // Plan 5: OPTION_* (the primaries, the near-black guard)
   uint reserved0;
 };
@@ -30,6 +30,7 @@ Texture2D<float4> source_texture : register(t0);
 #endif
 Texture2D<float4> nr_texture : register(t1);
 Texture2D<float> exposure_texture : register(t2);
+Texture2D<float4> model_input_texture : register(t3);
 UPLIFT_IMAGE_FORMAT("rgba16f") RWTexture2D<float4> output_texture : register(u0);  // the model texture, or the change field in change mode
 UPLIFT_IMAGE_FORMAT("rg16f") RWTexture2D<float2> motion_texture : register(u1);
 
@@ -57,8 +58,7 @@ float3 AreaAverage(uint2 pixel, float scale) {
   return (total > 0.f ? sum / total : float3(0.f, 0.f, 0.f));
 }
 
-// What NR is given at image pixel `pixel`. At the source's own size it is exactly the encode the
-// full-size decode recomputes; smaller, the encoded linear-light area mean.
+// The model input at `pixel`, shared by encode and change extraction: direct at matching dimensions, otherwise the encoded linear-light area mean.
 float3 ModelAt(uint2 pixel, float scale) {
   if (source_width == width && source_height == height) {
     return QuantizeHalf(EncodeModel(encoding, options & OPTION_PRIMARIES_MASK,
@@ -71,11 +71,14 @@ float3 ModelAt(uint2 pixel, float scale) {
 void main(uint3 id : SV_DispatchThreadID) {
   const uint2 extent = (change_mode != 0u ? uint2(width, height) : uint2(canvas_width, canvas_height));
   if (id.x >= extent.x || id.y >= extent.y) return;
-  // `precise` keeps the model value bit-identical to the full-size decode's recomputation (DecodeModel's
-  // recomputed_model) and to this shader's own change mode. The value is an exact FP16 number, so the
-  // UAV conversion cannot round differently from QuantizeHalf.
+  // `precise` keeps the model value bit-identical between encode and change mode. The value is an exact FP16 number, so the UAV conversion cannot round differently from QuantizeHalf.
   precise float scale = input_scale * GameExposure(has_exposure, exposure_texture.Load(int3(0, 0, 0)), exposure_factor);
-  precise float3 model_value = ModelAt(uint2(Mirror(id.x, width), Mirror(id.y, height)), scale);
+  precise float3 model_value;
+  if (change_mode == 2u) {
+    model_value = model_input_texture.Load(int3(id.xy, 0)).rgb;
+  } else {
+    model_value = ModelAt(uint2(Mirror(id.x, width), Mirror(id.y, height)), scale);
+  }
   if (change_mode != 0u) {
     output_texture[id.xy] =
         ChangeField(encoding, model_value, nr_texture.Load(int3(id.xy, 0)).rgb, (options & OPTION_NEAR_BLACK_GUARD) != 0u);

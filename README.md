@@ -224,6 +224,51 @@ reason.
   set **Output API** in `dgVoodooCpl.exe` to Direct3D 11 or "Direct3D 12 (feature level 12.0)", and install the 32-bit ReShade as
   `dxgi.dll`. Other `d3d9.dll` wrappers (DXVK, game fixes) conflict with it.
 
+### Consistent image processing
+
+All stages and resolutions use the same processing sequence: measure/select exposure from the original source, prepare the NR input, run the configured passes, extract NR's brightness and colour changes, optionally shape/stabilize them, then compose the changes onto the original image. Each pass keeps its own controls and placement. Encoding, white normalization and available game exposure follow the selected source.
+
+Resizing is skipped when dimensions match. Reduced resolution uses linear-light area averaging before NR and the selected upsampling for the resulting changes. When active, the exposure meter samples the original source; processing-size changes restart spatial histories without snapping exposure adaptation. Metering reinitializes when its placement, encoding, resolved primaries or input normalization changes.
+
+Version 1.6.0 uses the same change-field reconstruction at full and reduced resolution, including Transfer and Colour strength on SDR. Configurations that previously used the older full-resolution reconstruction can therefore change appearance. This prioritizes consistent treatment; it does not make different source images or processing resolutions produce identical results.
+
+The common change field uses 8 bytes per processing pixel per active stage group. A previously shortcut-based Full path adds one GPU dispatch and approximately 15.8 MiB at 1080p, 28.1 MiB at 1440p or 63.3 MiB at 4K. Paths already using the change field have the same field cost. No general FPS improvement is expected.
+
+On the RTX 4090, D3D12 reported committed-resource allocation sizes of 16.875 MiB, 30 MiB and 63.75 MiB for those fields respectively. The difference is driver allocation padding; the existing budget and intermediate-byte reporting count the logical image payload above.
+
+A focused DX12 GPU check on an RTX 4090 passed 90 encode/change/compose cases covering sRGB, scene-linear BT.709, PQ, scRGB and scRGB-nl at full and reduced dimensions. It checked strengths, subrects, alpha, identity results, non-finite NR output and a zero mask against the CPU reference. Direct change-field reads and Classic sampling at 1:1 were bit-identical. The maximum relative composition error was 0.00000525. Identity cases also exercised mirrored 640x360 canvases. A further 62 GPU meter frames matched the CPU governor for smooth adaptation, explicit snaps and scene cuts. These checks used controlled NR output; they did not run NVIDIA's NR network or the hooked game placements.
+
+An isolated 4K-output shader benchmark on the same RTX 4090 (driver 610.88, 2026-10-20) measured the following GPU times. Each range covers two runs in opposite order; each run reports the median of five batches of 48 iterations after one warm-up batch. The fixture used a constant scene-linear RGBA16F source and fixed NR output, measuring encode, change extraction when required, and compute composition. It excludes NR, shaping, transport and the game.
+
+| Configuration | Before (ms) | After (ms) |
+|---|---:|---:|
+| 100%, previously using legacy reconstruction | 0.249–0.250 | 0.321–0.344 |
+| 100%, already using the change field | 0.361–0.365 | 0.312–0.340 |
+| 80%, Edge-aware | 0.486–0.492 | 0.491–0.493 |
+| 78%, Edge-aware | 0.563–0.573 | 0.568 |
+
+The former legacy path gains a dispatch; an existing full-size change path benefits from direct reads. These synthetic timings are not game frame times or an FPS prediction. Live NR, native Vulkan, the reported scene and a full before/after game-frame comparison remain unverified; the public checkout does not include the private test harness.
+
+#### Single-pass input reuse and follow-up regressions
+
+When exactly one NR pass runs in a stage group, change extraction reads the preserved FP16 input from model texture A. It avoids repeating input colour preparation and downsampling, uses the same change equations, and allocates no extra image. With multiple passes, A is overwritten by ping-pong, so extraction continues recomputing the original input. Both processing backends use this rule; the bridged and helper APIs inherit the DX12 implementation.
+
+A follow-up regression exercised the real DX12 `NrPipeline` and `Session` with an identity NR stand-in: 15 frames, 13 processing reallocations, output-only control changes, primaries/normalization changes and all three source recorders. Exposure adaptation continued across processing-size changes and reinitialized for genuine interpretation changes. An isolated copy restoring the old reset coupling failed at the first resize, confirming that this regression detects the original problem. Non-identity one-, two- and three-pass cases also passed, including per-pass strengths, overwritten-A fallback and a single-pass Keep faces twin. These checks passed on the RTX 4090 and the D3D12 software adapter; they do not execute NVIDIA's NR network.
+
+Another 60 hardware GPU cases used gradients and checkerboards with offset source/output regions, five colour encodings, padded canvases and direct/Classic/Edge-aware composition. Reused and recomputed FP16 change fields and chroma bases were bit-identical. Input preparation and final interpolation were also checked against CPU reference calculations; maximum errors were 0.00050539 absolute for encoded input and 0.00001165 relative for composition.
+
+The following measurements compare recomputation with reuse in the same updated shader, using a nonuniform 4K RGBA16F source and fixed NR output. They cover two clean sequential runs in opposite order, each taking the median of five 48-iteration batches after warm-up. Stalled/concurrent test samples were excluded. NR, shaping, transport and game rendering are excluded. This fixture differs from the constant-source benchmark above, so absolute times across the two tables are not directly comparable.
+
+| Processing scale | Recompute (ms) | Reuse (ms) | Paired saving (ms) |
+|---|---:|---:|---:|
+| 100% | 0.297–0.303 | 0.266–0.273 | 0.024–0.037 |
+| 80% | 0.425–0.450 | 0.359–0.380 | 0.066–0.070 |
+| 78% | 0.493–0.495 | 0.388–0.404 | 0.089–0.107 |
+| 67% | 0.417–0.418 | 0.339–0.346 | 0.073–0.078 |
+| 50% | 0.296–0.309 | 0.272–0.281 | 0.015–0.037 |
+
+The supported claim is reduced single-pass encode/reconstruction work in this synthetic RTX 4090 workload. These measurements do not establish a general FPS improvement. Native Vulkan execution and actual game reproduction remain unverified.
+
 ### Where NR runs, and memory
 
 - **64-bit games** run NR inside the game. After the first time you switch it on, about 165 to 190 MB stays with the game until it
