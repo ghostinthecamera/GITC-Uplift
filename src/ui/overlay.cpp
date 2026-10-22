@@ -686,7 +686,8 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     state->language_changed = true;
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("English / Simplified Chinese. If Chinese appears as boxes, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc). No extra Uplift files are needed.");
+    const gui::LanguageScope tooltip_language(settings->language);
+    gui::SetTooltip("English / Simplified Chinese. If Chinese appears as boxes, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc). No extra Uplift files are needed.");
   }
   ImGui::SetCursorPos(top);
   const gui::LanguageScope language_scope(settings->language);
