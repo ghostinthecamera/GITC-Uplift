@@ -158,6 +158,7 @@ To contribute or update translations, see [Contributing translations](CONTRIBUTI
   can't either, to its helper process, by itself; **Details** says where and why. **Vulkan NR at Present** (Advanced) picks one yourself.
   Only the game's own device (**Native**) runs NR inside the game's DLSS. Pick Direct3D 12 or Helper and NR moves to Present, with After
   DLSS and Before upscaling greyed out. If native NR fails only at Present, After DLSS and Before upscaling stay available.
+  Devices using either KHR or EXT buffer device addresses support the same native stages and DLSS motion vectors. Device feature additions require a game restart.
 - DXVK games count as Vulkan. dgVoodoo2 games count as 32-bit DX11 or DX12.
 
 **Tested with:** Onimusha: Way of the Sword (DX12), Final Fantasy XV (DX11), No Man's Sky (Vulkan), Lightning Returns: Final Fantasy

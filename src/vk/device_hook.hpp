@@ -20,9 +20,10 @@ struct DeviceRecord {
   std::string not_adjusted;
   // Plan 13 (design §3.6), recorded by the 64-bit half only. The instance the physical device was enumerated from (the latest
   // vkEnumeratePhysicalDevices[Groups] wins; null: Uplift did not see it, R84). `ngx_ready`: the device was created with NGX's four extensions
-  // and bufferDeviceAddress (the game's own, or Uplift's additions, Plan 19) and has timeline semaphores; `ngx_missing` names what it lacks otherwise.
+  // and bufferDeviceAddress (KHR or EXT; the game's own, or Uplift's additions, Plan 19) and has timeline semaphores; `ngx_missing` names what it lacks otherwise.
   VkInstance instance = VK_NULL_HANDLE;
   bool ngx_ready = false;
+  bool ext_buffer_device_address = false;  // native NR must resolve the EXT query and use its allocation rules on this device
   std::string ngx_missing;
   // shaderStorageImageExtendedFormats (batch 2 review, minor 2): supported by the physical device, and on the device (the game enabled
   // it, or Uplift's adjustment did). Native NR's encode shaders write an RG16F storage image, one of the extended formats.

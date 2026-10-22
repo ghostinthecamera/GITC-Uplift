@@ -1,6 +1,7 @@
 #include "vk/loader.hpp"
 
 #include <atomic>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -44,6 +45,21 @@ const Loader* Loader::Get() {
     return expected;
   }
   return loader;
+}
+
+PFN_vkVoidFunction VKAPI_CALL GetExtNgxDeviceProcAddr(VkDevice device, const char* name) {
+  const std::string_view entry(name);
+  if (entry == "vkGetBufferDeviceAddress" || entry == "vkGetBufferDeviceAddressKHR") return nullptr;
+  const Loader* const loader = Loader::Get();
+  return (loader != nullptr ? loader->get_device_proc_addr(device, name) : nullptr);
+}
+
+PFN_vkVoidFunction VKAPI_CALL GetExtNgxInstanceProcAddr(VkInstance instance, const char* name) {
+  const std::string_view entry(name);
+  if (entry == "vkGetBufferDeviceAddress" || entry == "vkGetBufferDeviceAddressKHR") return nullptr;
+  if (entry == "vkGetDeviceProcAddr") return reinterpret_cast<PFN_vkVoidFunction>(&GetExtNgxDeviceProcAddr);
+  const Loader* const loader = Loader::Get();
+  return (loader != nullptr && loader->get_instance_proc_addr != nullptr ? loader->get_instance_proc_addr(instance, name) : nullptr);
 }
 
 std::optional<Device> Device::Open(VkDevice device) {

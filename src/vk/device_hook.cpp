@@ -78,16 +78,18 @@ std::atomic<PFN_vkEnumeratePhysicalDeviceGroups> g_enumerate_groups_original{nul
 std::atomic<PFN_vkDestroyDevice> g_destroy_original{nullptr};
 std::atomic<void (*)(VkDevice)> g_destroy_callback{nullptr};
 // Plan 13: NGX's four device extensions (the snippet's own requirement list, design §1.1); native NR needs them on the device (listed by the game, or
-// added by Uplift, Plan 19).
+// added by Uplift, Plan 19). The runtime also implements EXT buffer addresses; accept that extension in place of KHR.
 constexpr const char* NGX_EXTENSIONS[] = {"VK_NVX_binary_import", "VK_NVX_image_view_handle", "VK_KHR_buffer_device_address",
                                           "VK_KHR_push_descriptor"};
 // What NGX needs that a request lacks, named ("" for nothing): its four extensions on `names` (VK_KHR_push_descriptor also when ReShade appends it),
 // bufferDeviceAddress, and timeline semaphores.
 std::string NgxLacks(std::span<const char* const> names, bool push_from_reshade, bool buffer_device_address, bool timeline) {
   std::string lacks;
+  const bool ext_address = std::ranges::any_of(names, [](std::string_view name) { return name == VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME; });
   for (const char* extension : NGX_EXTENSIONS) {
     const bool listed = std::ranges::any_of(names, [extension](const char* name) { return std::string_view(name) == extension; })
-                        || (push_from_reshade && std::string_view(extension) == "VK_KHR_push_descriptor");
+                        || (push_from_reshade && std::string_view(extension) == "VK_KHR_push_descriptor")
+                        || (ext_address && std::string_view(extension) == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
     if (!listed) {
       lacks += std::format("{}{}", (lacks.empty() ? "" : ", "), extension);
     }
@@ -183,6 +185,10 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
       .bufferDeviceAddress = VK_TRUE,
   };
+  VkPhysicalDeviceBufferDeviceAddressFeaturesEXT ext_address = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT,
+      .bufferDeviceAddress = VK_TRUE,
+  };
   VkDeviceCreateInfo without_ngx = *info;
   DeviceRecord without_ngx_record;
   std::string without_ngx_added_text;
@@ -240,6 +246,8 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
           break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT:
           buffer_device_address_features = true;
+          buffer_device_address = buffer_device_address
+                                  || (reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeaturesEXT*>(link)->bufferDeviceAddress == VK_TRUE);
           break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2:
           features2 = true;
@@ -261,12 +269,16 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     const bool add_ngx = false;
     const bool reshade_push = false;
 #endif
+    const bool game_ext_address = std::ranges::any_of(std::span<const char* const>(info->ppEnabledExtensionNames, info->enabledExtensionCount),
+                                                     [](std::string_view name) { return name == VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME; });
     bool address_supported = false;
-    if (add_ngx && !vulkan12_features && !buffer_device_address_features && loader->get_physical_device_features2 != nullptr) {
+    if (add_ngx && (game_ext_address || !vulkan12_features) && !buffer_device_address_features && loader->get_physical_device_features2 != nullptr) {
       VkPhysicalDeviceBufferDeviceAddressFeatures query = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
-      VkPhysicalDeviceFeatures2 query_features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &query};
+      VkPhysicalDeviceBufferDeviceAddressFeaturesEXT query_ext = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT};
+      VkPhysicalDeviceFeatures2 query_features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                                 .pNext = (game_ext_address ? static_cast<void*>(&query_ext) : static_cast<void*>(&query))};
       loader->get_physical_device_features2(physical, &query_features);
-      address_supported = (query.bufferDeviceAddress == VK_TRUE);
+      address_supported = ((game_ext_address ? query_ext.bufferDeviceAddress : query.bufferDeviceAddress) == VK_TRUE);
     }
     const DeviceAdjustment plan = BuildDeviceAdjustment({
         .enabled = std::span<const char* const>(info->ppEnabledExtensionNames, info->enabledExtensionCount),
@@ -305,7 +317,11 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       address.pNext = const_cast<void*>(adjusted.pNext);
       adjusted.pNext = &address;
     }
-    ngx_added = (!plan.ngx_added.empty() || plan.chain_buffer_device_address);
+    if (plan.chain_ext_buffer_device_address) {
+      ext_address.pNext = const_cast<void*>(adjusted.pNext);
+      adjusted.pNext = &ext_address;
+    }
+    ngx_added = (!plan.ngx_added.empty() || plan.chain_buffer_device_address || plan.chain_ext_buffer_device_address);
 #endif
     adjusted.enabledExtensionCount = static_cast<uint32_t>(names.size());
     adjusted.ppEnabledExtensionNames = names.data();
@@ -334,8 +350,10 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     // only a DLSS game, which needs the same, has a DLSS placement; Plan 19: with Uplift's NGX additions, and VK_KHR_push_descriptor when ReShade
     // appends it), and timeline semaphores.
     const std::span<const char* const> game_names(info->ppEnabledExtensionNames, info->enabledExtensionCount);
-    std::string ngx_missing = NgxLacks(names, reshade_push, (buffer_device_address || plan.chain_buffer_device_address), record.timeline);
+    const bool address_enabled = (buffer_device_address || plan.chain_buffer_device_address || plan.chain_ext_buffer_device_address);
+    std::string ngx_missing = NgxLacks(names, reshade_push, address_enabled, record.timeline);
     record.ngx_ready = ngx_missing.empty();
+    record.ext_buffer_device_address = (game_ext_address && address_enabled);
     if (!record.ngx_ready && config.adjust && !config.adjust_ngx) {
       // T1b: why Uplift added none of it (the native route's reason names it).
       ngx_missing += (config.ngx_turned_off_by_marker ? "; Uplift turned NGX's device additions off: the last start with them did not reach its first frame "
@@ -398,6 +416,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       without_ngx_record = record;
       without_ngx_record.adjusted = adjusted_without_ngx;
       without_ngx_record.ngx_ready = lacks.empty();
+      without_ngx_record.ext_buffer_device_address = (game_ext_address && buffer_device_address);
       without_ngx_record.ngx_missing = std::move(lacks);
       without_ngx_record.storage_extended_enabled = (storage_extended_by_game || without_ngx_features);
       without_ngx_added_text = added_text;
@@ -412,8 +431,9 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     for (const char* name : plan.ngx_added) {
       added_text += std::format("{}{}", (added_text.empty() ? "" : ", "), name);
     }
-    if (plan.chain_buffer_device_address) {
-      added_text += std::format("{}bufferDeviceAddress", (added_text.empty() ? "" : ", "));
+    if (plan.chain_buffer_device_address || plan.chain_ext_buffer_device_address) {
+      added_text += std::format("{}{}", (added_text.empty() ? "" : ", "),
+                                (plan.chain_ext_buffer_device_address ? "bufferDeviceAddress (EXT)" : "bufferDeviceAddress"));
     }
     const auto game_lists = [&game_names](std::string_view extension) {
       return std::ranges::any_of(game_names, [extension](const char* name) { return std::string_view(name) == extension; });
@@ -424,7 +444,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
                                        : "AdjustVulkanDevices is 0 in ReShade.ini");
     } else if (config.adjust_ngx && config.native_nr_chosen && !config.native_nr_latched) {  // otherwise `ngx_missing` names why nothing of NGX's was added
       if (game_lists(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
-        note("the game lists VK_EXT_buffer_device_address, which excludes VK_KHR_buffer_device_address and its feature struct");
+        note("the game uses VK_EXT_buffer_device_address instead of KHR");
       } else if ((vulkan12_features || buffer_device_address_features) && !buffer_device_address) {
         note("the game's own feature struct has bufferDeviceAddress off, and Uplift never writes the game's memory");
       } else if (!vulkan12_features && !buffer_device_address_features && !address_supported) {
@@ -465,6 +485,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     record.semaphore_win32 = false;
     record.timeline = false;
     record.ngx_ready = false;
+    record.ext_buffer_device_address = false;
     record.storage_extended_enabled = false;
     added_text.clear();
 #if defined(_WIN64)
@@ -509,6 +530,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     record.memory_win32 = false;
     record.semaphore_win32 = false;
     record.timeline = false;
+    record.ext_buffer_device_address = false;
     record.ngx_ready = false;  // Plan 13: without the timeline feature it may have added, native NR is not known to work here
     record.ngx_missing = "Uplift's device adjustment (the driver refused it)";
     record.storage_extended_enabled = false;

@@ -45,6 +45,7 @@ DeviceAdjustment BuildDeviceAdjustment(const DeviceAdjustmentInput& input) {
                              || std::ranges::any_of(adjustment.ngx_added, [](std::string_view name) { return name == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME; });
     adjustment.chain_buffer_device_address = (!input.vulkan12_features && !input.buffer_device_address_features && input.buffer_device_address_supported
                                               && !ext_address && khr_address);
+    adjustment.chain_ext_buffer_device_address = (!input.buffer_device_address_features && input.buffer_device_address_supported && ext_address);
   }
 
   adjustment.presents = listed(VK_KHR_SWAPCHAIN_EXTENSION_NAME);

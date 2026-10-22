@@ -36,6 +36,10 @@ struct Loader {
   [[nodiscard]] static const Loader* Get();
 };
 
+// NR's EXT backend must not select core/KHR functions exposed by the driver without their feature enabled. These callbacks are passed only to NGX on EXT devices.
+[[nodiscard]] PFN_vkVoidFunction VKAPI_CALL GetExtNgxDeviceProcAddr(VkDevice device, const char* name);
+[[nodiscard]] PFN_vkVoidFunction VKAPI_CALL GetExtNgxInstanceProcAddr(VkInstance instance, const char* name);
+
 // One Vulkan device's functions, resolved through the loader's vkGetDeviceProcAddr: the game's own chain, so ReShade's layer sits in front of
 // the ones it intercepts (vkCreateImage, vkDestroyImage, vkQueueSubmit) and the rest go straight to the driver.
 struct Device {

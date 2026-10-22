@@ -2058,8 +2058,8 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
                   .binding = {.instance = record->instance,
                               .physical = record->physical,
                               .device = vk_device,
-                              .get_instance_proc_addr = loader->get_instance_proc_addr,
-                              .get_device_proc_addr = loader->get_device_proc_addr},
+                              .get_instance_proc_addr = (record->ext_buffer_device_address ? &vk::GetExtNgxInstanceProcAddr : loader->get_instance_proc_addr),
+                              .get_device_proc_addr = (record->ext_buffer_device_address ? &vk::GetExtNgxDeviceProcAddr : loader->get_device_proc_addr)},
                   .adapter = adapter,
                   // Design §3.3: the frame semaphore is signalled through ReShade's queue, in the present event, where ReShade holds its lock.
                   .signal = [](void* signal_queue, VkSemaphore semaphore, uint64_t value) {
