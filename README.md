@@ -6,6 +6,10 @@ OpenGL, 64-bit and 32-bit). Drop it in, switch it on, and it works out the rest.
 
 GITC Uplift is not affiliated with NVIDIA or with ReShade.
 
+Plug of my website and camera mods (which this mod works great with)! Take shots and much more with these:  
+Documentation: https://ghostinthecamera.co.uk/  
+Mods: https://www.patreon.com/ghostinthecamera  
+
 ## What you need
 
 - An NVIDIA GeForce RTX graphics card with an up-to-date driver.
