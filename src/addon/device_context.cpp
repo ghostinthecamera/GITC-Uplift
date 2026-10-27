@@ -385,6 +385,7 @@ bool DeviceContext::NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chr
   }
   dlss_seen_ = true;
   last_main_evaluate_ = now;
+  ++main_evaluates_;
   main_snapshot_ = frame.snapshot;
   main_feature_ = frame.feature;
   if (dlss_off_.OnEvaluate(!core_hold_.Held()) && std::exchange(dlss_off_logged_, false)) {
@@ -429,10 +430,25 @@ bool DeviceContext::NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chr
   return true;
 }
 
+void DeviceContext::NoteDlssFeature(uint64_t serial) {
+  if (serial == dlss_feature_serial_) return;
+  if (dlss_feature_serial_ != 0u) {
+    pre_sr_->OweReset();
+    after_dlss_->OweReset();
+    present_reset_owed_ = true;
+    before_reset_.reset();
+  }
+  dlss_feature_serial_ = serial;
+}
+
 sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                       std::chrono::steady_clock::time_point now) {
+  if (!NoteMainEvaluate(frame, now)) {
+    before_reset_.reset();
+    return {.reason = "device removed"};
+  }
+  NoteDlssFeature(frame.serial);
   const std::optional<bool> before_reset = std::exchange(before_reset_, std::nullopt);  // this evaluate's, from BeforeDlssEvaluate
-  if (!NoteMainEvaluate(frame, now)) return {.reason = "device removed"};
   const ngx_hooks::MotionJitterOffset jitter = present_jitter_.Update(frame);
   // Amendment 7 (Key decision 7): copy the game's motion vectors on its list for the present that closes this frame: with Source = Present, and (split
   // chain) for a later group at Present.
@@ -729,6 +745,7 @@ void DeviceContext::NotePlacementChange() {
   // always logged once, NONE (with its reason) included.
   if (logged_placement_ && *logged_placement_ == placement_.placement) return;
   logged_placement_ = placement_.placement;
+  last_dlss_diagnostic_.reset();
   nr::Log(nr::LogLevel::INFO, FormatPlacementLine(placement_, main_snapshot_));
   // A new placement's work size applies at once.
   switch (placement_.placement) {
@@ -805,6 +822,7 @@ sources::AfterDlssConfig DeviceContext::DlssConfig(const sources::WorkLayout& la
 ID3D12Resource* DeviceContext::BeforeDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                   std::chrono::steady_clock::time_point now) {
   if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) return nullptr;
+  NoteDlssFeature(frame.serial);
   if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_) return nullptr;
   frame_size_ = {frame.color_region.width, frame.color_region.height};
   const sources::WorkLayout layout = SettleLayout(frame_size_, Stage::BEFORE_UPSCALING, now);  // N10: in every state
@@ -1037,6 +1055,7 @@ void DeviceContext::StampThread(uint32_t thread_id) {
 void DeviceContext::UpdateSession(std::chrono::steady_clock::time_point now) {
   const bool dlss_placement =
       (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
+  const bool was_idle = dlss_idle_;
   dlss_idle_ = (dlss_placement && last_main_evaluate_.has_value()
                 && now - *last_main_evaluate_ > std::max(2 * config_.session.grace, DLSS_IDLE_MINIMUM));
   dlss_paused_ = (last_main_evaluate_.has_value() && now - *last_main_evaluate_ > DLSS_IDLE_MINIMUM);
@@ -1056,6 +1075,16 @@ void DeviceContext::UpdateSession(std::chrono::steady_clock::time_point now) {
       (dlss_placement ? (!dlss_idle_ || later_present) : (placement_.placement == Placement::PRESENT && encoding_.has_value()));
   // Plan 15: never while held after the game's NGX shutdown (no NGX call on this device until its DLSS starts again), at any placement.
   const bool want = (config_.session.enabled && config_.nr_allowed && blocked_reason_.empty() && placement_ready && !core_hold_.Held());
+  if (nr::IsLogEnabled(nr::LogLevel::TRACE) && config_.session.enabled
+      && (!last_dlss_diagnostic_ || now - *last_dlss_diagnostic_ >= std::chrono::seconds(5) || was_idle != dlss_idle_)) {
+    last_dlss_diagnostic_ = now;
+    const int64_t age = (last_main_evaluate_ ? std::chrono::duration_cast<std::chrono::milliseconds>(now - *last_main_evaluate_).count() : -1);
+    nr::Logf(nr::LogLevel::TRACE,
+             "DLSS diagnostic context {}: {}; accepted main calls {}; last main age {} ms (-1 means none); idle threshold {} ms, idle {}, paused {}; enabled {}, allowed {}, blocked [{}], held {}, abandoned {}, placement ready {}, want NR {}, session {}",
+             static_cast<const void*>(device_.Get()), FormatPlacementLine(placement_, main_snapshot_), main_evaluates_, age,
+             std::max(2 * config_.session.grace, DLSS_IDLE_MINIMUM).count(), dlss_idle_, dlss_paused_, config_.session.enabled,
+             config_.nr_allowed, blocked_reason_, core_hold_.Held(), core_hold_.Abandoned(), placement_ready, want, nr::SessionStateName(session_->State()));
+  }
   // New Important 1 (fix round 2), replacing Important 4 (fix round 1): that guard skipped
   // SetEnabled(false) whenever the Session was OFF, whatever made `want` false -- including the
   // user's own Enabled toggle, nr_allowed, or a blocked reason. While suspended the Session is OFF

@@ -68,7 +68,7 @@ constexpr uintptr_t SNIPPET_310_8_LOG_CALLBACK_RVA = 0x1142750u;
 constexpr DWORD SNIPPET_310_8_IMAGE_SIZE = 0x9e42000u;
 constexpr uintptr_t SNIPPET_310_9_16_LOG_CALLBACK_RVA = 0x490a20u;
 constexpr DWORD SNIPPET_310_9_16_IMAGE_SIZE = 0xfe2f000u;
-// Shortfuse's FP16 build appends .nrcubin and preserves the original log slot and host logging code.
+// The FP16 compatibility build appends .nrcubin and preserves the original log slot and host logging code.
 constexpr DWORD SNIPPET_310_9_16_FP16_IMAGE_SIZE = 0x10779000u;
 
 struct ModuleReleaser {

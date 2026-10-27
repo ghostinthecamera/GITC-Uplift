@@ -3,7 +3,10 @@
 #include <d3d11.h>
 #include <d3d12.h>
 
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -102,6 +105,8 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   void BeforeRelease(NVSDK_NGX_Handle* handle) override;
   void BeforeCoreShutdown(ngx_hooks::NgxApi api, void* device, const void* caller) override;
 
+  void LogD3D12Diagnostics(std::chrono::steady_clock::time_point now);
+
   [[nodiscard]] const ngx_hooks::FeatureRegistry& Registry() const { return registry_; }
   // The add-on's destroy_device: the registry forgets that an upscaler was created on `device`.
   void DeviceDestroyed(const void* device) { registry_.OnDeviceDestroyed(device); }
@@ -148,6 +153,19 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   // float format. The record, or nullopt (refused, and not probed again until the handle is created, released or shut down).
   std::optional<ngx_hooks::FeatureRecord> AdoptD3D11Upscaler(const NVSDK_NGX_Handle* handle, ID3D12GraphicsCommandList* list,
                                                              const NVSDK_NGX_Parameter& parameters);
+
+  enum class D3D12Route : size_t { FAILED, NO_PARAMETERS, UNKNOWN_HANDLE, NOT_UPSCALER, UNTRACKED_LIST, NOT_MAIN, MAIN, COUNT };
+  void NoteD3D12Evaluate(D3D12Route route, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, NVSDK_NGX_Result result,
+                         const ngx_hooks::FeatureRecord* record, const void* device, const NVSDK_NGX_Handle* main);
+  struct D3D12Diagnostic {
+    uint64_t count = 0u;
+    std::optional<std::chrono::steady_clock::time_point> last_log;
+  };
+  std::mutex d3d12_diagnostic_mutex_;
+  std::array<D3D12Diagnostic, static_cast<size_t>(D3D12Route::COUNT)> d3d12_diagnostics_;
+  std::optional<std::chrono::steady_clock::time_point> last_d3d12_callback_;
+  std::optional<std::chrono::steady_clock::time_point> last_d3d12_main_;
+  std::optional<std::chrono::steady_clock::time_point> last_d3d12_summary_;
 
   NgxRouting& routing_;
   ngx_hooks::FeatureRegistry registry_;

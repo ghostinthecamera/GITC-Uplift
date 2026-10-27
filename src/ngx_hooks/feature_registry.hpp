@@ -85,7 +85,8 @@ class FeatureRegistry {
   // best matches the swap chain: an aspect within 1 % first, then the largest output, then the
   // earliest create. With an empty `swapchain`, the largest output. Null when no upscaler is live. Plan 18: only `api`'s features compete (an unknown device's
   // Direct3D 12 feature, a mod's, is never a Direct3D 11 device's main handle).
-  [[nodiscard]] const NVSDK_NGX_Handle* MainHandle(const void* device, nr::Size swapchain, NgxApi api = NgxApi::D3D12) const;
+  // On Direct3D 12 and Vulkan the evaluating handle may resolve an exact nonempty output-size tie; Direct3D 11 and queries without it retain the creation-order tie-break.
+  [[nodiscard]] const NVSDK_NGX_Handle* MainHandle(const void* device, nr::Size swapchain, NgxApi api = NgxApi::D3D12, const NVSDK_NGX_Handle* evaluating = nullptr) const;
 
  private:
   mutable std::shared_mutex mutex_;

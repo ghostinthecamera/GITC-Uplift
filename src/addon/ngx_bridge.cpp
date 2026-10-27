@@ -2,6 +2,7 @@
 
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <format>
 
 #include "addon/placement.hpp"
@@ -36,6 +37,52 @@ bool IsFloatHdrFormat(DXGI_FORMAT format) {
 }
 
 }  // namespace
+
+void NgxBridge::NoteD3D12Evaluate(D3D12Route route, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, NVSDK_NGX_Result result,
+                                  const ngx_hooks::FeatureRecord* record, const void* device, const NVSDK_NGX_Handle* main) {
+  if (!nr::IsLogEnabled(nr::LogLevel::TRACE)) return;
+  const auto now = std::chrono::steady_clock::now();
+  uint64_t count = 0u;
+  {
+    const std::scoped_lock lock(d3d12_diagnostic_mutex_);
+    last_d3d12_callback_ = now;
+    if (route == D3D12Route::MAIN) last_d3d12_main_ = now;
+    D3D12Diagnostic& diagnostic = d3d12_diagnostics_[static_cast<size_t>(route)];
+    count = ++diagnostic.count;
+    if (count > 4u && diagnostic.last_log && now - *diagnostic.last_log < std::chrono::seconds(5)) return;
+    diagnostic.last_log = now;
+  }
+  constexpr std::array<std::string_view, static_cast<size_t>(D3D12Route::COUNT)> reasons = {
+      "failed NGX result", "no parameters", "unknown handle", "not an upscaler", "untracked command list", "not selected main", "selected main"};
+  const ngx_hooks::FeatureRecord empty;
+  const ngx_hooks::FeatureRecord& current = (record != nullptr ? *record : empty);
+  const std::optional<ngx_hooks::FeatureRecord> selected = registry_.Find(main);
+  const ngx_hooks::FeatureRecord& chosen = (selected ? *selected : empty);
+  nr::Logf(nr::LogLevel::TRACE,
+           "DLSS diagnostic DX12 evaluate: {}; count {}; result {:#010x}; handle {}, serial {}, feature {}, create device {}, render {}x{} -> {}x{}; list {}, device {}; selected main {}, serial {}, create device {}, render {}x{} -> {}x{}",
+           reasons[static_cast<size_t>(route)], count, static_cast<uint32_t>(result), static_cast<const void*>(handle), current.serial,
+           static_cast<uint32_t>(current.feature), current.device, current.snapshot.render.width, current.snapshot.render.height,
+           current.snapshot.output.width, current.snapshot.output.height, static_cast<const void*>(list), device, static_cast<const void*>(main),
+           chosen.serial, chosen.device, chosen.snapshot.render.width, chosen.snapshot.render.height, chosen.snapshot.output.width, chosen.snapshot.output.height);
+}
+
+void NgxBridge::LogD3D12Diagnostics(std::chrono::steady_clock::time_point now) {
+  if (!nr::IsLogEnabled(nr::LogLevel::TRACE)) return;
+  std::array<uint64_t, static_cast<size_t>(D3D12Route::COUNT)> counts;
+  int64_t callback_age = -1;
+  int64_t main_age = -1;
+  {
+    const std::scoped_lock lock(d3d12_diagnostic_mutex_);
+    if (last_d3d12_summary_ && now - *last_d3d12_summary_ < std::chrono::seconds(5)) return;
+    last_d3d12_summary_ = now;
+    for (size_t index = 0u; index < counts.size(); ++index) counts[index] = d3d12_diagnostics_[index].count;
+    if (last_d3d12_callback_) callback_age = std::chrono::duration_cast<std::chrono::milliseconds>(std::max(now, *last_d3d12_callback_) - *last_d3d12_callback_).count();
+    if (last_d3d12_main_) main_age = std::chrono::duration_cast<std::chrono::milliseconds>(std::max(now, *last_d3d12_main_) - *last_d3d12_main_).count();
+  }
+  nr::Logf(nr::LogLevel::TRACE,
+           "DLSS diagnostic DX12 totals: failed {}, no parameters {}, unknown handle {}, not upscaler {}, untracked list {}, not main {}, selected main {}; last callback age {} ms, last selected main age {} ms (-1 means none; cumulative while Debug is on)",
+           counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], callback_age, main_age);
+}
 
 const void* NgxBridge::DeviceOf(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list) const {
   return (api == ngx_hooks::NgxApi::VULKAN ? routing_.DeviceOfVk(list, VK_NULL_HANDLE)
@@ -83,6 +130,11 @@ void NgxBridge::AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle*
     snapshot.output = call.submitted->output;
   }
   registry_.OnCreate(handle, call.feature, device, snapshot, call.api);
+  if (call.api == ngx_hooks::NgxApi::D3D12) {
+    nr::Logf(nr::LogLevel::TRACE, "DLSS diagnostic DX12 create: handle {}, feature {}, device {}, list {}, render {}x{} -> {}x{}",
+             static_cast<const void*>(handle), static_cast<uint32_t>(call.feature), device, static_cast<const void*>(call.list),
+             snapshot.render.width, snapshot.render.height, snapshot.output.width, snapshot.output.height);
+  }
 }
 
 void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
@@ -97,7 +149,7 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
   if (!record || !PreSrFeatureAllowed(record->feature, call->api)) return;
   const void* const device = DeviceOf(call->api, call->list);
   if (device == nullptr) return;  // a list Uplift does not track
-  if (registry_.MainHandle(device, routing_.SwapchainSize(device), call->api) != call->handle) return;  // Plan 18: within the evaluate's API
+  if (registry_.MainHandle(device, routing_.SwapchainSize(device), call->api, ((call->api == ngx_hooks::NgxApi::D3D12 || call->api == ngx_hooks::NgxApi::VULKAN) ? call->handle : nullptr)) != call->handle) return;  // Plan 18: within the evaluate's API
   if (call->api == ngx_hooks::NgxApi::D3D11) {
     call->color = routing_.BeforeMainEvaluateD3D11(device, call->list, ngx_hooks::CaptureD3D11DlssFrame(*call->parameters, call->handle, *record));
     return;
@@ -132,15 +184,35 @@ void NgxBridge::AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* 
     NoteFirstEvaluate(api, list, handle, *parameters);
   }
   if (api == ngx_hooks::NgxApi::D3D12) {
-    if (NVSDK_NGX_FAILED(result) || parameters == nullptr) return;
+    if (NVSDK_NGX_FAILED(result)) {
+      NoteD3D12Evaluate(D3D12Route::FAILED, list, handle, result, nullptr, nullptr, nullptr);
+      return;
+    }
+    if (parameters == nullptr) {
+      NoteD3D12Evaluate(D3D12Route::NO_PARAMETERS, list, handle, result, nullptr, nullptr, nullptr);
+      return;
+    }
     const std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(handle);
-    if (!record || ngx_hooks::KindOf(record->feature) != ngx_hooks::FeatureKind::UPSCALER) return;
+    if (!record) {
+      NoteD3D12Evaluate(D3D12Route::UNKNOWN_HANDLE, list, handle, result, nullptr, nullptr, nullptr);
+      return;
+    }
+    if (ngx_hooks::KindOf(record->feature) != ngx_hooks::FeatureKind::UPSCALER) {
+      NoteD3D12Evaluate(D3D12Route::NOT_UPSCALER, list, handle, result, &*record, nullptr, nullptr);
+      return;
+    }
     const void* const device = routing_.DeviceOf(list);
     if (device == nullptr) {
+      NoteD3D12Evaluate(D3D12Route::UNTRACKED_LIST, list, handle, result, &*record, nullptr, nullptr);
       NoteForeignD3D12Dlss();  // Plan 18: a list ReShade does not track
       return;
     }
-    if (registry_.MainHandle(device, routing_.SwapchainSize(device), ngx_hooks::NgxApi::D3D12) != handle) return;
+    const NVSDK_NGX_Handle* const main = registry_.MainHandle(device, routing_.SwapchainSize(device), ngx_hooks::NgxApi::D3D12, handle);
+    if (main != handle) {
+      NoteD3D12Evaluate(D3D12Route::NOT_MAIN, list, handle, result, &*record, device, main);
+      return;
+    }
+    NoteD3D12Evaluate(D3D12Route::MAIN, list, handle, result, &*record, device, main);
     routing_.OnMainEvaluate(device, list, ngx_hooks::CaptureDlssFrame(*parameters, handle, *record));
     return;
   }
@@ -183,7 +255,7 @@ void NgxBridge::AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* 
   if (ngx_hooks::KindOf(record->feature) != ngx_hooks::FeatureKind::UPSCALER) return;
   const void* const device = routing_.DeviceOfVk(list, VK_NULL_HANDLE);
   if (device == nullptr) return;  // a command buffer Uplift does not track
-  if (registry_.MainHandle(device, routing_.SwapchainSize(device), ngx_hooks::NgxApi::VULKAN) != handle) return;
+  if (registry_.MainHandle(device, routing_.SwapchainSize(device), ngx_hooks::NgxApi::VULKAN, handle) != handle) return;
   ngx_hooks::VkDlssResources copies;
   const ngx_hooks::DlssFrame frame = ngx_hooks::CaptureVkDlssFrame(*parameters, handle, *record, &copies);
   routing_.OnMainEvaluateVk(device, list, frame, copies);
@@ -260,6 +332,12 @@ std::optional<ngx_hooks::FeatureRecord> NgxBridge::AdoptD3D11Upscaler(const NVSD
 }
 
 void NgxBridge::BeforeRelease(NVSDK_NGX_Handle* handle) {
+  if (nr::IsLogEnabled(nr::LogLevel::TRACE)) {
+    if (const std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(handle); record && record->api == ngx_hooks::NgxApi::D3D12) {
+      nr::Logf(nr::LogLevel::TRACE, "DLSS diagnostic DX12 release: handle {}, serial {}, feature {}, device {}",
+               static_cast<const void*>(handle), record->serial, static_cast<uint32_t>(record->feature), record->device);
+    }
+  }
   registry_.OnRelease(handle);
 }
 

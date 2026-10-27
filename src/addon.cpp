@@ -2437,6 +2437,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
 
     const ui::Settings& settings = state.settings;
     hash_runtime_once();
+    if (device->get_api() == api::device_api::d3d12) state.bridge.LogD3D12Diagnostics(now);
     entry.context->SetBlockedReason(blocked_reason());
     if (entry.d3d11) {
       // Plan 18 (design §5, §6): a foreign Direct3D 12 DLSS device can appear at any time; the game's own device removed decides the latch window; the hooks

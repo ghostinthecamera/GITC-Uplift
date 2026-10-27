@@ -136,12 +136,13 @@ bool FeatureRegistry::UpscalerLive(const void* device, NgxApi api) const {
   });
 }
 
-const NVSDK_NGX_Handle* FeatureRegistry::MainHandle(const void* device, nr::Size swapchain, NgxApi api) const {
+const NVSDK_NGX_Handle* FeatureRegistry::MainHandle(const void* device, nr::Size swapchain, NgxApi api, const NVSDK_NGX_Handle* evaluating) const {
   const std::shared_lock lock(mutex_);
   const NVSDK_NGX_Handle* best = nullptr;
   bool best_matches = false;
   uint64_t best_area = 0u;
   uint64_t best_serial = 0u;
+  nr::Size best_output;
   for (const auto& [handle, record] : features_) {
     if (KindOf(record.feature) != FeatureKind::UPSCALER) continue;
     if (record.api != api) continue;  // Plan 18
@@ -164,6 +165,14 @@ const NVSDK_NGX_Handle* FeatureRegistry::MainHandle(const void* device, nr::Size
       best_matches = matches;
       best_area = area;
       best_serial = record.serial;
+      best_output = output;
+    }
+  }
+  if ((api == NgxApi::D3D12 || api == NgxApi::VULKAN) && evaluating != nullptr && !best_output.Empty()) {
+    const auto current = features_.find(evaluating);
+    if (current != features_.end() && current->second.api == api && KindOf(current->second.feature) == FeatureKind::UPSCALER
+        && (current->second.device == nullptr || current->second.device == device) && current->second.snapshot.output == best_output) {
+      return evaluating;
     }
   }
   return best;

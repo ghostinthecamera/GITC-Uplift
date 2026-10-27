@@ -413,6 +413,7 @@ class DeviceContext {
   // Plan 18: OnDlssEvaluate's opening, shared with DecideAfterEvaluate: the removal check (false, with the status reset, after a removal), the core hold's
   // resume, DLSS seen, the cadence and the present-starvation catch-up.
   bool NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chrono::steady_clock::time_point now);
+  void NoteDlssFeature(uint64_t serial);
   // Plan 18: the recordings of both DLSS placements on `host`'s list, with the status they set: shared by the Direct3D 12 paths (OnDlssEvaluate,
   // BeforeDlssEvaluate) and the Direct3D 11 bridge's (RecordBridgedStage). Split chain: After DLSS records stage group `group` (Before upscaling is always
   // group 0); `before_reset`, the game's reset as this evaluate's Before upscaling group already filtered it (ResetMerger passes one per window).
@@ -451,6 +452,7 @@ class DeviceContext {
   nr::Size work_size_;  // pass 1's group's, as SettleLayout last settled it
   nr::Size canvas_size_;
   NVSDK_NGX_Feature main_feature_ = NVSDK_NGX_Feature_Reserved_Unknown;
+  uint64_t dlss_feature_serial_ = 0u;
   FrameTrigger trigger_;
   ngx_hooks::FrameGenDetector frame_generation_;
   ngx_hooks::ResetMerger reset_merger_;
@@ -480,6 +482,8 @@ class DeviceContext {
   std::optional<ngx_hooks::CreateSnapshot> main_snapshot_;
   std::optional<std::chrono::steady_clock::time_point> last_present_;
   std::optional<std::chrono::steady_clock::time_point> last_main_evaluate_;
+  std::optional<std::chrono::steady_clock::time_point> last_dlss_diagnostic_;
+  uint64_t main_evaluates_ = 0u;
   std::optional<std::chrono::steady_clock::time_point> last_game_list_recording_;
   nr::Size frame_size_;
   float diffuse_white_nits_ = 0.f;

@@ -235,6 +235,7 @@ class VkDlssContext {
   VkDlssContext(vk::NrFunctions functions, VkDevice device, std::array<bool, color::VkColorPipeline::OUTPUT_VARIANTS> storage_formats);
   // Every frame's status reset, when nothing of this frame or evaluate is to report.
   void ResetFrameStatus();
+  void NoteDlssFeature(uint64_t serial);
   // The settled Session work both BeginFrame and the idle recompute need: SetEnabled, Tick, the release on OFF or FAILED.
   void UpdateSession(std::chrono::steady_clock::time_point now);
   void NotePlacementChange();
@@ -325,6 +326,7 @@ class VkDlssContext {
   bool skip_from_session_ = false;
   std::optional<ngx_hooks::CreateSnapshot> main_snapshot_;
   NVSDK_NGX_Feature main_feature_ = NVSDK_NGX_Feature_Reserved_Unknown;
+  uint64_t dlss_feature_serial_ = 0u;
   ngx_hooks::ResetMerger reset_merger_;
   ngx_hooks::MotionJitterTracker present_jitter_;
   std::optional<std::chrono::steady_clock::time_point> last_main_evaluate_;
@@ -363,7 +365,7 @@ class VkDlssContext {
   bool chain_passes_moved_ = false;   // this frame's chain moved a pass to another stage while its streams stayed (a reload, as a stream change's)
   std::string present_cannot_;        // why a later group cannot run at Present (design 6.1, Q6); empty: it can
   std::optional<bool> before_reset_;  // this evaluate's Before upscaling group's filtered reset, for the After DLSS group behind it
-  bool present_reset_owed_ = false;   // a later Present group skipped a frame: its next recording restarts its history
+  bool present_reset_owed_ = false;   // a later Present group skipped a frame or the DLSS feature changed: the next successful Present recording starts afresh
   // Fix round 1 (I1) on Vulkan: the DLSS-stage recordings of a split and the queues they went to (fix round 2, I3: VkStageWork, unit-tested), the effect
   // queue (BeginFrame's), and the other queue that keeps a later group off Present (logged once per change).
   VkStageWork stage_work_;

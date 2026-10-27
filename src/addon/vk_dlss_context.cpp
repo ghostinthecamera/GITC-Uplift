@@ -569,7 +569,7 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
       .motion_scale_y = config_.motion_scale_y,
   };
   const sources::PipelineResult result =
-      pipeline_->RecordPresent(buffer, target, controls_, (group > 0u && present_reset_owed_), present_layout_, {.slice = slices_[group], .set = group});
+      pipeline_->RecordPresent(buffer, target, controls_, present_reset_owed_, present_layout_, {.slice = slices_[group], .set = group});
   if (result.reason == "create failed" && present_create_failure_.empty()) {
     // T6 (M-4): a creation that failed at Present, not for want of memory (the Session's retry and budget handle that), ends native Present for the session.
     const nr::SessionStatus status = session_->Status();
@@ -591,9 +591,8 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
     last_present_submission_ = now;  // T6 (I-4): a device loss soon after this latches native NR off
   }
   NoteGroupResult(Stage::PRESENT, result);
-  if (group > 0u) {
-    present_reset_owed_ = (present_reset_owed_ && !result.nr_applied);
-  } else {
+  present_reset_owed_ = (present_reset_owed_ && !result.nr_applied);
+  if (group == 0u) {
     // The status follows pass 1's group: one NR frame per frame.
     nr_applied_ = result.nr_applied;
     passes_run_ = result.passes_run;
@@ -995,17 +994,30 @@ void VkDlssContext::SetOutputProblem(std::string problem) {
   output_message_ = std::move(problem);
 }
 
+void VkDlssContext::NoteDlssFeature(uint64_t serial) {
+  if (serial == dlss_feature_serial_) return;
+  if (dlss_feature_serial_ != 0u) {
+    stages_[static_cast<size_t>(Stage::BEFORE_UPSCALING)].reset_owed = true;
+    stages_[static_cast<size_t>(Stage::AFTER_DLSS)].reset_owed = true;
+    present_reset_owed_ = true;
+    before_reset_.reset();
+  }
+  dlss_feature_serial_ = serial;
+}
+
 sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, const ngx_hooks::DlssFrame& frame, const ngx_hooks::VkDlssResources& copies,
                                                       VkListState& list, std::chrono::steady_clock::time_point now) {
-  const std::optional<bool> before_reset = std::exchange(before_reset_, std::nullopt);  // split chain: this evaluate's, from BeforeDlssEvaluate
   // After a device loss Uplift never records in a game command buffer or calls the snippet again.
   if (!torn_down_ && !dropped_ && completion_->PollDeviceLost()) {
     NoteDeviceLost(now);
   }
   if (torn_down_ || dropped_ || core_shut_down_) {
+    before_reset_.reset();
     ResetFrameStatus();
     return {.reason = (core_shut_down_ ? "NGX shut down" : "device lost")};
   }
+  NoteDlssFeature(frame.serial);
+  const std::optional<bool> before_reset = std::exchange(before_reset_, std::nullopt);  // this evaluate's, from BeforeDlssEvaluate
   dlss_seen_ = true;
   last_main_evaluate_ = now;
   const ngx_hooks::MotionJitterOffset jitter = present_jitter_.Update(frame);
@@ -1309,6 +1321,7 @@ const NVSDK_NGX_Resource_VK* VkDlssContext::BeforeDlssEvaluate(VkCommandBuffer b
     NoteDeviceLost(now);
   }
   if (torn_down_ || dropped_ || core_shut_down_) return nullptr;
+  NoteDlssFeature(frame.serial);
   if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_) return nullptr;  // Before upscaling is always pass 1's group
   // v2 design §3.8 (Plan 14): the work image is the settled size of the render region at the Resolution mode, and below the floor it is padded into the floor
   // canvas (§3.9). The set is keyed on it while the render region moves (the decode upsamples: R88). N10: the Session hears the canvas in every state.
