@@ -1,10 +1,12 @@
 # GITC Uplift
 
-GITC Uplift is a virtual photography focused version of the DLSS 5 mod: NVIDIA's DLSS Neural Rendering (DLSS-NR) through ReShade,
-with greater flexibility, ease of use, stability and hassle-free compatibility across APIs (DirectX 9, 10, 11 and 12, Vulkan and
-OpenGL, 64-bit and 32-bit). Drop it in, switch it on, and it works out the rest. Switch it off and it gives its video memory back.
+**DLSS Neural Rendering through ReShade, built for performance and ease of use.**
 
-GITC Uplift is not affiliated with NVIDIA or with ReShade.
+Drop it in, switch it on, and tune the look to suit your gameplay or shot.
+
+Supports DirectX 9–12, Vulkan and OpenGL, in both 64-bit and 32-bit games.
+
+**[Download](https://github.com/ghostinthecamera/GITC-Uplift/releases/latest)** · [Illustrated guide](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide) · [Get help](https://github.com/ghostinthecamera/GITC-Uplift/issues)
 
 Plug of my website and camera mods (which this mod works great with)! Take shots and much more with these:  
 Documentation: https://ghostinthecamera.co.uk/  
@@ -12,138 +14,33 @@ Mods: https://www.patreon.com/ghostinthecamera
 
 ## What you need
 
-- An NVIDIA GeForce RTX graphics card with an up-to-date driver.
-- [ReShade](https://reshade.me) **with full add-on support** (the "Addon" version). Use the latest one: Vulkan and OpenGL games need
-  6.8 or newer.
-- NVIDIA's DLSS-NR runtime, `nvngx_dlssnr.dll`, which **you supply**. Version 310.8 remains the tested runtime for older RTX cards;
-  310.9.16 has experimental controls below and contains GPU kernels for 50-series cards only. Uplift never includes NVIDIA files.
-  You need a version appropriate for your video card.
+- An **NVIDIA GeForce RTX** graphics card with up-to-date drivers.
+- [ReShade](https://reshade.me) **with full add-on support**. Vulkan and OpenGL require version 6.8 or newer.
+- **`nvngx_dlssnr.dll`** compatible with your graphics card, supplied separately. NVIDIA files are not included.
 
-## Other DLSS5 add-ons
-
-- **Use GITC Uplift instead of other DLSS-NR add-ons**, for example RenoDX's DLSS and DLSS5 add-ons (`renodx-dlss*.addon64`): remove them
-  from ReShade's add-on folder. If one is still loaded, Uplift will not work.
-
-## Before you start
-
-- **Single-player only.** Uplift hooks into the game, and anti-cheat systems may not like that. Don't use it in online games.
-- **Antivirus** tools sometimes flag ReShade add-ons. Every release lists the SHA-256 of its files in `SHA256SUMS.txt`, or you can build
-  Uplift yourself (see "Building from source").
+Use in **single-player games only**, and remove other DLSS-NR add-ons before installing.
 
 ## Install
 
-Installation is really simple:
-1) Download the latest release from [GitHub Releases](https://github.com/ghostinthecamera/GITC-Uplift/releases).
-2) Copy everything in the release's `Addons` folder (the files and the `GITC-Uplift` folder) to where your ReShade add-ons are.
-3) Copy the `nvngx_dlssnr.dll` file into that `GITC-Uplift` folder!
-4) Copy the files in the release's `Shaders` folder to your ReShade `Shaders` folder.
+1. Download and extract the latest release.
+2. Copy everything inside **`Addons`** into your ReShade add-on folder.
+3. Put **`nvngx_dlssnr.dll`** inside the copied **`GITC-Uplift`** subfolder.
+4. Copy the contents of **`Shaders`** into your ReShade shader folder.
 
-Done!
+Your add-on folder is usually the game's folder, unless you changed `AddonPath` in `ReShade.ini`. Keep the NVIDIA DLL inside `GITC-Uplift`, not beside the game's executable.
 
-- Updating from an earlier Uplift build? Delete its `uplift.addon64`, `uplift.addon32` and `uplift-helper64.exe` first, so that two
-  copies don't load. Copy the new `Uplift.fx` over the old one too.
-- ReShade's add-on folder is the game's folder, unless `AddonPath` in the game's `ReShade.ini` points somewhere else.
+**Updating?** Replace the existing files with the new release. If you have the older files named `uplift.addon64`, `uplift.addon32` or `uplift-helper64.exe`, delete those too.
 
-## Using it
+## Switch it on
 
-1) Start the game and open ReShade (the Home key).
-2) Go to the **GITC Uplift** tab and tick **Enable**.
+1. Start the game and press **Home** to open ReShade.
+2. Open **GITC Uplift** and tick **Enable**.
 
-That's it. The card at the top always tells you what NR is doing right now. It's green when NR is working; when it isn't, the card
-says why and what to do.
+That's it.
 
-A picture guide to every setting: [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide)
+Adjust **Look** to taste. Enable **Keep faces** to help preserve facial detail, or lower **Resolution** for better performance and lower memory use.
 
-**Setup** contains these controls:
-
-- **NR stage:** **Present** works in every game and processes the finished image. **After DLSS** (in games that use DLSS) runs inside
-  the game's frame, before the HUD. **Before upscaling** is experimental.
-- **Motion vectors:** Auto picks for you. The others are DLSS (the game's own), Launchpad (iMMERSE Launchpad's), Lumenite
-  (LumeniteFX's Kernel) and None.
-- **Native mask blend mode:** selects NR's native mask combination; the default is 1.
-- **Network preset:** A: Legacy or B: Small FP8 with NR 310.9.16.
-- **Resolution:** Full looks best. Lower settings are faster and use less memory.
-
-**NR stage** and **Resolution** are independent. After DLSS reads the game's upscaled output. **Full** runs NR at that output resolution; **Quality**, **Balanced** and **Performance** process a smaller copy and apply the result across the complete output image.
-
-An option that can't work in your game right now is greyed out: hover over it to see why. Your choice is remembered and comes back by
-itself when it can.
-
-In most games, if you turn DLSS off in the game, NR moves to Present by itself and comes back when DLSS is on again.
-
-The **Look** section below lets you tune the result to taste. When you switch NR off, it frees its memory after a few seconds.
-
-With **NR 310.9.16**, **Setup → Network preset** selects **Legacy** or **Small FP8**; **Runtime default** selects Small FP8 in that
-build. Legacy remains Uplift's default. Changing the network recreates NR and resets its history. **Setup → Native mask blend mode**
-exposes the experimental modes 0–3, separately from Uplift's own mask. NR 310.8 always uses its legacy network and ignores mask blend mode.
-Once Uplift identifies a loaded 310.8 runtime, both controls are greyed out with an explanation; the network row shows Legacy. Saved choices
-are preserved for a newer runtime. Changing Runtime path applies on the next game start.
-
-Preset **A (1)** is Legacy and **B (2)** is Small FP8. Presets C-G have no weights in the supplied DLL. **Look → Style** selects the separate
-processing styles A/B/C (0/1/2), also available for independent later passes.
-
-**Details** reports each created, requested pass's network name from NVIDIA's successful feature-creation message, its number of enabled evaluation calls recorded,
-and its last successful call's style and native mask mode. It reports an unconfirmed network when the runtime's logging layout or message is
-unavailable. The count verifies successful command recording, not GPU completion or image fidelity.
-
-At **Log level → Info** (the default), search **ReShade.log** for:
-
-- `snippet loaded`: the actual runtime path and version;
-- `BuildActiveNetwork config=` and `Weight heap request`: the selected graph and weight tensor count;
-- `DLSSNR: Created feature`: the runtime-resolved preset and network, including fallback;
-- `NR diagnostic: enabled`: a successful enabled evaluation, its network, style, mask mode and bound motion/mask inputs.
-
-Small FP8's runtime name is `hnet-crazy-cuckoo-small-fp8`, preset 2, with 77 weight tensors (113,907,200 aligned bytes in the supplied build).
-The tensor allocation figure is not total VRAM. Evaluations are reported per feature, including later passes and Keep faces, and when style
-or native mask mode changes. These lines also reach ReShade.log when NR runs in the helper process.
-
-Depth and bidirectional distortion are not bound by Uplift. Native guided upsampling has no verified activation path; reduced resolution uses
-Uplift's own upsampling. Global tone and the hidden native Performance setting have no verified effect and remain hidden.
-
-The **stock** 310.9.16 DLL has no Ada GPU kernels: bypassing its architecture check alone still fails to load its FP8 network on an RTX 4090.
-The separately supplied Ada compatibility prototype executes Small FP8 using donor Ada kernels. Native mask blend mode defaults to **1**;
-mode 0 uses a different mask combination and can produce little visible change. Existing saved choices are preserved.
-Full mask-combination behavior on the compatibility runtime remains under validation: the donor pre-block kernels omit the new mask fields.
-Execution has been demonstrated at 1080p/D3D12, but fidelity against native Blackwell remains unverified.
-
-The separately supplied **compat-fp16 310.9.16 / CUDA 13.4.3** build is also supported. It keeps the same network weights and the
-310.9.16 kernel interfaces, with GPU payloads for SM75, SM86, SM89 and SM120. Uplift's native network diagnostic supports its expanded DLL layout.
-The supplied file was tested on RTX 4090 through both Direct3D 12 and native Vulkan; the other GPU generations have not been live-tested here.
-Select this DLL directly under Runtime path (Advanced), restart the game, and use Setup's network and mask-mode controls as usual. It replaces
-the selected runtime; it is not combined with Uplift's earlier experimental NVIDIA DLL patch.
-
-Native mask modes 0-3 were verified to produce different output with a native checker ControlMask in an isolated probe. Uplift forwards the mode,
-but its normal path does not bind that native mask; its existing UPLIFT_MASK remains composition after NR. Mode 1 remains the UI default.
-
-
-**Keep faces** (in Look) keeps NR's lighting and shading on characters, but stops NR reshaping their faces. It costs more:
-NR runs one more time per frame, and it needs more video memory (about 1 GB at 4K). How to tune it:
-[the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide#keep-faces).
-
-The shaders are optional:
-
-- **`Uplift.fx`** adds an `Uplift` technique: drag it in ReShade's effect list to choose where NR runs among your effects. Without it,
-  NR runs before all of them. Launchpad's and Lumenite's motion vectors need it:
-  - **Launchpad:** turn on Launchpad and put Uplift below it.
-  - **Lumenite:** turn on **LUMENITE: Kernel 2.0** and put Uplift below it. Lumenite needs the `Uplift.fx` from Uplift 1.2.0 or newer,
-    and doesn't work in DX9 games.
-  - Then set **Motion vectors** to Auto, or pick Launchpad or Lumenite. With both turned on, Auto uses Launchpad.
-- **`UpliftMask.fx`** is an example mask that limits NR to parts of the image.
-
-## Interface language
-
-Use the dropdown at the top right of the Uplift window, on the Enable/hotkey row, to select **English** or **简体中文 / Chinese**.
-English is the default. The choice is saved in the existing `ReShade.ini` (`[Uplift] Language=0` for English, `1` for Simplified Chinese).
-Translations are compiled into the addons; there are no language packs or extra files. Language changes do not restart NR or change its look.
-
-Chinese text uses ReShade's existing font support. When ReShade uses Chinese, including System Default on a Chinese Windows installation, it normally selects a compatible font automatically. If characters appear as boxes, select a Chinese-capable **Global font** in ReShade's Settings;
-Microsoft YaHei (`C:\Windows\Fonts\msyh.ttc`), when installed, covers this interface. English ReShade with this font and Chinese text was checked on ReShade 6.8.
-Uplift does not change ReShade's language or font settings automatically. The dropdown's tooltip also gives this advice in English.
-
-Technical identifiers, model names, configuration keys and diagnostic logs retain their canonical wording. The Chinese wording is based on the supplied
-community translation, integrated into the current addon.
-
-To contribute or update translations, see [Contributing translations](CONTRIBUTING.md), including how to find and fill pending English placeholders.
+The status card tells you whether Uplift is working and what to do if something needs attention. For more control, see the [illustrated guide](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide).
 
 ## What works where
 
@@ -151,22 +48,6 @@ To contribute or update translations, see [Contributing translations](CONTRIBUTI
 |---|---|---|---|---|---|---|
 | **64-bit** | ✓ + DLSS | ✓ + DLSS | ✓ | ✓ | ✓ + DLSS | ✓ |
 | **32-bit** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-
-- **✓** NR runs on the finished image, with everything in the Uplift tab.
-- **+ DLSS** In games that use DLSS, NR can also run right after DLSS inside the game's frame and use the game's own motion vectors. On
-  DX12 and Vulkan it also works with frame generation. On Vulkan, pick After DLSS yourself: Auto stays at Present (see "If you know what
-  you are doing").
-- DX11 games with DLSS added by a mod work too. If the mod runs DLSS on a DirectX 12 device of its own, NR stays at Present, and the
-  Uplift tab says so.
-- **64-bit Vulkan:** NR runs on the game's own Vulkan device. If it can't there, Uplift moves NR to a private DX12 device, and if that
-  can't either, to its helper process, by itself; **Details** says where and why. **Vulkan NR at Present** (Advanced) picks one yourself.
-  Only the game's own device (**Native**) runs NR inside the game's DLSS. Pick Direct3D 12 or Helper and NR moves to Present, with After
-  DLSS and Before upscaling greyed out. If native NR fails only at Present, After DLSS and Before upscaling stay available.
-  Devices using either KHR or EXT buffer device addresses support the same native stages and DLSS motion vectors. Device feature additions require a game restart.
-- DXVK games count as Vulkan. dgVoodoo2 games count as 32-bit DX11 or DX12.
-
-**Tested with:** Onimusha: Way of the Sword (DX12), Final Fantasy XV (DX11), No Man's Sky (Vulkan), Lightning Returns: Final Fantasy
-XIII (32-bit DX9, and DX11 through dgVoodoo2).
 
 ## If something's wrong
 
@@ -185,7 +66,7 @@ The card at the top of the Uplift tab tells you what's wrong. The usual ones:
 | NR costs a lot at a very low resolution | Set **Pass count** to 1. Below about 720p, NR's cost hardly shrinks with the image, so **Resolution** helps little there. |
 | At **Present** with **Motion vectors** on DLSS, the image shimmers when the camera moves | The game keeps its images upside down (many Unity games do). Set `RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN` to 1 in ReShade's global preprocessor definitions, as for depth effects: Uplift then turns DLSS's motion vectors the right way up. |
 | With **Keep faces** on, characters get specks or glowing spots | Tick **Show the face mask** (Advanced) and tune it: see [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide#keep-faces). |
-| "Another NR tool is running" | Remove the other DLSS5 add-on (see "Other DLSS5 add-ons") and restart the game. |
+| "Another NR tool is running" | Remove other DLSS-NR add-ons and restart the game. |
 | "The Vulkan swap chain cannot take NR's result" | Update ReShade to 6.8 (choose **Update ReShade only** in the installer). If it mentions exclusive fullscreen, use borderless or windowed mode. |
 | "Not enough address space in this 32-bit game" | Apply a 4 GB (large-address-aware) patch to the game. |
 
@@ -196,224 +77,8 @@ Still stuck? [Open an issue](https://github.com/ghostinthecamera/GITC-Uplift/iss
 - your graphics card, driver and ReShade version;
 - the game.
 
-## Known limitations
+---
 
-- If NVIDIA's NR crashes on the GPU, the game can crash too (as with any GPU crash). Restart the game, and please report it with `ReShade.log`.
+[MIT licence](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md) · [Contributing](CONTRIBUTING.md)
 
-## If you know what you are doing
-
-A release contains `gitc-uplift.addon64`, `gitc-uplift.addon32`, `gitc-uplift-helper64.exe`, `Uplift.fx` and `UpliftMask.fx`. Which files a
-game needs depends on its API and bitness, so you do not need all the files all the time, should you want to be precise for whatever
-reason.
-
-| Game | Files in ReShade's add-on folder |
-|---|---|
-| 64-bit Direct3D 10, 11 or 12, Vulkan, OpenGL | `gitc-uplift.addon64`, and `GITC-Uplift\nvngx_dlssnr.dll` |
-| 64-bit Direct3D 9 | `gitc-uplift.addon64`, `gitc-uplift-helper64.exe`, and `GITC-Uplift\nvngx_dlssnr.dll` |
-| Any 32-bit game | `gitc-uplift.addon32`, `gitc-uplift-helper64.exe`, and the (64-bit) `GITC-Uplift\nvngx_dlssnr.dll` |
-
-- `nvngx_dlssnr.dll` can also sit right next to the add-ons, or anywhere you point **Runtime path** (Advanced) at. Not next to the game's .exe: on
-  RTX 50 cards NVIDIA's DLSS loads it from there first, and Uplift can't use that copy.
-- The add-ons and `gitc-uplift-helper64.exe` must come from the same release.
-
-### ReShade for each kind of game
-
-- **DX10, 11, 12:** a normal ReShade install.
-- **DX9:** ReShade as `d3d9.dll`. NR copies each frame through memory, about 3 ms at 1080p. **Use Direct3D 9Ex** (Advanced, then
-  restart the game) brings that down to about 0.4 ms. If the game then won't start, start it again: Uplift turns the option back off.
-- **Vulkan (DXVK included):** ReShade 6.8's Vulkan layer. Run the installer, pick the game's executable and choose **Vulkan**. If it
-  finds a `ReShade.ini`, choose **Update ReShade only** (Uninstall deletes your `ReShade.ini`). A game running through DXVK must use the
-  Vulkan layer, not a `d3d9.dll` or `dxgi.dll` ReShade.
-- **OpenGL:** ReShade 6.8 as `opengl32.dll`, in the game's bitness.
-- **Old DX8 and DX9 games through dgVoodoo2:** faster than plain DX9. Put dgVoodoo2's `MS\x86\D3D9.dll` (or `D3D8.dll`) next to the game,
-  set **Output API** in `dgVoodooCpl.exe` to Direct3D 11 or "Direct3D 12 (feature level 12.0)", and install the 32-bit ReShade as
-  `dxgi.dll`. Other `d3d9.dll` wrappers (DXVK, game fixes) conflict with it.
-
-### Consistent image processing
-
-All stages and resolutions use the same processing sequence: measure/select exposure from the original source, prepare the NR input, run the configured passes, extract NR's brightness and colour changes, optionally shape/stabilize them, then compose the changes onto the original image. Each pass keeps its own controls and placement. Encoding, white normalization and available game exposure follow the selected source.
-
-Resizing is skipped when dimensions match. Reduced resolution uses linear-light area averaging before NR and the selected upsampling for the resulting changes. When active, the exposure meter samples the original source; processing-size changes restart spatial histories without snapping exposure adaptation. Metering reinitializes when its placement, encoding, resolved primaries or input normalization changes.
-
-Version 1.6.0 uses the same change-field reconstruction at full and reduced resolution, including Transfer and Colour strength on SDR. Configurations that previously used the older full-resolution reconstruction can therefore change appearance. This prioritizes consistent treatment; it does not make different source images or processing resolutions produce identical results.
-
-The common change field uses 8 bytes per processing pixel per active stage group. A previously shortcut-based Full path adds one GPU dispatch and approximately 15.8 MiB at 1080p, 28.1 MiB at 1440p or 63.3 MiB at 4K. Paths already using the change field have the same field cost. No general FPS improvement is expected.
-
-On the RTX 4090, D3D12 reported committed-resource allocation sizes of 16.875 MiB, 30 MiB and 63.75 MiB for those fields respectively. The difference is driver allocation padding; the existing budget and intermediate-byte reporting count the logical image payload above.
-
-A focused DX12 GPU check on an RTX 4090 passed 90 encode/change/compose cases covering sRGB, scene-linear BT.709, PQ, scRGB and scRGB-nl at full and reduced dimensions. It checked strengths, subrects, alpha, identity results, non-finite NR output and a zero mask against the CPU reference. Direct change-field reads and Classic sampling at 1:1 were bit-identical. The maximum relative composition error was 0.00000525. Identity cases also exercised mirrored 640x360 canvases. A further 62 GPU meter frames matched the CPU governor for smooth adaptation, explicit snaps and scene cuts. These checks used controlled NR output; they did not run NVIDIA's NR network or the hooked game placements.
-
-An isolated 4K-output shader benchmark on the same RTX 4090 (driver 610.88, 2026-10-20) measured the following GPU times. Each range covers two runs in opposite order; each run reports the median of five batches of 48 iterations after one warm-up batch. The fixture used a constant scene-linear RGBA16F source and fixed NR output, measuring encode, change extraction when required, and compute composition. It excludes NR, shaping, transport and the game.
-
-| Configuration | Before (ms) | After (ms) |
-|---|---:|---:|
-| 100%, previously using legacy reconstruction | 0.249–0.250 | 0.321–0.344 |
-| 100%, already using the change field | 0.361–0.365 | 0.312–0.340 |
-| 80%, Edge-aware | 0.486–0.492 | 0.491–0.493 |
-| 78%, Edge-aware | 0.563–0.573 | 0.568 |
-
-The former legacy path gains a dispatch; an existing full-size change path benefits from direct reads. These synthetic timings are not game frame times or an FPS prediction. Live NR, native Vulkan, the reported scene and a full before/after game-frame comparison remain unverified; the public checkout does not include the private test harness.
-
-#### Single-pass input reuse and follow-up regressions
-
-When exactly one NR pass runs in a stage group, change extraction reads the preserved FP16 input from model texture A. It avoids repeating input colour preparation and downsampling, uses the same change equations, and allocates no extra image. With multiple passes, A is overwritten by ping-pong, so extraction continues recomputing the original input. Both processing backends use this rule; the bridged and helper APIs inherit the DX12 implementation.
-
-A follow-up regression exercised the real DX12 `NrPipeline` and `Session` with an identity NR stand-in: 15 frames, 13 processing reallocations, output-only control changes, primaries/normalization changes and all three source recorders. Exposure adaptation continued across processing-size changes and reinitialized for genuine interpretation changes. An isolated copy restoring the old reset coupling failed at the first resize, confirming that this regression detects the original problem. Non-identity one-, two- and three-pass cases also passed, including per-pass strengths, overwritten-A fallback and a single-pass Keep faces twin. These checks passed on the RTX 4090 and the D3D12 software adapter; they do not execute NVIDIA's NR network.
-
-Another 60 hardware GPU cases used gradients and checkerboards with offset source/output regions, five colour encodings, padded canvases and direct/Classic/Edge-aware composition. Reused and recomputed FP16 change fields and chroma bases were bit-identical. Input preparation and final interpolation were also checked against CPU reference calculations; maximum errors were 0.00050539 absolute for encoded input and 0.00001165 relative for composition.
-
-The following measurements compare recomputation with reuse in the same updated shader, using a nonuniform 4K RGBA16F source and fixed NR output. They cover two clean sequential runs in opposite order, each taking the median of five 48-iteration batches after warm-up. Stalled/concurrent test samples were excluded. NR, shaping, transport and game rendering are excluded. This fixture differs from the constant-source benchmark above, so absolute times across the two tables are not directly comparable.
-
-| Processing scale | Recompute (ms) | Reuse (ms) | Paired saving (ms) |
-|---|---:|---:|---:|
-| 100% | 0.297–0.303 | 0.266–0.273 | 0.024–0.037 |
-| 80% | 0.425–0.450 | 0.359–0.380 | 0.066–0.070 |
-| 78% | 0.493–0.495 | 0.388–0.404 | 0.089–0.107 |
-| 67% | 0.417–0.418 | 0.339–0.346 | 0.073–0.078 |
-| 50% | 0.296–0.309 | 0.272–0.281 | 0.015–0.037 |
-
-The supported claim is reduced single-pass encode/reconstruction work in this synthetic RTX 4090 workload. These measurements do not establish a general FPS improvement. Native Vulkan execution and actual game reproduction remain unverified.
-
-### Where NR runs, and memory
-
-- **64-bit games** run NR inside the game. After the first time you switch it on, about 165 to 190 MB stays with the game until it
-  exits, so switching NR on again is instant.
-- **32-bit and DX9 games** run NR in `gitc-uplift-helper64.exe`, a small background process that Uplift starts when NR turns on. It
-  exits a few seconds after NR turns off and gives all of its memory back.
-- **64-bit Vulkan games** run NR on the game's own Vulkan device, at Present and at the DLSS stages. NVIDIA's driver keeps about 0.5 to
-  0.6 GB with the game after the first use, until the game exits. Where that can't run, NR moves to a private DX12 device inside the game,
-  and from there to `gitc-uplift-helper64.exe`, which some programs need (an emulator that reserves most of its own memory, for one).
-  Those two run NR at Present only.
-- **Vulkan devices:** Uplift adds three sharing extensions to the game's Vulkan device when the game creates it, so the GPU can keep NR
-  in step with the game, and, while **Vulkan NR at Present** is Native, the four NVIDIA extensions NR needs on the game's device. If a
-  game misbehaves with that, Uplift drops NVIDIA's extensions by itself, then the rest (`AdjustVulkanDevicesForNgx`, `AdjustVulkanDevices`,
-  below). NR then still works, a little slower.
-- **Multisampled images (MSAA):** DX9 and OpenGL need the `Uplift` technique turned on. DX10 and 32-bit DX12 can't use MSAA with NR:
-  turn it off in the game.
-
-### After DLSS image coverage
-
-Version 1.4.2 preserves the submitted DLSS render/output dimensions when NGX rewrites its parameter block during feature creation. This fixes partial-image NR coverage after DLSS observed in Forspoken. Output subrect origins and dynamic render dimensions retain their existing handling.
-
-### DLSS motion vectors at Present
-
-DLSS motion vectors at Present on DX12 and Vulkan have camera-jitter motion removed when the game marks those vectors as jittered. It uses the game's current and previous render-resolution jitter values; no new setting is required. Vectors not marked jittered keep their existing handling.
-
-For a flicker report, set **Advanced → Log level → Debug**, reproduce it for a few seconds and include `ReShade.log`. The first DLSS summary reports `jittered yes/no`; `Present motion` lines show current, older and missing copies, busy-copy counts and the latest correction. The DX12 line also counts pipeline reset hints.
-
-### Passes at different stages
-
-With **Pass count** 2 or more, each Pass section starts with **Runs at**: where in the game's frame that pass runs (by default, with the
-pass before). Passes before upscaling run at the game's render resolution, so they cost less: for example, pass 1 Before upscaling and
-pass 2 at Present. This works in native DX12 and DX11 DLSS games, and in Vulkan games with **Vulkan NR at Present** on Native;
-elsewhere every pass runs at one stage. More in [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide#passes-at-different-stages).
-
-### Experimental passes across DX12 queues
-
-**Advanced -> Allow cross-queue passes (DX12, experimental)** lets a later pass stay at Present when the game's DLSS and Present use
-separate GPU queues, including with frame generation. It is off by default; disabling it restores the existing fallback to the DLSS stage.
-This option is for 64-bit DX12 games. Vulkan keeps its existing queue restriction.
-
-Both this option and **Present with frame generation** show separate confirmation windows when enabled:
-
-- **Cross-queue passes** can lower FPS or increase latency as the passes compete for the GPU. Image differences or instability are possible.
-- **Present with frame generation** can have a dramatic cost: every Present pass also processes generated frames, potentially three or four
-  times per game-rendered frame at 3x/4x FG. This can wipe out much of frame generation's performance benefit.
-
-With FG on, both options must be enabled to keep an After DLSS / Present split across queues. Select **Enable anyway** in each warning to
-apply it; **Keep disabled**, the close button and Escape leave the setting off. No additional copies, runtime or CPU waits are added by the
-cross-queue option. The two stages use the game's existing image handoff; compatibility and cost depend on the game and runtime.
-
-### A different network per pass
-
-With NR 310.9.16, each Pass 2–10 section has **Network preset** beside **Runs at**:
-
-- **Same as pass 1** inherits the Setup network (the default, including for existing configurations).
-- **A: Legacy** or **B: Small FP8** selects that pass's network independently.
-
-For example, select Legacy in Setup with Before upscaling, then Small FP8 and After DLSS for pass 2.
-**Same look as pass 1** shares the look controls; it leaves the network and placement selections independent.
-Changing a network recreates the feature pool and resets its histories. Keep faces uses its stage group's first-pass network.
-**Details** reports the runtime-confirmed network and recorded evaluation count for every created, requested pass.
-NR 310.8 greys every network selector and displays Legacy, preserving saved selections for a newer runtime.
-Mixed chains use a conservative memory estimate; they do not promise smaller VRAM reservations for Small FP8.
-
-### Settings in ReShade.ini
-
-Settings live in the game's `ReShade.ini`, under `[Uplift]`. Most are in the Uplift tab; these are the ones you may need by hand:
-
-| Key | Default | What it does |
-|---|---|---|
-| `SnippetPath` | empty | **Runtime path** (Advanced): the full path of `nvngx_dlssnr.dll`. Empty looks in the `GITC-Uplift` folder next to the add-on, then next to the add-on, then next to the game. |
-| `UseD3D9Ex` | `0` | **Use Direct3D 9Ex** (Advanced): `1` makes DX9 games much faster (see above). A game in exclusive fullscreen then runs as a borderless window. Restart the game. |
-| `NgxHooks` | `0` | **NGX hooks** (Advanced): `1` is safe mode: nothing is hooked, and NR runs at Present only. Restart the game. |
-| `AdjustVulkanDevices` | `1` | Hidden. `0` leaves a Vulkan game's device alone (see above). Uplift sets it to `0` by itself if a game crashed while starting with it. Restart the game. |
-| `VulkanNr` | `0` | **Vulkan NR at Present** (Advanced): `0` Native, on the game's own device; `1` a private DX12 device; `2` Uplift's helper process. Each falls back to the next by itself. Native needs a game restart after you pick it. Only Native runs After DLSS and Before upscaling: `1` and `2` run at Present, and picking one in the tab moves the NR stage to Present. |
-| `AdjustVulkanDevicesForNgx` | `1` | Hidden. `0` leaves out NVIDIA's extensions for native Vulkan NR. Uplift sets it to `0` by itself if a game crashed while starting with them. Restart the game. |
-| `VulkanNativeNr` | `1` | Hidden. `0` skips native Vulkan NR. Uplift sets it to `0` by itself if native NR crashed a game; set it back to `1`, or press Clear latch, to try again. Restart the game. |
-| `AutoExposureMode` | `0` | **Auto exposure** (Fixes, with **Input exposure** Auto): `0` Blend mixes the game's exposure with Uplift's meter; `1` Switch uses the game's own. A broken game exposure always falls back to the meter. |
-| `AutoExposureBlend` | `0.8` | **Blend (game to meter)** (Fixes), 0 to 1, shown as 0-100 %: `0` is the game's exposure, `1` the meter's. Lower stays closer to the game's look; higher is more even between scenes. |
-| `GraceSeconds` | `5` | **Grace (seconds)** (Advanced): how long NR keeps its memory after you switch it off, so a quick toggle doesn't reload it. |
-| `VramCheck` | `0` | **Video memory check** (Advanced): `0` Careful leaves the game its budget and pauses NR when the game needs the memory back; `1` Relaxed lets NR go about 1 GB past the game's budget; `2` Off never checks, like other DLSS-NR add-ons. Relaxed and Off can stutter in games that really use all their video memory. |
-| `KeepFaces` | `0` | **Keep faces** (Look): `1` keeps NR's lighting and shading on characters, but stops NR reshaping their faces. NR runs one more time per frame, and needs about 1 GB more video memory at 4K. |
-| `Pass2Preset` ... `Pass10Preset` | `0` | Per-pass network: `0` inherits Setup, `1` Legacy, `2` Small FP8. Independent of look sharing; requires NR 310.9.16. |
-| `Pass2Stage` ... `Pass10Stage` | `0` | **Runs at** (each Pass section): `0` the same stage as the pass before, `1` Before upscaling, `2` After DLSS, `3` Present. A pass never runs before the pass before it, and a stage that can't run right now uses the nearest one that can. |
-| `ResolutionAfterDlss`, `ResolutionPresent` | `0` | **Resolution at After DLSS** / **at Present**: the size for the passes at that stage when pass 1 runs earlier. `0` Full, `1` Quality, `2` Balanced, `3` Performance, `4` Match game, `5` Custom. |
-| `ResolutionScaleAfterDlss`, `ResolutionScalePresent` | `100` | **Custom scale** for those, 25 to 100 (%). |
-| `KeepFacesAfterDlss`, `KeepFacesPresent` | `0` | **Keep faces here**: `1` also protects faces at that stage while Keep faces is on. One more NR run per frame. |
-| `FaceProtection` | `0` | **Face protection** (Look), 0 to 1: how much of NR's fine structure faces still get. `0` leaves faces as the game drew them; `1` lets NR's structure through. |
-| `LightingScale` | `2.5` | **Lighting scale (% of height)** (Look), 0.5 to 10: on characters, NR's change broader than this counts as lighting and is kept. Larger keeps only the broadest lighting; smaller keeps more of NR's change on faces. |
-| `ShowFaceMask` | `0` | **Show the face mask** (Advanced): `1` tints what Keep faces protects in magenta, while you tune it. |
-| `FaceMaskThreshold` | `1.5` | **Mask threshold (% of brightness)** (Advanced), 0 to 10: raise it if the mask speckles the background or bright glints; lower it if faces are only faintly tinted. |
-| `FaceMaskFull` | `6` | **Full protection at (% of brightness)** (Advanced), 1 to 30: lower it if faces are tinted only in patches; raise it if hair or clothes are tinted too. |
-| `FaceMaskStrength` | `2` | **Mask strength** (Advanced), 0.5 to 4: raise it if the mask has holes inside faces; lower it if it spreads past them. |
-| `FaceMaskSoftness` | `0.5` | **Mask softness (% of height)** (Advanced), 0.1 to 2: raise it if the mask looks blotchy or flickers; lower it if it spreads past faces. |
-| `FaceEdgeFalloff` | `0.15` | **Edge falloff (% of height)** (Advanced), 0.05 to 1: lower it if light glows past a character's outline; raise it if outlines show a dark rim. |
-| `FaceLightingDensity` | `0.3` | **Lighting density** (Advanced), 0.05 to 1: raise it if glints or bright edges leave glowing spots on characters; lower it if the lighting fades near the edges of faces. |
-| `FaceSpeckSize` | `2` | **Remove specks (px)** (Advanced), 0 to 3: bright specks up to about this size (glints, sparkles) keep NR's normal result. Larger sizes also stop protecting tiny face details, such as a far-away eye. `0` turns it off. |
-| `FaceFillSkin` | `1` | **Fill skin by colour** (Advanced): `1` grows the mask over nearby skin of the same colour, such as skin in shadow. `0` if clothes or hair of a skin-like colour turn magenta. |
-| `FaceFillRadius` | `3` | **Fill radius (% of height)** (Advanced), 0.5 to 10: how far the fill reaches from marked skin. Raise it if broad patches of skin are still uncovered; lower it if the fill spreads onto nearby surfaces. |
-| `FaceFillTolerance` | `0.04` | **Colour tolerance** (Advanced), 0.005 to 0.2: raise it if skin in shadow is still uncovered; lower it if clothes or hair turn magenta. |
-
-### More from the card
-
-- **"... does not match the Uplift add-on next to it":** the add-on and `gitc-uplift-helper64.exe` come from different releases. Copy both
-  from one.
-- **"Not enough video memory for NR"** or **"Paused: the game needs video memory":** lower **Resolution** or **Pass count**, close
-  other GPU programs, or set **Video memory check** (Advanced) to **Relaxed** or **Off**.
-- **"Keep faces paused"**: there isn't enough video memory for its extra NR run. NR keeps going without it, and Keep faces comes back by
-  itself when there is room. Lower **Resolution** or **Pass count** to make room.
-- **"Keep faces stopped"**: its extra NR run failed, and NR keeps going without it. Untick and tick **Keep faces** to try again.
-- **"NR after DLSS is off"** (after the GPU crashed): NR stays at Present. **Clear latch** allows After DLSS again from the next start.
-- Uplift's lines in `ReShade.log` start with `[Uplift]`; set **Log level** (Advanced) to Debug for more. The line
-  `Add-on "GITC Uplift" was not unregistered!` at the end of a 64-bit game's log is normal.
-
-## Building from source
-
-You need:
-
-- **Visual Studio 2026** or **2022** (17.14), any edition, with the **Desktop development with C++** workload (it includes CMake, Ninja
-  and the Windows SDK, whose `dxc.exe` compiles the Direct3D shaders);
-- the **Vulkan SDK** (it sets `VULKAN_SDK`), for its headers and the `dxc.exe` that compiles the SPIR-V shaders;
-- **Git**, and an internet connection for the first build.
-
-Then, from a command prompt (in PowerShell, type `.\build.cmd` and `.\tools\fetch_deps.cmd`):
-
-```bat
-git clone https://github.com/ghostinthecamera/GITC-Uplift.git
-cd GITC-Uplift
-tools\fetch_deps.cmd
-build.cmd release
-build.cmd release-x86
-```
-
-- `tools\fetch_deps.cmd` downloads the headers the build needs into `third_party\_deps` (NVIDIA's NGX SDK headers, no NVIDIA binaries;
-  the ReShade 6.0.0 add-on headers and Dear ImGui; MinHook).
-- `build.cmd release` makes `build\release\gitc-uplift.addon64` and `build\release\gitc-uplift-helper64.exe`.
-- `build.cmd release-x86` makes `build\release-x86\gitc-uplift.addon32`.
-- The add-ons and the helper check each other's build id, so always use the ones from the same build.
-
-## Licence
-
-GITC Uplift is released under the MIT licence: see [LICENSE](LICENSE). The licences of the code it derives from or builds against are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). NVIDIA, GeForce RTX and DLSS are trademarks of NVIDIA Corporation.
+GITC Uplift is not affiliated with NVIDIA or ReShade.

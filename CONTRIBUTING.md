@@ -37,7 +37,7 @@ Existing translations can also be corrected directly in the right-hand string. N
 
 ## Check and submit
 
-Follow the [build instructions](README.md#building-from-source), select Chinese in Uplift and inspect the affected controls, tooltips, warnings and readouts. Check for clipped text and confirm that numbers and model names are still correct. Use a Chinese-capable ReShade font as described under [Interface language](README.md#interface-language).
+Follow the [build instructions](#building-from-source), select Chinese in Uplift and inspect the affected controls, tooltips, warnings and readouts. Check for clipped text and confirm that numbers and model names are still correct. If Chinese characters appear as boxes, select a Chinese-capable **Global font** in ReShade's Settings, such as Microsoft YaHei when installed.
 
 Open a pull request against `main` with the translation changes. For wording that is unclear without context, mention the control or attach a screenshot in the pull request. Maintainers bring accepted translations into the development repository and run its localization checks before exporting a release. Those checks cover catalogue integrity and the translated settings labels, tooltips, choices and enable warnings; other interface text also needs review.
 
@@ -49,3 +49,28 @@ Every change that adds or rewords user-facing interface text must update the cat
 - When English wording changes, review its Chinese translation too. Until it has been reviewed, replace that translation with the new English text and mark it as pending. Retain an old English entry only if that wording is still used elsewhere.
 - Keep placeholders and ordering correct, and check the pending list during review. The marker is a source-maintenance convention, not an automatic string extractor or a missing-translation report.
 - Maintainers run the private localization and schema-coverage checks before release. Pending setting translations are reported by the coverage checks and need resolution before those checks pass.
+
+## Building from source
+
+You need:
+
+- **Visual Studio 2026** or **2022** (17.14), any edition, with the **Desktop development with C++** workload (it includes CMake, Ninja
+  and the Windows SDK, whose `dxc.exe` compiles the Direct3D shaders);
+- the **Vulkan SDK** (it sets `VULKAN_SDK`), for its headers and the `dxc.exe` that compiles the SPIR-V shaders;
+- **Git**, and an internet connection for the first build.
+
+Then, from a command prompt (in PowerShell, type `.\build.cmd` and `.\tools\fetch_deps.cmd`):
+
+```bat
+git clone https://github.com/ghostinthecamera/GITC-Uplift.git
+cd GITC-Uplift
+tools\fetch_deps.cmd
+build.cmd release
+build.cmd release-x86
+```
+
+- `tools\fetch_deps.cmd` downloads the headers the build needs into `third_party\_deps` (NVIDIA's NGX SDK headers, no NVIDIA binaries;
+  the ReShade 6.0.0 add-on headers and Dear ImGui; MinHook).
+- `build.cmd release` makes `build\release\gitc-uplift.addon64` and `build\release\gitc-uplift-helper64.exe`.
+- `build.cmd release-x86` makes `build\release-x86\gitc-uplift.addon32`.
+- The add-ons and the helper check each other's build id, so always use the ones from the same build.
