@@ -215,7 +215,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           }
         }
         if (descriptor.key == "PassCount" && !view.frame_generation_warning.empty()) {
+          gui::PushTextWrapPos(0.f);
           gui::TextDisabled("%s", view.frame_generation_warning.c_str());
+          gui::PopTextWrapPos();
         }
         break;
       }
@@ -548,6 +550,9 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
     changed |= DrawMotionRow(view, settings, state);
     gui::Spacing();
     changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state, true);
+    gui::Spacing();
+    widgets::GroupHeading("Passes");
+    changed |= DrawRow(*FindSetting("PassCount"), view, settings, state, true);
   }, [&] {
     widgets::GroupHeading("NR processing", "Pass 1 defaults");
     changed |= DrawRow(*FindSetting("Preset"), view, settings, state, true);

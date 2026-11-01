@@ -599,7 +599,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "PassCount",
         .kind = SettingKind::UINT,
-        .section = SettingSection::LOOK,
+        .section = SettingSection::PLACEMENT,
         .label = "Pass count",
         .tooltip = "Each extra pass runs NR again on the previous pass's output, at the full cost of one more pass. "
                    "Applies when the slider is released.",
@@ -1641,6 +1641,7 @@ void ResetSection(Settings* settings, SettingSection section) {
 }
 
 bool InDefaultsView(const SettingDescriptor& descriptor) {
+  if (descriptor.key == "PassCount") return true;  // The built-in look still previews its single pass.
   if ((descriptor.flags & (setting_flags::PASS_STAGE | setting_flags::NETWORK_PRESET)) != 0u) return false;
   switch (descriptor.section) {
     case SettingSection::LOOK:

@@ -679,6 +679,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Pass {} runs at {}: {}", "第 {} 层运行于{}：{}"},
     {"Pass {}{}{}", "第 {} 层{}{}"},
     {"Pass {}{}{}###pass{}", "第 {} 层{}{}###pass{}"},
+    {"Passes", "处理层"},
     {"Paused: the game needs video memory", "已暂停：游戏需要更多显存"},
     {"Performance", "性能"},
     {"Performance (50 %)", "性能（50 %）"},
