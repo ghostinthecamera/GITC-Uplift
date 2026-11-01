@@ -116,18 +116,22 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                                                                                : std::string_view();
   gui::BeginDisabled(!disabled_reason.empty() || read_only);
   bool changed = false;
+  if (descriptor.key == "SkinStructure") {
+    bool follows = (settings->skin_structure < 0.f);
+    if (gui::Checkbox("Skin follows Structure", &follows)) {
+      settings->skin_structure = (follows ? SKIN_SAME_AS_STRUCTURE : settings->local_structure);
+      changed = true;
+    }
+  }
   if (grouped) {
     const char* caption = descriptor.key == "ResolutionMode" ? "Working resolution" : descriptor.key == "ResolutionScale" ? "Custom scale" : label.c_str();
-    gui::AlignTextToFramePadding();
-    gui::TextUnformatted(caption);
-    if (descriptor.key == "ResolutionScale") {
-      gui::SameLine();
-      const auto percent = std::format("{:.0f}%", settings->resolution_scale);
-      float space = gui::GetContentRegionAvail().x - ImGui::CalcTextSize(percent.c_str()).x;
-      if (!IsDefault(*settings, descriptor)) space -= gui::ResetButtonWidth() + gui::GetStyle().ItemSpacing.x;
-      if (space > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + space);
-      gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_SliderGrab), "%s", percent.c_str());
-    }
+    std::string value;
+    const bool inherited_skin = descriptor.key == "SkinStructure" && settings->skin_structure < 0.f;
+    if (descriptor.key == "ResolutionScale") value = std::format("{:.0f}%", settings->resolution_scale);
+    else if (descriptor.kind == SettingKind::FLOAT) value = std::format("{:.2f}", inherited_skin ? settings->local_structure : descriptor.get(*settings));
+    gui::BeginDisabled(inherited_skin);
+    widgets::SettingCaption(caption, value, !IsDefault(*settings, descriptor));
+    gui::EndDisabled();
     changed |= DrawReset(descriptor, *settings, *state, true, view.setup);
     label = "##value";
   }
@@ -142,14 +146,12 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       changed = true;
     }
   } else if (descriptor.key == "SkinStructure") {
-    bool follows = (settings->skin_structure < 0.f);
-    if (gui::Checkbox("Skin follows Structure", &follows)) {
-      settings->skin_structure = (follows ? SKIN_SAME_AS_STRUCTURE : settings->local_structure);
-      changed = true;
-    }
+    const bool follows = settings->skin_structure < 0.f;
     gui::BeginDisabled(follows);
     float skin = (follows ? settings->local_structure : settings->skin_structure);
-    if (gui::SliderFloat(label.c_str(), &skin, 0.f, 1.f)) {
+    const bool edited = grouped ? widgets::RailSlider(label.c_str(), skin, static_cast<float>(descriptor.min), static_cast<float>(SliderMax(descriptor)), "%.2f")
+                                : gui::SliderFloat(label.c_str(), &skin, 0.f, 1.f);
+    if (edited) {
       settings->skin_structure = skin;
       changed = true;
     }
@@ -233,8 +235,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                                     : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
                                     : descriptor.key == "StabilizeMs"       ? "%.0f ms"
                                                                             : "%.2f");
-        const bool edited = grouped && descriptor.key == "ResolutionScale"
-            ? widgets::RailSlider(label.c_str(), value, static_cast<float>(descriptor.min), high, format, state->drag.resolution_scale, ImGuiSliderFlags_AlwaysClamp)
+        const bool edited = grouped
+            ? widgets::RailSlider(label.c_str(), value, static_cast<float>(descriptor.min) * shown_scale, high, format, resolution_scale ? ImGuiSliderFlags_AlwaysClamp : ImGuiSliderFlags_None)
             : gui::SliderFloat(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format);
         if (edited) {
           descriptor.set(*settings, static_cast<double>(value / shown_scale));
@@ -561,6 +563,48 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
     changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state, true);
     DrawWorkingSize(view, *settings);
     changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
+  });
+  return changed;
+}
+
+bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
+  static constexpr std::array<const char*, 2> options{"Mine", "Built-in"};
+  static constexpr std::array<std::string_view, 2> why{}, tips{"", "The built-in look, read-only; your own settings are kept."};
+  {
+    const style::GroupStyle controls;
+    if (gui::BeginTable("##compare", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings)) {
+      gui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, gui::CalcTextSize("Compare").x);
+      const float choices_width = gui::CalcTextSize(options[0]).x + gui::CalcTextSize(options[1]).x + 4.f * gui::GetStyle().FramePadding.x + gui::GetStyle().ItemInnerSpacing.x;
+      gui::TableSetupColumn("##choices", ImGuiTableColumnFlags_WidthFixed, std::max(choices_width, 12.f * gui::GetFontSize()));
+      gui::TableNextRow();
+      gui::TableSetColumnIndex(0);
+      gui::AlignTextToFramePadding();
+      gui::TextUnformatted("Compare");
+      gui::TableSetColumnIndex(1);
+      gui::PushID("Compare");
+      const int pick = widgets::SegmentedControl(nullptr, options, why, tips, state->defaults_view ? 1 : 0);
+      if (pick >= 0) state->defaults_view = pick == 1;
+      gui::PopID();
+      gui::EndTable();
+    }
+  }
+
+  bool changed = false;
+  const auto row = [&](const char* key, bool grouped = true) { changed |= DrawRow(*FindSetting(key), view, settings, state, grouped); };
+  widgets::PairedGroups("##look_groups", [&] {
+    widgets::GroupHeading("Image", "Pass 1");
+    row("Style");
+    row("Intensity");
+    row("LocalStructure");
+    row("LocalTone");
+  }, [&] {
+    widgets::GroupHeading("Characters");
+    row("AutoMask", false);
+    row("SkinStructure");
+    gui::Separator();
+    row("KeepFaces", false);
+    row("FaceProtection");
+    row("LightingScale");
   });
   return changed;
 }
@@ -958,18 +1002,8 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     ResetSection(settings, SettingSection::LOOK);
     changed = true;
   }
-  gui::PushID("Compare");
-  static constexpr std::array<const char*, 2> COMPARE_OPTIONS = {"Mine", "Built-in"};
-  const std::array<std::string_view, 2> compare_why = {};
-  const std::array<std::string_view, 2> compare_tips = {
-      std::string_view(), "The built-in look, read-only; your own settings are kept."};
-  if (const int clicked =
-          widgets::SegmentedControl("Compare", COMPARE_OPTIONS, compare_why, compare_tips, (state->defaults_view ? 1 : 0));
-      clicked >= 0) {
-    state->defaults_view = (clicked == 1);
-  }
-  gui::PopID();
-  changed |= draw_rows(SettingSection::LOOK);
+  changed |= DrawLookGroups(view, settings, state);
+  if (settings->pass_count > 1u) gui::SeparatorText("Passes");
   // Plan 5: pass 2..pass_count, each its own collapsible tree (P4-P13), so the per-pass rows do not
   // flood the panel for the common one-pass case. ui-review.md §5: the tree's own label shows its state.
   // Split chain (Task 3, design 6.2): Runs at first; on the first pass of a later stage group, that stage's Resolution (and Custom scale) and, while Keep

@@ -73,10 +73,14 @@ inline int SegmentedControl(const char* label, std::span<const char* const> opti
 }
 
 // The native slider owns mouse, keyboard and Ctrl+click input. Keep the native text field visible during typed edits.
-inline bool RailSlider(const char* label, float& value, float low, float high, const char* format, bool was_held, ImGuiSliderFlags flags) {
-  const bool typing = was_held && gui::GetIO().WantTextInput;
+inline bool RailSlider(const char* label, float& value, float low, float high, const char* format, ImGuiSliderFlags flags = 0) {
+  const ImGuiID id = gui::GetID(gui::Label(label).c_str());
+  auto* storage = gui::GetStateStorage();
+  const int frame = gui::GetFrameCount();
+  const bool typing = gui::GetIO().WantTextInput && storage->GetInt(id, -2) == frame - 1;
   if (!typing) gui::PushStyleVar(ImGuiStyleVar_Alpha, 0.f);
   const bool edited = gui::SliderFloat(label, &value, low, high, format, flags);
+  if (gui::IsItemActive()) storage->SetInt(id, frame);
   if (!typing) {
     gui::PopStyleVar();
     const ImVec2 a = gui::GetItemRectMin(), b = gui::GetItemRectMax();
@@ -139,6 +143,18 @@ inline bool SectionHeading(const char* title, const char* id, bool show_reset) {
   rule(start.x, before_title);
   rule(button_max.x + gap, start.x + width);
   return reset;
+}
+
+inline void SettingCaption(const char* label, const std::string& value, bool has_reset) {
+  gui::AlignTextToFramePadding();
+  gui::TextUnformatted(label);
+  if (value.empty()) return;
+  gui::SameLine();
+  const float reserve = has_reset ? gui::ResetButtonWidth() + gui::GetStyle().ItemSpacing.x : 0.f;
+  const float needed = ImGui::CalcTextSize(value.c_str()).x + reserve;
+  if (gui::GetContentRegionAvail().x < needed) gui::NewLine();
+  gui::SetCursorPosX(gui::GetCursorPosX() + std::max(0.f, gui::GetContentRegionAvail().x - needed));
+  gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_SliderGrab), "%s", value.c_str());
 }
 
 inline void GroupHeading(const char* title, const char* note = nullptr) {
