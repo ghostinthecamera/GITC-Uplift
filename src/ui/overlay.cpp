@@ -12,6 +12,7 @@
 
 #include "addon/reshade_api.hpp"
 #include "ui/settings_schema.hpp"
+#include "sources/work_size.hpp"
 #include "ui/localized_imgui.hpp"
 
 namespace uplift::ui {
@@ -114,6 +115,42 @@ bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayS
   return reset;
 }
 
+// The native slider owns mouse, keyboard and Ctrl+click input. Keep the native text field visible during typed edits.
+bool DrawCustomScaleSlider(float& value, const SettingDescriptor& descriptor, bool was_held) {
+  const bool typing = was_held && gui::GetIO().WantTextInput;
+  if (!typing) gui::PushStyleVar(ImGuiStyleVar_Alpha, 0.f);
+  const bool edited = gui::SliderFloat("##value", &value, static_cast<float>(descriptor.min), static_cast<float>(descriptor.max), "%.0f %%", ImGuiSliderFlags_AlwaysClamp);
+  if (!typing) {
+    gui::PopStyleVar();
+    const ImVec2 a = gui::GetItemRectMin(), b = gui::GetItemRectMax();
+    const float radius = std::min(gui::GetFontSize() * 0.43f, (b.x - a.x) * 0.25f);
+    const float y = (a.y + b.y) * 0.5f, start = a.x + radius, end = b.x - radius;
+    const float t = static_cast<float>((value - descriptor.min) / (descriptor.max - descriptor.min));
+    const float x = start + (end - start) * std::clamp(t, 0.f, 1.f);
+    auto* draw = gui::GetWindowDrawList();
+    const ImU32 accent = gui::GetColorU32(ImGuiCol_SliderGrab);
+    const float half = gui::GetFontSize() * 0.15f;
+    draw->AddRectFilled({start, y - half}, {end, y + half}, gui::GetColorU32(ImGuiCol_TextDisabled, 0.5f), half);
+    draw->AddRectFilled({start, y - half}, {x, y + half}, accent, half);
+    draw->AddCircleFilled({x, y}, radius, accent);
+    if (gui::IsItemFocused() && gui::GetIO().NavVisible) draw->AddRect(a, b, gui::GetColorU32(ImGuiCol_Text), radius);
+  }
+  return edited;
+}
+
+void DrawScaleTicks(const SettingDescriptor& descriptor) {
+  const ImVec2 pos = gui::GetCursorScreenPos();
+  const float width = gui::GetContentRegionAvail().x;
+  for (int i = 0; i < 4; ++i) {
+    const float t = i / 3.f;
+    const auto label = std::format("{:.0f}%", descriptor.min + t * (descriptor.max - descriptor.min));
+    const float text_width = ImGui::CalcTextSize(label.c_str()).x;
+    const float x = std::clamp(width * t - text_width * 0.5f, 0.f, std::max(0.f, width - text_width));
+    gui::GetWindowDrawList()->AddText({pos.x + x, pos.y}, gui::GetColorU32(ImGuiCol_TextDisabled), label.c_str());
+  }
+  gui::Dummy({0.f, gui::GetTextLineHeight()});
+}
+
 // One schema row. Returns true when the value changed. Called both from DrawOverlay (the Enable
 // row) and from its own draw_rows lambda (every other row), so it stays a free function.
 bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state, bool grouped = false) {
@@ -143,11 +180,14 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       ((descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM)
        || (descriptor.key == "ResolutionScaleAfterDlss" && settings->resolution_mode_after_dlss != ResolutionMode::CUSTOM)
        || (descriptor.key == "ResolutionScalePresent" && settings->resolution_mode_present != ResolutionMode::CUSTOM));
-  const auto later_group_scaled = [settings](const PassStageRow& row) {
-    return row.starts_group && ((row.runs == SourcePick::AFTER_DLSS && settings->resolution_mode_after_dlss != ResolutionMode::FULL)
-                                || (row.runs == SourcePick::PRESENT && settings->resolution_mode_present != ResolutionMode::FULL));
+  const auto reduced = [](ResolutionMode mode, float percent) {
+    return mode != ResolutionMode::FULL && (mode != ResolutionMode::CUSTOM || percent < 100.f);
   };
-  const bool upsampling_hidden = (descriptor.key == "Upsampling" && settings->resolution_mode == ResolutionMode::FULL
+  const auto later_group_scaled = [&](const PassStageRow& row) {
+    return row.starts_group && ((row.runs == SourcePick::AFTER_DLSS && reduced(settings->resolution_mode_after_dlss, settings->resolution_scale_after_dlss))
+                                || (row.runs == SourcePick::PRESENT && reduced(settings->resolution_mode_present, settings->resolution_scale_present)));
+  };
+  const bool upsampling_hidden = (descriptor.key == "Upsampling" && !reduced(settings->resolution_mode, settings->resolution_scale)
                                   && std::ranges::none_of(view.setup.pass_stages, later_group_scaled));
   // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
   const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
@@ -187,6 +227,14 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   if (grouped) {
     const char* caption = descriptor.key == "ResolutionMode" ? "Working resolution" : descriptor.key == "ResolutionScale" ? "Custom scale" : label.c_str();
     gui::TextUnformatted(caption);
+    if (descriptor.key == "ResolutionScale") {
+      gui::SameLine();
+      const auto percent = std::format("{:.0f}%", settings->resolution_scale);
+      float space = gui::GetContentRegionAvail().x - ImGui::CalcTextSize(percent.c_str()).x;
+      if (!IsDefault(*settings, descriptor)) space -= gui::CalcTextSize("<").x + 2.f * gui::GetStyle().FramePadding.x + gui::GetStyle().ItemSpacing.x;
+      if (space > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + space);
+      gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_SliderGrab), "%s", percent.c_str());
+    }
     changed |= DrawReset(descriptor, *settings, *state, true, view.setup);
     label = "##value";
   }
@@ -290,7 +338,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                                     : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
                                     : descriptor.key == "StabilizeMs"       ? "%.0f ms"
                                                                             : "%.2f");
-        if (gui::SliderFloat(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format)) {
+        const bool edited = grouped && descriptor.key == "ResolutionScale" ? DrawCustomScaleSlider(value, descriptor, state->drag.resolution_scale)
+            : gui::SliderFloat(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format);
+        if (edited) {
           descriptor.set(*settings, static_cast<double>(value / shown_scale));
           changed = true;
         }
@@ -442,6 +492,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty() && !view.vulkan_nr_note.empty()) {
     gui::TextDisabled("%s", view.vulkan_nr_note.c_str());
   }
+  if (grouped && descriptor.key == "ResolutionScale") DrawScaleTicks(descriptor);
   if (!grouped) changed |= DrawReset(descriptor, *settings, *state, false, view.setup);
   gui::EndDisabled();
   gui::PopID();
@@ -566,6 +617,35 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
   return changed;
 }
 
+void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
+  nr::Size input = view.first_stage_input;
+  if (input.Empty() && view.setup.stage == SourcePick::PRESENT) input = view.output_size;
+  nr::Size size = view.first_stage_canvas;
+  if (settings.resolution_mode == ResolutionMode::CUSTOM && !input.Empty()) {
+    const double scale = settings.resolution_scale / 100.0;
+    size = sources::WorkSize(input.width * scale, input.height * scale, input);
+    if (view.setup.stage == SourcePick::BEFORE_UPSCALING) size = sources::CanvasSize(size);
+  } else if (size.Empty() && settings.resolution_mode == ResolutionMode::FULL && view.setup.stage == SourcePick::PRESENT) {
+    size = input;
+  }
+  const bool pending = !size.Empty() && !view.first_stage_canvas.Empty() && size != view.first_stage_canvas;
+  gui::Separator();
+  gui::TextUnformatted(pending ? "Target NR size" : "NR working size");
+  const std::string dimensions = size.Empty() ? gui::Display("Unknown") : std::format("{} × {}", size.width, size.height);
+  const float remaining = gui::GetContentRegionAvail().x - ImGui::CalcTextSize(dimensions.c_str()).x;
+  const float x = gui::GetCursorPosX() + remaining;
+  if (remaining >= gui::CalcTextSize(pending ? "Target NR size" : "NR working size").x + gui::GetStyle().ItemSpacing.x) {
+    gui::SameLine(); gui::SetCursorPosX(x);
+  }
+  ImGui::TextUnformatted(dimensions.c_str());
+  if (!view.output_size.Empty()) {
+    const std::string output = std::format("{}  {} × {}", gui::Display("Output"), view.output_size.width, view.output_size.height);
+    const float indent = gui::GetContentRegionAvail().x - ImGui::CalcTextSize(output.c_str()).x;
+    if (indent > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + indent);
+    gui::TextDisabled("%s", output.c_str());
+  }
+}
+
 bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
   const float em = gui::GetFontSize();
   const bool paired = gui::GetContentRegionAvail().x >= 44.f * em;
@@ -620,6 +700,7 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
     gui::Spacing();
     changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state, true);
     changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state, true);
+    DrawWorkingSize(view, *settings);
     changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
     gui::PopItemWidth();
     gui::PopStyleVar(2);
@@ -702,6 +783,8 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
     state->activity_since = {};
     state->activity_seconds = 0.0;
   }
+  view->first_stage_input = facts.frame;
+  view->first_stage_canvas = facts.canvas.Empty() ? facts.work : facts.canvas;
   view->setup = state->setup_settle.Update(ResolveSetup(facts), now);
   if (view->card.working) {
     view->live = BuildLiveCard(facts, view->setup);

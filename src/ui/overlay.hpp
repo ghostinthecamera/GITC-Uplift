@@ -22,6 +22,7 @@ struct OverlayView {
   std::string details_backend, details_note;
   color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
   nr::Size output_size;
+  nr::Size first_stage_input, first_stage_canvas;
   bool lumenite_motion = false;
   struct Activity { uint64_t real = 0, reshade = 0, passes = 0; };
   std::optional<Activity> activity;

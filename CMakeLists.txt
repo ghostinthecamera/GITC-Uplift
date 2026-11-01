@@ -347,6 +347,7 @@ else()
 
 # Plan 9: the 32-bit add-on's own code. No NGX include path, no shaders, no D3D12 pipeline.
 add_library(uplift_ui32 STATIC
+  src/sources/work_size.cpp
   src/nr/log.cpp src/color/encoding.cpp src/look/look_math.cpp
   src/ui/localization.cpp src/ui/settings.cpp src/ui/settings_schema.cpp src/ui/controls_coalescer.cpp src/ui/status_text.cpp
   src/addon/frame_trigger.cpp src/addon/swapchain_selector.cpp src/addon/launchpad_link.cpp
