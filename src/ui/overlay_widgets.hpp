@@ -244,10 +244,12 @@ inline bool Disclosure(const char* title, const char* hint = nullptr, const char
 
 inline void SettingCaption(const char* label, const std::string& value, bool has_reset) {
   gui::AlignTextToFramePadding();
+  const float reserve = has_reset ? gui::ResetButtonWidth() + gui::GetStyle().ItemSpacing.x : 0.f;
+  if (value.empty() && has_reset) gui::PushTextWrapPos(gui::GetCursorPosX() + std::max(gui::GetFontSize(), gui::GetContentRegionAvail().x - reserve));
   gui::TextUnformatted(label);
+  if (value.empty() && has_reset) gui::PopTextWrapPos();
   if (value.empty()) return;
   gui::SameLine();
-  const float reserve = has_reset ? gui::ResetButtonWidth() + gui::GetStyle().ItemSpacing.x : 0.f;
   const float needed = ImGui::CalcTextSize(value.c_str()).x + reserve;
   if (gui::GetContentRegionAvail().x < needed) gui::NewLine();
   gui::SetCursorPosX(gui::GetCursorPosX() + std::max(0.f, gui::GetContentRegionAvail().x - needed));

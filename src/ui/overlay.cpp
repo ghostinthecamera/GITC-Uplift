@@ -27,6 +27,7 @@ bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayS
   if (descriptor.section == SettingSection::TOP || IsDefault(settings, descriptor)) return false;
   gui::SameLine();
   if (align_right) {
+    if (gui::GetContentRegionAvail().x + 1.f < gui::ResetButtonWidth()) gui::NewLine();
     const float remaining = gui::GetContentRegionAvail().x - gui::ResetButtonWidth();
     if (remaining > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + remaining);
   }

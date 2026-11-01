@@ -35,13 +35,17 @@ void Arrow(ImDrawList& draw, ImVec2 from, ImVec2 to, ImU32 color, float head) {
 
 bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state) {
   gui::PushID("Source");
+  const bool can_reset = !IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"));
+  const float width_needed = gui::CalcTextSize("Choose a stage for pass 1").x + (can_reset ? gui::ResetButtonWidth() + style::RowGap() : 0.f);
   gui::AlignTextToFramePadding();
   gui::TextUnformatted("NR stage");
   gui::SameLine();
+  if (gui::GetContentRegionAvail().x < width_needed) gui::NewLine();
   gui::TextDisabled("Choose a stage for pass 1");
   bool changed = false;
-  if (!IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"))) {
+  if (can_reset) {
     gui::SameLine();
+    if (gui::GetContentRegionAvail().x < gui::ResetButtonWidth()) gui::NewLine();
     if (gui::ResetButton()) {
       const auto pick = view.dlss_explicit ? SourcePick::PRESENT : SourcePick::AFTER_DLSS;
       SetSourcePick(settings, pick, view.dlss_explicit);
