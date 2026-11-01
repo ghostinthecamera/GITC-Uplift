@@ -5,7 +5,7 @@
 #include <format>
 #include <string>
 
-#include "ui/localized_imgui.hpp"
+#include "ui/overlay_style.hpp"
 #include "ui/settings_schema.hpp"
 
 namespace uplift::ui {
@@ -29,12 +29,6 @@ void Arrow(ImDrawList& draw, ImVec2 from, ImVec2 to, ImU32 color, float head) {
   } else {
     draw.AddTriangleFilled(to, {to.x - head * 1.6f, to.y - head}, {to.x - head * 1.6f, to.y + head}, color);
   }
-}
-
-ImVec4 RunColor(uint32_t first, size_t stage) {
-  if (first == 0) return {0.32f, 0.82f, 0.72f, 1.f};
-  if (stage == 1) return {0.71f, 0.58f, 0.91f, 1.f};
-  return {0.91f, 0.70f, 0.42f, 1.f};
 }
 
 }  // namespace
@@ -67,9 +61,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
   const float height = em * 3.0f, pitch = cell + gap, row = em * 9.6f;
   const float button_h = em * 2.35f, hook_y = em * 3.f;
   const float button_w = std::max(1.f, std::min(9.2f * em, pitch - em * 0.28f));
-  const float total_height = (folded ? row : 0.f) + height * 0.5f + hook_y + button_h + em * 2.55f;
-  gui::Dummy({width, total_height});
-  const ImVec2 end = gui::GetCursorScreenPos();
+  float bottom = origin.y;
   ImDrawList& draw = *gui::GetWindowDrawList();
   const ImU32 wire = gui::GetColorU32(ImGuiCol_TextDisabled);
   const ImU32 ink = gui::GetColorU32(ImGuiCol_Text);
@@ -135,16 +127,14 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     if (source == SourcePick::PRESENT && why == FG_PRESENT_OFF_REASON) why = {};
     if (i == 2 && !view.before_fg_unavailable.empty()) why = view.before_fg_unavailable;
     const auto run = view.stage_runs[i];
-    const ImVec4 color = RunColor(run.first, i);
+    const ImVec4 color = style::PassAccent(run.first, i);
     gui::PushID(static_cast<int>(i));
     gui::SetCursorScreenPos({x - button_w * 0.5f, y});
     gui::PushStyleVar(ImGuiStyleVar_FrameRounding, button_h * 0.5f);
     gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, selected == i ? 2.f : 1.f);
     gui::PushStyleColor(ImGuiCol_Border, run.count ? color : gui::GetStyleColorVec4(selected == i ? ImGuiCol_Text : ImGuiCol_TextDisabled));
     if (run.count) {
-      ImVec4 fill = gui::GetStyleColorVec4(ImGuiCol_WindowBg);
-      fill.x = fill.x * 0.78f + color.x * 0.22f; fill.y = fill.y * 0.78f + color.y * 0.22f; fill.z = fill.z * 0.78f + color.z * 0.22f;
-      gui::PushStyleColor(ImGuiCol_Button, fill);
+      gui::PushStyleColor(ImGuiCol_Button, style::SelectedFill(color));
     }
     std::string label = gui::Display(NR_STAGE_NAMES[i]);
     if (i == 2 && ImGui::CalcTextSize(label.c_str()).x + 2.f * gui::GetStyle().FramePadding.x > button_w) label = gui::Display("Before\nFramegen");
@@ -158,10 +148,14 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     gui::PopStyleVar(2);
     gui::PopID();
 
+    float stage_bottom = y + button_h;
     if (run.count) {
       const std::string passes = run.count == 1 ? std::format("P{}  x1", run.first + 1) : std::format("P{}-{}  x{}", run.first + 1, run.first + run.count, run.count);
-      CenterText(draw, {x, y + button_h + em * 0.7f}, gui::GetColorU32(color), passes);
+      const float text_top = stage_bottom + gui::GetStyle().ItemInnerSpacing.y;
+      CenterText(draw, {x, text_top + gui::GetTextLineHeight() * 0.5f}, gui::GetColorU32(color), passes);
+      stage_bottom = text_top + gui::GetTextLineHeight();
     }
+    bottom = std::max(bottom, stage_bottom);
     if (!clicked) continue;
     if (i == 3 && settings->fg_present != Settings::FgPresent::AFTER) {
       state->confirm_present_stage = true;
@@ -173,7 +167,8 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
       changed = true;
     }
   }
-  gui::SetCursorScreenPos(end);
+  gui::SetCursorScreenPos(origin);
+  gui::Dummy({width, bottom - origin.y});
   gui::PopID();
   return changed;
 }

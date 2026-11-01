@@ -13,82 +13,10 @@
 #include "addon/reshade_api.hpp"
 #include "ui/settings_schema.hpp"
 #include "sources/work_size.hpp"
-#include "ui/localized_imgui.hpp"
+#include "ui/overlay_widgets.hpp"
 
 namespace uplift::ui {
 namespace {
-
-// ui-review.md §3 (user decision) and §4.3: every row with three or fewer short choices -- Source,
-// Motion vectors, Compare, Model, Upsampling, Stabilise, NR mask, UI correction and any other CHOICE row
-// this short -- draws as a segmented control instead of RadioButton (which sizes to its text) or a
-// Combo, so every option is equally sized and the row's total width matches CalcItemWidth(), lining up
-// with the sliders and combos above and below it. `why[i]` non-empty greys option `i`; its tooltip
-// starts "Unavailable here: <why[i]>", then `tips[i]`. The row label sits on the right, at the same x a
-// slider's label would sit at (ui-review.md §4.3's RadioRow sketch, adapted to draw buttons). Returns
-// the clicked option, or -1.
-int RadioRow(const char* label, std::span<const char* const> options, std::span<const std::string_view> why,
-             std::span<const std::string_view> tips, int selected, std::span<const size_t> display_order = {}) {
-  const ImGuiStyle& style = gui::GetStyle();
-  const float total_width = label ? gui::CalcItemWidth() : gui::GetContentRegionAvail().x;
-  const float gap = style.ItemInnerSpacing.x;
-  const size_t count = options.size();
-  float labels_width = 0.f;
-  if (!label) {
-    for (const char* option : options) labels_width += gui::CalcTextSize(option).x + 2.f * style.FramePadding.x;
-  }
-  const float button_width = (total_width - static_cast<float>(count - 1u) * gap) / static_cast<float>(count);
-  const float label_x = gui::GetCursorPosX() + total_width + gap;
-  int clicked = -1;
-  for (size_t column = 0u; column < count; ++column) {
-    const size_t index = display_order.empty() ? column : display_order[column];
-    if (column > 0u) {
-      gui::SameLine(0.f, gap);
-    }
-    gui::PushID(static_cast<int>(index));
-    const bool selected_option = (selected == static_cast<int>(index));
-    if (selected_option) {
-      gui::PushStyleColor(ImGuiCol_Button, gui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-    }
-    gui::BeginDisabled(!why[index].empty());
-    float width = button_width;
-    if (!label && labels_width > 0.f) {
-      const float inner = std::max(1.f, total_width - (count - 1u) * gap);
-      const float need = gui::CalcTextSize(options[index]).x + 2.f * style.FramePadding.x;
-      width = inner >= labels_width ? need + (inner - labels_width) / count : inner * need / labels_width;
-    }
-    if (gui::Button(options[index], ImVec2(width, 0.f))) {
-      clicked = static_cast<int>(index);
-    }
-    if (!label && selected_option) {
-      const auto a = gui::GetItemRectMin(), b = gui::GetItemRectMax();
-      gui::GetWindowDrawList()->AddLine({a.x + 2.f, b.y - 1.f}, {b.x - 2.f, b.y - 1.f}, gui::GetColorU32(ImGuiCol_SliderGrab), 2.f);
-    }
-    gui::EndDisabled();
-    if (selected_option) {
-      gui::PopStyleColor();
-    }
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      std::string tooltip;
-      if (!why[index].empty()) {
-        tooltip = std::format("Unavailable here: {}", why[index]);
-        if (!tips[index].empty()) {
-          tooltip += "\n";
-        }
-      }
-      tooltip += tips[index];
-      if (!tooltip.empty()) {
-        gui::SetTooltip("%s", tooltip.c_str());
-      }
-    }
-    gui::PopID();
-  }
-  if (label) {
-    gui::SameLine();
-    gui::SetCursorPosX(std::max(gui::GetCursorPosX(), label_x));
-    gui::TextUnformatted(label);
-  }
-  return clicked;
-}
 
 // Plan 14 (R90): the tooltip line of a highlighted option while the highlight is not the stored preference (what runs differs from what ReShade.ini holds).
 std::string SavedNote(std::string_view preference) {
@@ -113,42 +41,6 @@ bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayS
     if (descriptor.key == "MotionVectors") state.setup_settle.ClickedBest(SetupRow::MOTION, static_cast<uint32_t>(MotionPick::DLSS), setup, true);
   }
   return reset;
-}
-
-// The native slider owns mouse, keyboard and Ctrl+click input. Keep the native text field visible during typed edits.
-bool DrawCustomScaleSlider(float& value, const SettingDescriptor& descriptor, bool was_held) {
-  const bool typing = was_held && gui::GetIO().WantTextInput;
-  if (!typing) gui::PushStyleVar(ImGuiStyleVar_Alpha, 0.f);
-  const bool edited = gui::SliderFloat("##value", &value, static_cast<float>(descriptor.min), static_cast<float>(descriptor.max), "%.0f %%", ImGuiSliderFlags_AlwaysClamp);
-  if (!typing) {
-    gui::PopStyleVar();
-    const ImVec2 a = gui::GetItemRectMin(), b = gui::GetItemRectMax();
-    const float radius = std::min(gui::GetFontSize() * 0.43f, (b.x - a.x) * 0.25f);
-    const float y = (a.y + b.y) * 0.5f, start = a.x + radius, end = b.x - radius;
-    const float t = static_cast<float>((value - descriptor.min) / (descriptor.max - descriptor.min));
-    const float x = start + (end - start) * std::clamp(t, 0.f, 1.f);
-    auto* draw = gui::GetWindowDrawList();
-    const ImU32 accent = gui::GetColorU32(ImGuiCol_SliderGrab);
-    const float half = gui::GetFontSize() * 0.15f;
-    draw->AddRectFilled({start, y - half}, {end, y + half}, gui::GetColorU32(ImGuiCol_TextDisabled, 0.5f), half);
-    draw->AddRectFilled({start, y - half}, {x, y + half}, accent, half);
-    draw->AddCircleFilled({x, y}, radius, accent);
-    if (gui::IsItemFocused() && gui::GetIO().NavVisible) draw->AddRect(a, b, gui::GetColorU32(ImGuiCol_Text), radius);
-  }
-  return edited;
-}
-
-void DrawScaleTicks(const SettingDescriptor& descriptor) {
-  const ImVec2 pos = gui::GetCursorScreenPos();
-  const float width = gui::GetContentRegionAvail().x;
-  for (int i = 0; i < 4; ++i) {
-    const float t = i / 3.f;
-    const auto label = std::format("{:.0f}%", descriptor.min + t * (descriptor.max - descriptor.min));
-    const float text_width = ImGui::CalcTextSize(label.c_str()).x;
-    const float x = std::clamp(width * t - text_width * 0.5f, 0.f, std::max(0.f, width - text_width));
-    gui::GetWindowDrawList()->AddText({pos.x + x, pos.y}, gui::GetColorU32(ImGuiCol_TextDisabled), label.c_str());
-  }
-  gui::Dummy({0.f, gui::GetTextLineHeight()});
 }
 
 // One schema row. Returns true when the value changed. Called both from DrawOverlay (the Enable
@@ -244,7 +136,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     static constexpr std::array<const char*, 4> modes{"0", "1", "2", "3"};
     const std::array<std::string_view, 4> why{disabled_reason, disabled_reason, disabled_reason, disabled_reason};
     const std::array<std::string_view, 4> tips{descriptor.tooltip, descriptor.tooltip, descriptor.tooltip, descriptor.tooltip};
-    const int clicked = RadioRow(nullptr, modes, why, tips, static_cast<int>(settings->mask_blend_mode));
+    const int clicked = widgets::SegmentedControl(nullptr, modes, why, tips, static_cast<int>(settings->mask_blend_mode));
     if (clicked >= 0) {
       descriptor.set(*settings, clicked);
       changed = true;
@@ -339,7 +231,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                                     : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
                                     : descriptor.key == "StabilizeMs"       ? "%.0f ms"
                                                                             : "%.2f");
-        const bool edited = grouped && descriptor.key == "ResolutionScale" ? DrawCustomScaleSlider(value, descriptor, state->drag.resolution_scale)
+        const bool edited = grouped && descriptor.key == "ResolutionScale"
+            ? widgets::RailSlider(label.c_str(), value, static_cast<float>(descriptor.min), high, format, state->drag.resolution_scale, ImGuiSliderFlags_AlwaysClamp)
             : gui::SliderFloat(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format);
         if (edited) {
           descriptor.set(*settings, static_cast<double>(value / shown_scale));
@@ -395,7 +288,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           // Show FG placements in pipeline order while retaining the stored values used by existing presets.
           static constexpr size_t fg_order[]{static_cast<size_t>(Settings::FgPresent::OFF), static_cast<size_t>(Settings::FgPresent::BEFORE), static_cast<size_t>(Settings::FgPresent::AFTER)};
           const std::span<const size_t> order = descriptor.key == "PresentWithFrameGen" ? std::span<const size_t>{fg_order} : std::span<const size_t>{};
-          if (const int clicked = RadioRow(grouped ? nullptr : label.c_str(), options, why_span, tips_span, value, order); clicked >= 0) {
+          if (const int clicked = widgets::SegmentedControl(grouped ? nullptr : label.c_str(), options, why_span, tips_span, value, order); clicked >= 0) {
             if (descriptor.key == "PresentWithFrameGen" && clicked == static_cast<int>(Settings::FgPresent::AFTER)) {
               state->confirm_present_stage = false;
               state->enable_warning_key = descriptor.key;
@@ -493,7 +386,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty() && !view.vulkan_nr_note.empty()) {
     gui::TextDisabled("%s", view.vulkan_nr_note.c_str());
   }
-  if (grouped && descriptor.key == "ResolutionScale") DrawScaleTicks(descriptor);
+  if (grouped && descriptor.key == "ResolutionScale") widgets::PercentTicks(descriptor.min, descriptor.max);
   if (!grouped) changed |= DrawReset(descriptor, *settings, *state, false, view.setup);
   gui::EndDisabled();
   gui::PopID();
@@ -610,7 +503,7 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
   gui::AlignTextToFramePadding();
   gui::TextUnformatted("Motion vectors");
   bool changed = DrawReset(*FindSetting("MotionVectors"), *settings, *state, true, view.setup);
-  if (const int clicked = RadioRow(nullptr, OPTIONS, why, tips, shown); clicked >= 0) {
+  if (const int clicked = widgets::SegmentedControl(nullptr, OPTIONS, why, tips, shown); clicked >= 0) {
     SetMotionPick(settings, static_cast<MotionPick>(clicked));
     state->setup_settle.Clicked(SetupRow::MOTION, static_cast<uint32_t>(clicked));
     changed = true;
@@ -649,72 +542,21 @@ void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
 }
 
 bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
-  const float em = gui::GetFontSize();
-  const bool paired = gui::GetContentRegionAvail().x >= 44.f * em;
   bool changed = false;
-  gui::PushStyleVar(ImGuiStyleVar_CellPadding, {0.75f * em, 0.55f * em});
-  if (gui::BeginTable("##setup_groups", paired ? 3 : 1, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX | ImGuiTableFlags_NoSavedSettings)) {
-    gui::TableSetupColumn("##inputs", ImGuiTableColumnFlags_WidthStretch);
-    if (paired) {
-      gui::TableSetupColumn("##gap", ImGuiTableColumnFlags_WidthFixed, 1.f);
-      gui::TableSetupColumn("##processing", ImGuiTableColumnFlags_WidthStretch);
-    }
-    const ImU32 surface = gui::GetColorU32(ImGuiCol_Text, 0.065f);
-    const ImVec4 accent = {0.32f, 0.82f, 0.72f, 1.f};
-    const auto& base = gui::GetStyleColorVec4(ImGuiCol_WindowBg);
-    const ImVec4 active = {base.x * 0.72f + accent.x * 0.28f, base.y * 0.72f + accent.y * 0.28f, base.z * 0.72f + accent.z * 0.28f, 1.f};
-    gui::PushStyleColor(ImGuiCol_Button, base);
-    gui::PushStyleColor(ImGuiCol_FrameBg, base);
-    gui::PushStyleColor(ImGuiCol_ButtonActive, active);
-    gui::PushStyleColor(ImGuiCol_SliderGrab, accent);
-    gui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
-    const float pad = em * 0.12f;
-    const ImGuiStyle& style = gui::GetStyle();
-    gui::PushStyleVar(ImGuiStyleVar_FramePadding, {style.FramePadding.x + pad, style.FramePadding.y + pad});
-    gui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, {style.ItemInnerSpacing.x + pad, style.ItemInnerSpacing.y});
-    gui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {style.ItemSpacing.x, style.ItemSpacing.y + pad});
-    gui::PushStyleVar(ImGuiStyleVar_FrameRounding, em * 0.28f);
-    gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
-    gui::TableNextRow();
-    gui::TableSetColumnIndex(0);
-    gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, surface);
-    gui::AlignTextToFramePadding();
-    gui::TextUnformatted("Frame inputs");
-    gui::Separator();
-    gui::PushItemWidth(-1.f);
+  widgets::PairedGroups("##setup_groups", [&] {
+    widgets::GroupHeading("Frame inputs");
     changed |= DrawMotionRow(view, settings, state);
     gui::Spacing();
     changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state, true);
-    gui::PopItemWidth();
-
-    if (paired) {
-      gui::TableSetColumnIndex(2);
-    } else {
-      gui::TableNextRow(ImGuiTableRowFlags_None, em * 0.5f);
-      gui::TableNextRow();
-      gui::TableSetColumnIndex(0);
-    }
-    gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, surface);
-    gui::AlignTextToFramePadding();
-    gui::TextUnformatted("NR processing");
-    gui::SameLine();
-    const float space = gui::GetContentRegionAvail().x - gui::CalcTextSize("Pass 1 defaults").x;
-    if (space > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + space);
-    gui::TextDisabled("Pass 1 defaults");
-    gui::Separator();
-    gui::PushItemWidth(-1.f);
+  }, [&] {
+    widgets::GroupHeading("NR processing", "Pass 1 defaults");
     changed |= DrawRow(*FindSetting("Preset"), view, settings, state, true);
     gui::Spacing();
     changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state, true);
     changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state, true);
     DrawWorkingSize(view, *settings);
     changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
-    gui::PopItemWidth();
-    gui::PopStyleVar(5);
-    gui::PopStyleColor(5);
-    gui::EndTable();
-  }
-  gui::PopStyleVar();
+  });
   return changed;
 }
 
@@ -978,8 +820,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   }
 
   if (!view.safety_locks.empty()) {
-    const auto& bg = gui::GetStyleColorVec4(ImGuiCol_WindowBg);
-    const ImVec4 red = bg.x + bg.y + bg.z > 1.5f ? ImVec4(0.72f, 0.08f, 0.08f, 1.f) : ImVec4(1.f, 0.42f, 0.39f, 1.f);
+    const ImVec4 red = style::SafetyRed();
     const ImVec2 warning_start = gui::GetCursorScreenPos();
     const float inset = gui::GetFontSize() * 0.7f;
     gui::Indent(inset);
@@ -1021,7 +862,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   if (card.working) {
     // Plan 14 (design §1): green while NR works, three rows that say what Setup highlights (keys muted on the left, values in normal text from one column),
     // one muted Why line for a temporary fallback (else the note), and the footer. The height above is unchanged; whatever does not fit is left out.
-    gui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.f), "%s", card.title.c_str());
+    gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_CheckMark), "%s", card.title.c_str());
     const float value_x = gui::GetCursorPosX() + gui::CalcTextSize("Motion vectors").x + 2.f * gui::GetStyle().ItemSpacing.x;
     const auto row = [value_x](const char* key, const std::string& value) {
       gui::TextDisabled("%s", key);
@@ -1046,7 +887,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     }
     CardDetailLine(view.live.footer);
   } else {
-    gui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f), "%s", card.title.c_str());
+    gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_PlotHistogram), "%s", card.title.c_str());
     if (!card.reason.empty()) {
       gui::TextWrapped("%s", card.reason.c_str());
     }
@@ -1120,7 +961,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   const std::array<std::string_view, 2> compare_tips = {
       std::string_view(), "The built-in look, read-only; your own settings are kept."};
   if (const int clicked =
-          RadioRow("Compare", COMPARE_OPTIONS, compare_why, compare_tips, (state->defaults_view ? 1 : 0));
+          widgets::SegmentedControl("Compare", COMPARE_OPTIONS, compare_why, compare_tips, (state->defaults_view ? 1 : 0));
       clicked >= 0) {
     state->defaults_view = (clicked == 1);
   }
