@@ -43,8 +43,7 @@ bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayS
   return reset;
 }
 
-// One schema row. Returns true when the value changed. Called both from DrawOverlay (the Enable
-// row) and from its own draw_rows lambda (every other row), so it stays a free function.
+// Draw a settings-schema row with its normal availability, reset and commit rules.
 bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state, bool grouped = false) {
   if (descriptor.key == "BeforeFGMotion" && (settings->fg_present != Settings::FgPresent::BEFORE
       || (settings->motion_vectors != MotionVectorSource::LAUNCHPAD && settings->motion_vectors != MotionVectorSource::LUMENITE))) return false;
@@ -547,8 +546,7 @@ void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
   ImGui::TextUnformatted(dimensions.c_str());
   if (!view.output_size.Empty()) {
     const std::string output = std::format("{}  {} × {}", gui::Display("Output"), view.output_size.width, view.output_size.height);
-    const float indent = gui::GetContentRegionAvail().x - ImGui::CalcTextSize(output.c_str()).x;
-    if (indent > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + indent);
+    widgets::NextGap(style::LabelGap());
     gui::TextDisabled("%s", output.c_str());
   }
 }
@@ -625,59 +623,6 @@ std::string VramLine(const OverlayView& view) {
   return std::format("VRAM: Uplift intermediates {:.0f} MiB", static_cast<double>(view.intermediate_bytes) / MIB);
 }
 
-// Cut UTF-8 text at a character boundary and append ASCII "..." to fit `width`.
-std::string EllipsisToWidth(const std::string& text, float width) {
-  if (gui::CalcTextSize(text.c_str()).x <= width) {
-    return text;
-  }
-  constexpr std::string_view DOTS = "...";
-  const float dots_width = gui::CalcTextSize(DOTS.data()).x;
-  size_t fits = 0u;  // the longest prefix that fits together with the dots
-  for (size_t low = 0u, high = text.size(); low < high;) {
-    const size_t middle = (low + high + 1u) / 2u;
-    if (gui::CalcTextSize(text.c_str(), text.c_str() + middle).x + dots_width <= width) {
-      low = middle;
-      fits = middle;
-    } else {
-      high = middle - 1u;
-    }
-  }
-  while (fits > 0u && (static_cast<unsigned char>(text[fits]) & 0xC0u) == 0x80u) {
-    --fits;  // never cut inside a UTF-8 sequence
-  }
-  while (fits > 0u && text[fits - 1u] == ' ') {
-    --fits;
-  }
-  return text.substr(0u, fits) + std::string(DOTS);
-}
-
-// One line of the working status card, in one piece (cut with "..." at the card's right edge, the full text as a tooltip). `muted`: TextDisabled.
-void CardLine(const std::string& source, bool muted) {
-  const std::string text = gui::Display(source);
-  const std::string shown = EllipsisToWidth(text, gui::GetContentRegionAvail().x);
-  if (muted) {
-    gui::TextDisabled("%s", shown.c_str());
-  } else {
-    gui::TextUnformatted(shown.c_str());
-  }
-  if (shown.size() != text.size() && gui::IsItemHovered()) {
-    gui::BeginTooltip();
-    gui::PushTextWrapPos(gui::GetFontSize() * 30.f);
-    gui::TextUnformatted(text.c_str());
-    gui::PopTextWrapPos();
-    gui::EndTooltip();
-  }
-}
-
-// One detail line of the working status card: muted so the title and rows stay prominent, and left out when the card's fixed height has no room left
-// for it -- the card never grows or scrolls.
-void CardDetailLine(const std::string& text) {
-  if (text.empty() || gui::GetContentRegionAvail().y < gui::GetTextLineHeight()) {
-    return;
-  }
-  CardLine(text, true);
-}
-
 }  // namespace
 
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now) {
@@ -697,6 +642,7 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
 
 namespace {
 void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState& state) {
+  gui::PushStyleVar(ImGuiStyleVar_CellPadding, {0.f, style::LabelGap() * 0.5f});
   const auto fact = [](const char* key, const std::string& value) {
     gui::TableNextRow();
     gui::TableSetColumnIndex(0); gui::TextDisabled("%s", gui::Display(key).c_str());
@@ -722,7 +668,10 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
     gui::EndTable();
   }
 
+  gui::PopStyleVar();
+  widgets::NextGap(style::BlockGap());
   const bool compact = gui::GetContentRegionAvail().x < style::Units(112);
+  gui::PushStyleVar(ImGuiStyleVar_CellPadding, {style::RowGap(), style::LabelGap()});
   if (gui::BeginTable("##executed_passes", compact ? 2 : 5, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) {
     const auto column = [](const char* label, float weight) { gui::TableSetupColumn(gui::Display(label).c_str(), ImGuiTableColumnFlags_WidthStretch, weight); };
     column("Pass", 0.5f);
@@ -730,7 +679,7 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
     else {
       column("Ran at", 1.15f); column("Network / style", 1.3f); column("NR size", 1.f); column("Motion used", 1.25f);
     }
-    gui::TableHeadersRow();
+    if (!compact) gui::TableHeadersRow();
     bool any = false;
     for (size_t i = 0; i < view.stage_runs.size(); ++i) {
       const auto& group = view.stage_runs[i];
@@ -770,6 +719,7 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
     gui::EndTable();
     if (!any) gui::TextDisabled("No pass recorded.");
   }
+  gui::PopStyleVar();
   if (!view.details_note.empty()) gui::TextWrapped("%s", view.details_note.c_str());
   for (const auto& group : view.stage_runs) {
     if (group.skip.empty() || group.planned <= group.count) continue;
@@ -898,31 +848,32 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     const ImVec4 red = style::SafetyRed();
     const ImVec2 warning_start = gui::GetCursorScreenPos();
     const float inset = style::PanelInset();
-    gui::Indent(inset);
-    gui::PushStyleColor(ImGuiCol_Text, red);
-    gui::SeparatorText("SAFETY LATCH ACTIVE");
-    gui::PopStyleColor();
-    for (const auto& lock : view.safety_locks) {
-      gui::PushID(lock.feature.data());
-      gui::TextColored(red, "%s", lock.feature.data());
-      gui::TextWrapped("%s", lock.reason.c_str());
-      if (lock.setting != nullptr) {
-        if (settings->*(lock.setting) == lock.restore_value) {
-          gui::TextWrapped("Latch cleared for next launch. Restart the game to retry.");
-        } else if (gui::Button("Clear latch for next launch")) {
-          settings->*(lock.setting) = lock.restore_value;
-          changed = true;
+    widgets::Inset("##safety_locks", {inset, inset}, [&] {
+      gui::PushStyleColor(ImGuiCol_Text, red);
+      gui::SeparatorText("SAFETY LATCH ACTIVE");
+      gui::PopStyleColor();
+      for (const auto& lock : view.safety_locks) {
+        gui::PushID(lock.feature.data());
+        gui::TextColored(red, "%s", lock.feature.data());
+        gui::TextWrapped("%s", lock.reason.c_str());
+        if (lock.setting != nullptr) {
+          if (settings->*(lock.setting) == lock.restore_value) {
+            gui::TextWrapped("Latch cleared for next launch. Restart the game to retry.");
+          } else if (gui::Button("Clear latch for next launch")) {
+            settings->*(lock.setting) = lock.restore_value;
+            changed = true;
+          }
+        } else if (lock.retry_now) {
+          if (gui::Button("Retry now")) state->retry_now = true;
+        } else {
+          gui::TextWrapped("Restart the game to retry this feature.");
         }
-      } else if (lock.retry_now) {
-        if (gui::Button("Retry now")) state->retry_now = true;
-      } else {
-        gui::TextWrapped("Restart the game to retry this feature.");
+        gui::PopID();
       }
-      gui::PopID();
-    }
-    gui::Unindent(inset);
-    gui::GetWindowDrawList()->AddRectFilled(warning_start, {warning_start.x + 3.f, gui::GetCursorScreenPos().y}, gui::GetColorU32(red));
-    gui::Separator();
+    }, gui::GetColorU32(style::Tint(red, 0.075f)));
+    const float bottom = gui::GetCursorScreenPos().y - gui::GetStyle().ItemSpacing.y;
+    gui::GetWindowDrawList()->AddRectFilled(warning_start, {warning_start.x + 0.75f * style::LabelGap(), bottom}, gui::GetColorU32(red));
+    widgets::NextGap(style::BlockGap());
   }
 
   const StatusCard& card = view.card;
@@ -937,15 +888,19 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       const auto row = [value_x](const char* key, const std::string& value) {
         gui::TextDisabled("%s", key);
         gui::SameLine(value_x);
-        CardLine(value, false);
+        gui::TextWrapped("%s", value.c_str());
       };
-      const char* recorded = view.RecordedStageName(0u);
-      row("Running at", recorded ? recorded : view.live.stage);
+      std::string recorded;
+      for (size_t i = 0; i < view.stage_runs.size(); ++i) {
+        if (view.stage_runs[i].count == 0) continue;
+        if (!recorded.empty()) recorded += " · ";
+        recorded += gui::Display(NR_STAGE_NAMES[i]);
+      }
+      row("Running at", recorded.empty() ? view.live.stage : recorded);
       row("Motion vectors", view.live.motion);
       if (!view.details_backend.empty()) row("Backend", view.details_backend);
       row("Resolution", view.live.resolution);
       if (!view.setup.why.empty()) {
-        // Muted and wrapped: two lines in the card's spare height; the child clips anything longer, and the full text is the tooltip.
         const std::string why = "Why: " + view.setup.why;
         gui::PushStyleColor(ImGuiCol_Text, gui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         gui::TextWrapped("%s", why.c_str());
@@ -953,10 +908,10 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
         if (gui::IsItemHovered()) {
           gui::SetTooltip("%s", why.c_str());
         }
-      } else {
-        CardDetailLine(view.live.note);
+      } else if (!view.live.note.empty()) {
+        gui::TextDisabled("%s", view.live.note.c_str());
       }
-      CardDetailLine(view.live.footer);
+      if (!view.live.footer.empty()) gui::TextDisabled("%s", view.live.footer.c_str());
     } else {
       gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_PlotHistogram), "%s", card.title.c_str());
       if (!card.reason.empty()) {
@@ -980,7 +935,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       case CardButton::CLEAR_LATCH:  // Each blocked feature has its own explicit recovery action above the card.
         break;
     }
-  }, true, style::Units(27));
+  }, style::GroupSurface(), style::Units(27));
   gui::PopStyleVar();
 
   const auto rows = [&](std::initializer_list<std::string_view> keys) {
@@ -1045,8 +1000,8 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
             if (descriptor.pass == pass && (descriptor.flags & (setting_flags::PASS_STAGE | setting_flags::NETWORK_PRESET)) == 0u)
               changed |= DrawRow(descriptor, view, settings, state, true);
           }
-        });
-      }, true);
+        }, style::WellSurface());
+      }, style::GroupSurface());
       gui::PopID();
     }
   }
@@ -1054,9 +1009,10 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   widgets::NextGap(style::SectionGap());
   bool reset = false;
   const bool shaping_changed = SectionChanged(*settings, SettingSection::RESULT) || SectionChanged(*settings, SettingSection::LIMITS);
-  gui::SetNextItemOpen(settings->look.enabled, ImGuiCond_Once);
+  const bool shaping_enabled = state->defaults_view ? DefaultSettings().look.enabled : settings->look.enabled;
+  gui::SetNextItemOpen(shaping_enabled, ImGuiCond_Once);
   const bool shaping = widgets::Disclosure(shaping_changed ? "Result shaping (changed)###shaping" : "Result shaping###shaping",
-                                           settings->look.enabled ? "On" : "Off", "shaping", shaping_changed && !state->defaults_view ? &reset : nullptr);
+                                           shaping_enabled ? "On" : "Off", "shaping", shaping_changed && !state->defaults_view ? &reset : nullptr);
   if (reset) {
     ResetSection(settings, SettingSection::RESULT);
     ResetSection(settings, SettingSection::LIMITS);
@@ -1064,7 +1020,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   }
   if (shaping) widgets::Panel("##shaping_body", [&] {
     rows({"ShapeResult"});
-    if (state->defaults_view ? DefaultSettings().look.enabled : settings->look.enabled) {
+    if (shaping_enabled) {
       widgets::NextGap(style::BlockGap());
       widgets::PairedGroups("##result_groups", [&] {
         widgets::GroupHeading("Strength and colour");
@@ -1072,7 +1028,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       }, [&] {
         widgets::GroupHeading("Tonal range");
         rows({"Shadows", "Midtones", "Highlights"});
-      });
+      }, style::WellSurface());
       widgets::NextGap(style::BlockGap());
       widgets::PairedGroups("##limit_groups", [&] {
         widgets::GroupHeading("Limits");
@@ -1080,7 +1036,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       }, [&] {
         widgets::GroupHeading("Detail and stability");
         rows({"LargeScaleTone", "FineDetail", "DetailRadius", "HaloSuppression", "Stabilize", "StabilizeMs", "StabilizeDetail"});
-      });
+      }, style::WellSurface());
     }
   });
 
@@ -1091,7 +1047,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   if (reset) { ResetSection(settings, SettingSection::MASK); changed = true; }
   if (mask) widgets::Panel("##mask_body", [&] {
     widgets::PairedGroups("##mask_groups", [&] { widgets::GroupHeading("Mask"); rows({"Mask"}); },
-                                         [&] { widgets::GroupHeading("HUD"); rows({"UICorrection"}); });
+                                         [&] { widgets::GroupHeading("HUD"); rows({"UICorrection"}); }, style::WellSurface());
   });
 
   reset = false;
@@ -1111,7 +1067,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     }, [&] {
       widgets::GroupHeading("Exposure");
       rows({"InputExposure", "AutoExposureMode", "AutoExposureBlend", "ExposureAdapt", "AdaptBrighterStops", "AdaptDarkerStops"});
-    });
+    }, style::WellSurface());
     widgets::NextGap(style::BlockGap());
     widgets::PairedGroups("##guide_groups", [&] {
       widgets::GroupHeading("Colour conversion");
@@ -1119,7 +1075,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     }, [&] {
       widgets::GroupHeading("Motion and game state");
       rows({"MotionScaleX", "MotionScaleY", "ChainedHistory", "StateRestore"});
-    });
+    }, style::WellSurface());
   });
 
   if (widgets::Disclosure("Advanced", "Routing · Runtime · Diagnostics")) widgets::Panel("##advanced_body", [&] {
@@ -1129,12 +1085,12 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     }, [&] {
       widgets::GroupHeading("Memory and recovery");
       rows({"VramCheck", "BudgetMarginMB", "GraceSeconds", "AutoResume", "AutoRetry"});
-    });
+    }, style::WellSurface());
     widgets::NextGap(style::BlockGap());
     widgets::Panel("##runtime_group", [&] {
       widgets::GroupHeading("Runtime and logging");
       rows({"SnippetPath", "NgxHooks", "ForeignNr", "LogLevel", "ShowNvIndicator"});
-    });
+    }, style::WellSurface());
     if (settings->keep_faces) {
       widgets::NextGap(style::BlockGap());
       if (widgets::Disclosure("Face mask tuning", "Keep faces")) widgets::Panel("##face_controls", [&] {

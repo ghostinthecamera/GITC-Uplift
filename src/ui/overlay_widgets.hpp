@@ -54,7 +54,19 @@ inline int SegmentedControl(const char* label, std::span<const char* const> opti
   if (!label) {
     for (const char* option : options) labels_width += gui::CalcTextSize(option).x + 2.f * style.FramePadding.x;
   }
-  const float button_width = (total_width - static_cast<float>(count - 1u) * gap) / static_cast<float>(count);
+  const float inner = std::max(1.f, total_width - static_cast<float>(count - 1u) * gap);
+  const auto option_width = [&](size_t index) {
+    if (label || labels_width <= 0.f) return inner / count;
+    const float need = gui::CalcTextSize(options[index]).x + 2.f * style.FramePadding.x;
+    return inner >= labels_width ? need + (inner - labels_width) / count : inner * need / labels_width;
+  };
+  float row_height = gui::GetFrameHeight();
+  if (!label && inner < labels_width) {
+    for (size_t i = 0; i < count; ++i) {
+      const auto wrapped = WrapLabel(gui::Display(options[i]), option_width(i) - 2.f * style.FramePadding.x);
+      row_height = std::max(row_height, ImGui::CalcTextSize(wrapped.c_str()).y + 2.f * style.FramePadding.y);
+    }
+  }
   const float label_x = gui::GetCursorPosX() + total_width + gap;
   int clicked = -1;
   for (size_t column = 0u; column < count; ++column) {
@@ -68,17 +80,12 @@ inline int SegmentedControl(const char* label, std::span<const char* const> opti
       gui::PushStyleColor(ImGuiCol_Button, gui::GetStyleColorVec4(ImGuiCol_ButtonActive));
     }
     gui::BeginDisabled(!why[index].empty());
-    float width = button_width;
-    if (!label && labels_width > 0.f) {
-      const float inner = std::max(1.f, total_width - (count - 1u) * gap);
-      const float need = gui::CalcTextSize(options[index]).x + 2.f * style.FramePadding.x;
-      width = inner >= labels_width ? need + (inner - labels_width) / count : inner * need / labels_width;
-    }
+    const float width = option_width(index);
     const float text_width = width - 2.f * style.FramePadding.x;
     const std::string shown = gui::Display(options[index]);
     const bool wrap = !label && ImGui::CalcTextSize(shown.c_str()).x > text_width;
-    const bool pressed = wrap ? ImGui::Button((WrapLabel(shown, text_width) + "###" + options[index]).c_str(), {width, 0.f})
-                              : gui::Button(options[index], {width, 0.f});
+    const bool pressed = wrap ? ImGui::Button((WrapLabel(shown, text_width) + "###" + options[index]).c_str(), {width, row_height})
+                              : gui::Button(options[index], {width, row_height});
     if (pressed) {
       clicked = static_cast<int>(index);
     }
@@ -189,35 +196,48 @@ inline bool SectionHeading(const char* title, const char* id, bool show_reset) {
   return reset;
 }
 
+inline void PanelBorder(ImVec2 start, float width, float bottom) {
+  gui::GetWindowDrawList()->AddRect(start, {start.x + width, bottom}, gui::GetColorU32(ImGuiCol_Text, 0.10f), gui::GetStyle().FrameRounding);
+}
+
 inline bool Disclosure(const char* title, const char* hint = nullptr, const char* reset_id = nullptr, bool* reset = nullptr) {
-  const auto base = gui::GetStyleColorVec4(ImGuiCol_WindowBg), text = gui::GetStyleColorVec4(ImGuiCol_Text);
-  gui::PushStyleColor(ImGuiCol_Header, ImVec4(base.x+(text.x-base.x)*0.065f, base.y+(text.y-base.y)*0.065f, base.z+(text.z-base.z)*0.065f, base.w));
-  gui::PushStyleVar(ImGuiStyleVar_FramePadding, {style::PanelInset(), style::RowGap()});
-  const bool open = gui::CollapsingHeader(title, ImGuiTreeNodeFlags_AllowOverlap);
-  const ImVec2 a = gui::GetItemRectMin(), b = gui::GetItemRectMax();
-  gui::PopStyleVar();
-  gui::PopStyleColor();
-  const ImVec2 next = gui::GetCursorScreenPos();
+  const ImVec2 start = gui::GetCursorScreenPos();
+  const float right = start.x + gui::GetContentRegionAvail().x;
+  const float pad_x = style::PanelInset() * 0.5f, height = style::Units(8.5f);
   const std::string label = gui::Label(title);
-  const float text_end = a.x + gui::GetFontSize() + 3.f * style::PanelInset() + ImGui::CalcTextSize(label.c_str(), nullptr, true).x;
-  float free_from = text_end + style::RowGap();
-  if (reset && reset_id) {
-    const auto id = std::format("Reset##{}", reset_id);
-    const float width = gui::ResetButtonWidth(id.c_str());
-    if (free_from + width + style::PanelInset() <= b.x) {
-      gui::SetCursorScreenPos({free_from, a.y + ((b.y - a.y) - gui::GetFrameHeight()) * 0.5f});
-      *reset = gui::ResetButton(id.c_str());
-      gui::SetCursorScreenPos(next);
-      free_from += width + style::RowGap();
-    } else {
-      *reset = gui::ResetButton(id.c_str());
-    }
+  const size_t suffix = label.find("###");
+  const float text_end = start.x + gui::GetFontSize() + 3.f * pad_x + ImGui::CalcTextSize(label.c_str(), nullptr, true).x;
+  const std::string reset_label = reset_id ? std::format("Reset##{}", reset_id) : std::string();
+  const float reset_x = text_end + style::RowGap(), reset_width = reset ? gui::ResetButtonWidth(reset_label.c_str()) : 0.f;
+  const bool inline_reset = reset && reset_x + reset_width <= right - style::LabelGap();
+  const std::string note = hint ? gui::Display(hint) : std::string();
+  const float hint_x = right - style::PanelInset() - ImGui::CalcTextSize(note.c_str()).x;
+  const bool wrap_note = !note.empty() && hint_x < (inline_reset ? reset_x + reset_width : text_end) + style::RowGap();
+  std::string header = label;
+  if (wrap_note) header.insert(suffix, "\n ");
+  gui::PushClipRect(start, {right, start.y + height + gui::GetTextLineHeight() + style::RowGap()}, true);
+  gui::PushStyleColor(ImGuiCol_Header, style::Surface());
+  gui::PushStyleVar(ImGuiStyleVar_FramePadding, {pad_x, (height - gui::GetFontSize()) * 0.5f});
+  gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
+  const bool open = gui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_AllowOverlap);
+  const float bottom = gui::GetItemRectMax().y;
+  gui::PopStyleVar(2);
+  gui::PopStyleColor();
+  gui::PopClipRect();
+  PanelBorder(start, right-start.x, bottom);
+  const ImVec2 next = gui::GetCursorScreenPos();
+  const float by = (height - gui::GetFrameHeight()) * 0.5f;
+  if (inline_reset) {
+    gui::SetCursorScreenPos({reset_x, start.y + by});
+    *reset = gui::ResetButton(reset_label.c_str());
+    gui::SetCursorScreenPos(next);
+  } else if (reset) {
+    *reset = gui::ResetButton(reset_label.c_str());
   }
-  if (hint) {
-    const std::string shown = gui::Display(hint);
-    const ImVec2 size = ImGui::CalcTextSize(shown.c_str());
-    const float x = b.x - style::PanelInset() - size.x;
-    if (x >= free_from) gui::GetWindowDrawList()->AddText({x, (a.y+b.y-size.y)*0.5f}, gui::GetColorU32(ImGuiCol_TextDisabled), shown.c_str());
+  if (!note.empty()) {
+    const float y = start.y + (height - gui::GetFontSize()) * 0.5f;
+    const ImVec2 pos = wrap_note ? ImVec2(start.x + gui::GetFontSize() + 3.f * pad_x, y + gui::GetTextLineHeight()) : ImVec2(hint_x, y);
+    gui::GetWindowDrawList()->AddText(pos, gui::GetColorU32(ImGuiCol_TextDisabled), note.c_str());
   }
   return open;
 }
@@ -253,36 +273,40 @@ inline void NextGap(float gap) {
 }
 
 template <typename Contents>
-void Inset(const char* id, ImVec2 padding, Contents contents, bool surface = false, float min_height = 0.f) {
+void Inset(const char* id, ImVec2 padding, Contents contents, ImU32 surface = 0, float min_height = 0.f) {
   gui::PushStyleVar(ImGuiStyleVar_CellPadding, padding);
-  if (gui::BeginTable(id, 1, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX | ImGuiTableFlags_NoSavedSettings)) {
+  const bool visible = gui::BeginTable(id, 1, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX | ImGuiTableFlags_NoSavedSettings);
+  if (visible) {
     gui::TableNextRow(ImGuiTableRowFlags_None, min_height);
     gui::TableSetColumnIndex(0);
-    if (surface) gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, style::GroupSurface());
-    gui::PushItemWidth(-1.f);
-    gui::PushTextWrapPos(0.f);
-    contents();
-    gui::PopTextWrapPos();
-    gui::PopItemWidth();
-    gui::EndTable();
   }
-  gui::PopStyleVar();
+  gui::PopStyleVar();  // The nested controls and their tables use their own spacing.
+  if (!visible) return;
+  if (surface) gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, surface);
+  gui::PushItemWidth(-1.f);
+  gui::PushTextWrapPos(0.f);
+  contents();
+  gui::PopTextWrapPos();
+  gui::PopItemWidth();
+  gui::EndTable();
 }
 
 template <typename Contents>
-void Panel(const char* id, Contents contents) {
-  const float inset = style::PanelInset();
-  Inset(id, {inset, inset}, contents, true);
+void Panel(const char* id, Contents contents, ImU32 fill = style::GroupSurface()) {
+  const float inset = style::PanelInset(), width = gui::GetContentRegionAvail().x;
+  const ImVec2 start = gui::GetCursorScreenPos();
+  Inset(id, {inset, inset}, contents, fill);
+  PanelBorder(start, width, gui::GetCursorScreenPos().y - gui::GetStyle().ItemSpacing.y);
 }
 
 template <typename Left, typename Right>
-void PairedGroups(const char* id, Left left, Right right) {
+void PairedGroups(const char* id, Left left, Right right, ImU32 fill = style::GroupSurface()) {
   const float inset = style::PanelInset();
   if (!style::FitPairedGroups()) {
     gui::PushID(id);
-    Panel("##left", left);
+    Panel("##left", left, fill);
     NextGap(inset);
-    Panel("##right", right);
+    Panel("##right", right, fill);
     gui::PopID();
     return;
   }
@@ -292,14 +316,20 @@ void PairedGroups(const char* id, Left left, Right right) {
     gui::TableSetupColumn("##gutter", ImGuiTableColumnFlags_WidthFixed, inset);
     gui::TableSetupColumn("##right", ImGuiTableColumnFlags_WidthStretch);
     gui::TableNextRow();
-    const auto cell = [inset](int index, const char* name, auto& contents) {
+    ImVec2 starts[2];
+    float widths[2];
+    const auto cell = [&](int index, const char* name, auto& contents) {
       gui::TableSetColumnIndex(index);
-      gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, style::GroupSurface());
+      starts[index / 2] = gui::GetCursorScreenPos();
+      widths[index / 2] = gui::GetContentRegionAvail().x;
+      gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, fill);
       Inset(name, {inset, inset}, contents);
     };
     cell(0, "##left_content", left);
     cell(2, "##right_content", right);
     gui::EndTable();
+    const float bottom = gui::GetCursorScreenPos().y - gui::GetStyle().ItemSpacing.y;
+    for (int i = 0; i < 2; ++i) PanelBorder(starts[i], widths[i], bottom);
   }
   gui::PopStyleVar();
 }
