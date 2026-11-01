@@ -650,7 +650,7 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
     gui::TableSetColumnIndex(1); ImGui::TextWrapped("%s", value.c_str());
   };
   if (gui::BeginTable("##runtime_facts", 2, ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_SizingStretchProp)) {
-    gui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthFixed, std::max(gui::CalcTextSize("Display output").x, gui::CalcTextSize("Frame generation").x));
+    gui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthFixed, std::max({gui::CalcTextSize("Backend").x, gui::CalcTextSize("Display output").x, gui::CalcTextSize("Frame generation").x}) + style::BlockGap());
     gui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
     if (!view.details_backend.empty()) fact("Backend", gui::Display(view.details_backend));
     if (!view.output_size.Empty()) {
