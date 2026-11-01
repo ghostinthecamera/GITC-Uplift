@@ -143,7 +143,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     else if (descriptor.key == "AutoExposureBlend") value = std::format("{:.0f}%", settings->auto_exposure_blend * 100.f);
     else if (inherited_skin) value = std::format("{:.2f}", settings->local_structure);
     else if (descriptor.kind == SettingKind::FLOAT) value = FormatSettingValue(descriptor, *settings);
-    else if (descriptor.kind == SettingKind::UINT && descriptor.max <= 100.0)
+    else if (descriptor.kind == SettingKind::UINT && descriptor.key != "MaskBlendMode" && descriptor.max <= 100.0)
       value = state->pending_key == descriptor.key && state->pending_release ? std::to_string(*state->pending_release) : FormatSettingValue(descriptor, *settings);
     gui::BeginDisabled(inherited_skin);
     widgets::SettingCaption(caption, value, !IsDefault(*settings, descriptor));
