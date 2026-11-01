@@ -83,15 +83,18 @@ nr::SessionStatus SessionOf(const ipc::Status& status) {
 // every other API. `present_queue`: the present event's queue, null in the effect events (an OpenGL host is valid only when it is the runtime's).
 struct Hosts {
   std::optional<ReshadeVkHost> vulkan;
+  vk::GameHost* outer_vulkan = nullptr;
+  vk::GameHost* Vulkan() { return outer_vulkan ? outer_vulkan : vulkan ? &*vulkan : nullptr; }
   std::optional<ReshadeGlHost> opengl;
   std::optional<ReshadeD3D12Host> d3d12;
   [[nodiscard]] ClientHosts Pointers() {
-    return {.vulkan = (vulkan ? &*vulkan : nullptr), .opengl = (opengl ? &*opengl : nullptr), .d3d12 = (d3d12 ? &*d3d12 : nullptr)};
+    return {.vulkan = Vulkan(), .opengl = (opengl ? &*opengl : nullptr), .d3d12 = (d3d12 ? &*d3d12 : nullptr)};
   }
 };
-Hosts HostsOf(const HelperDevice& device, api::device* game_device, api::command_queue* queue, api::command_queue* present_queue = nullptr) {
+Hosts HostsOf(const HelperDevice& device, api::device* game_device, api::command_queue* queue, api::command_queue* present_queue = nullptr, vk::GameHost* outer_host = nullptr) {
   Hosts hosts;
-  if (device.vulkan) {
+  hosts.outer_vulkan = outer_host;
+  if (device.vulkan && !outer_host) {
     hosts.vulkan.emplace(game_device, queue, device.vulkan->VulkanDevice().vkQueueSubmit);
   } else if (device.gl) {
     hosts.opengl.emplace(device.gl->Gl(), queue, present_queue);
@@ -139,6 +142,7 @@ std::optional<std::string> HelperFront::CheckExMarker(ui::Settings* settings, ui
   // If the marker survived the last start, that start asked for 9Ex and never got a 9Ex device to present or to destroy: turn the toggle
   // off, once, and say so.
   if (!LatchMarkerExists(ex_marker_path_)) return std::nullopt;
+  settings->startup_latches |= ui::Settings::LATCH_D3D9EX;
   settings->use_d3d9ex = false;
   ui::SaveSettings(*settings, config);
   DeleteLatchMarker(ex_marker_path_);
@@ -190,18 +194,18 @@ bool HelperFront::NrApplied(api::device* owner) const {
 }
 
 void HelperFront::RunClient(HelperDevice& device, api::device* game_device, api::command_queue* queue, TriggerPoint point, uint64_t source,
-                            uint64_t launchpad_motion, bool at_present) {
+                            uint64_t launchpad_motion, bool at_present, vk::GameHost* outer_host, const vk::ImageInfo* outer_image) {
   if (point == TriggerPoint::NONE) return;
   bool sent = false;
   bool returned = false;  // NR's output is back in the game's frame
   if (device.frame_ready && remote_) {
     if (device.vulkan) {
-      Hosts hosts = HostsOf(device, game_device, queue);
+      Hosts hosts = HostsOf(device, game_device, queue, nullptr, outer_host);
       // Design §3.4 case 2: the game presents from a queue other than the effect runtime's. Uplift's submissions are ordered after the game's frame only
       // by submission order on the runtime's queue, so the client flushes the present queue and waits for it on the CPU (2 s; a timeout skips this
       // frame's NR) inside Run, once per frame, after its own skip checks and before the copy in (final review, minor 4).
       std::optional<ReshadeVkHost> present_host;
-      if (device.present_queue != nullptr && queue != nullptr && device.present_queue != queue) {
+      if (!outer_host && device.present_queue != nullptr && queue != nullptr && device.present_queue != queue) {
         if (!device.vk_second_queue_logged) {
           device.vk_second_queue_logged = true;
           nr::Log(nr::LogLevel::INFO, "Vulkan: the game presents from another queue than ReShade's effects; Uplift waits for it on the CPU before NR");
@@ -209,7 +213,7 @@ void HelperFront::RunClient(HelperDevice& device, api::device* game_device, api:
         device.vulkan->NoteSecondQueue();
         present_host.emplace(game_device, device.present_queue, device.vulkan->VulkanDevice().vkQueueSubmit);
       }
-      returned = device.vulkan->Run(*hosts.vulkan, VulkanImageInfo(game_device, {device.back_buffer}),
+      returned = device.vulkan->Run(*hosts.Vulkan(), outer_image ? *outer_image : VulkanImageInfo(game_device, {device.back_buffer}),
                                     (at_present ? vk::Usage::PRESENT : vk::Usage::RENDER_TARGET), VulkanImageInfo(game_device, {launchpad_motion}), point,
                                     *remote_, (present_host ? &*present_host : nullptr));
       sent = device.vulkan->LastRunSent();
@@ -238,6 +242,7 @@ void HelperFront::RunClient(HelperDevice& device, api::device* game_device, api:
       sent = device.d3d11->LastRunSent();
     }
   }
+  if (returned && outer_host) device.before_fg_passes += remote_->LastStatus().passes_run;
   if (returned && !device.nr_returned_logged) {
     // Once per attach: the e2e cases (and the checklist) read it as "NR ran here", e.g. again after a Direct3D 9 Reset.
     device.nr_returned_logged = true;
@@ -385,7 +390,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   client::RemoteNr& remote = *remote_;
   // Plans 11 and 12: a Vulkan, OpenGL or Direct3D 12 device's host, on the effect runtime's queue (none for every other API); OpenGL's is valid only while the
   // present is on the runtime's own context.
-  Hosts hosts = HostsOf(entry, device, frame.queue, frame.present_queue);
+  Hosts hosts = HostsOf(entry, device, frame.queue, frame.present_queue, frame.outer_vulkan_host);
 
   // The FRAME (design §2.2): what crosses every present.
   ipc::Frame wire = {
@@ -443,7 +448,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   // (NGX loading) leaves `entry.running` stale for one present: the block the helper hands out then finds nothing to map it into,
   // and Describe's `block_mapped` makes the helper hand one out again.
   if (entry.vulkan) {
-    wire.target = entry.vulkan->Describe(*hosts.vulkan, VulkanImageInfo(device, frame.back_buffer), settings.enabled, entry.running);
+    wire.target = entry.vulkan->Describe(*hosts.Vulkan(), frame.outer_vulkan_host ? frame.outer_vulkan_image : VulkanImageInfo(device, frame.back_buffer), settings.enabled, entry.running);
   } else if (entry.gl) {
     // FB0 describes the target at the present event (the Session's size and shared format); the technique's intermediate has FB0's size and format family
     // (design §3.2). MSAA is refused only when NR would run at PRESENT (no marker): `at_present`.
@@ -458,7 +463,10 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   } else {
     wire.target = entry.d3d11->Describe(AsNative<ID3D11Resource>(frame.back_buffer.handle), settings.enabled, entry.running);
   }
-  wire.target.color_space = static_cast<uint32_t>(frame.swapchain->get_color_space());
+  wire.target.color_space = frame.outer_vulkan_host ? static_cast<uint32_t>(frame.outer_color_space) : static_cast<uint32_t>(frame.swapchain->get_color_space());
+  entry.output_space = static_cast<color::ColorSpace>(wire.target.color_space);
+  wire.game_facing_present = frame.outer_vulkan_host ? 1u : 0u;
+  entry.game_facing = frame.outer_vulkan_host != nullptr;
 
   std::optional<ipc::Reply> reply = remote.Present(settings.enabled, wire, settings_text_, HELPER_LOG);
   if (remote.Attached() && remote.LastStatus().device_lost != 0u) {
@@ -488,7 +496,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
     entry.frame_ready = (reply->frame_ready != 0u);
     bool fell_back = false;
     if (entry.vulkan) {
-      fell_back = entry.vulkan->Apply(*reply, remote, *hosts.vulkan);
+      fell_back = entry.vulkan->Apply(*reply, remote, *hosts.Vulkan());
     } else if (entry.gl) {
       fell_back = entry.gl->Apply(*reply, remote, *hosts.opengl);
     } else if (entry.d3d12) {
@@ -515,7 +523,8 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   }
   // The first event of the frame; at PRESENT NR runs now, otherwise at the marker or after the effects. Direct3D 9 keeps NR before effects in the present
   // event (the helper replays this point; 1.1.6's begin-effects wait is not passed to it).
-  RunClient(entry, device, frame.queue, entry.trigger.OnPresent(frame.marker.handle != 0u, /*effects_on=*/false), frame.back_buffer.handle, 0u, /*at_present=*/true);
+  RunClient(entry, device, frame.queue, entry.trigger.OnPresent(frame.marker.handle != 0u, /*effects_on=*/false), frame.back_buffer.handle, 0u, /*at_present=*/true,
+            frame.outer_vulkan_host, frame.outer_vulkan_host ? &frame.outer_vulkan_image : nullptr);
 }
 
 void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, bool is_marker, uint64_t rtv, const ui::Settings& settings) {
@@ -576,7 +585,7 @@ void HelperFront::FinishEffects(HelperDevice& device, api::effect_runtime* runti
   }
   client::MaskCopy copied;
   if (device.vulkan) {
-    copied = device.vulkan->CopyMask(*hosts.vulkan, VulkanImageInfo(runtime->get_device(), mask), *remote_);
+    copied = device.vulkan->CopyMask(*hosts.Vulkan(), VulkanImageInfo(runtime->get_device(), mask), *remote_);
   } else if (device.gl) {
     copied = device.gl->CopyMask(*hosts.opengl, GlImageInfo(runtime->get_device(), mask), *remote_);
   } else if (device.d3d12) {
@@ -658,6 +667,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   // Plan 14 (design §1.2, §1.3): every game this front hosts runs NR in the helper, on the presented image: the DLSS choices and Match game are fixed causes
   // (the host set view->dlss_unavailable), and what runs comes back in the helper's status.
   ui::SetupFacts facts;
+  facts.before_fg_late_effects = device != nullptr && device->game_facing;
   FillPreference(&facts, settings, false);
   facts.dlss_unavailable = view->dlss_unavailable;
   facts.match_game_readable = false;
@@ -688,6 +698,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
     api_label = std::format("{} (helper)", ApiName(device_api));  // T5: a 64-bit Vulkan device's route, as "Vulkan (native NR)" and "Vulkan (Direct3D 12)"
   }
   facts.api = api_label;
+  view->details_backend = std::format("{} (64-bit NR helper)", ApiName(device_api));
   if (d3d9) {
     if (device != nullptr) {
       // Design §2.9: which case applies, from the device, the toggle, and whether ReShade ever raised create_device.
@@ -699,9 +710,6 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
                               : ex_event_seen_
                                   ? "Now: plain Direct3D 9 (the switch applies at the next game start)"
                                   : "Now: plain Direct3D 9: this ReShade cannot switch games to 9Ex (it needs the create_device add-on event)");
-    }
-    if (!LAUNCHPAD_ON_D3D9) {
-      view->motion_line = "Motion vectors: none (Launchpad does not run on Direct3D 9)";
     }
   }
   if (device == nullptr) {
@@ -727,21 +735,13 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   const bool has_client = device->HasClient();
   const bool status_known = (owner && remote->Running() && remote->Attached());
   const ipc::Status* const status = (status_known ? &remote->LastStatus() : nullptr);
-  const std::string_view api_name = ApiName(device_api);
   if (status != nullptr) {
     view->status_line = std::string(ipc::TextOf(status->status_line));
-    view->network_diagnostic = std::string(ipc::TextOf(status->network_diagnostic));
+    for (size_t i = 0; i < view->pass_models.size(); ++i) view->pass_models[i] = {static_cast<nr::RecordedNetwork>(status->models[i].network), status->models[i].style};
+    view->output_size = {status->frame_width, status->frame_height};
+    view->output_space = device->output_space;
+    view->lumenite_motion = device->uplift_mv_lumenite;
     view->legacy_runtime = status->legacy_runtime != 0u;
-    if (const std::string_view line = ipc::TextOf(status->placement_line); !line.empty()) {
-      view->placement_line = std::string(line);
-    }
-    if (!d3d9 || LAUNCHPAD_ON_D3D9) {
-      if (const std::string_view line = ipc::TextOf(status->motion_line); !line.empty()) {
-        view->motion_line = std::string(line);
-      }
-    }
-    view->work_line = std::string(ipc::TextOf(status->work_line));
-    view->exposure_line = std::string(ipc::TextOf(status->exposure_line));  // Plan 17
     view->ui_correction_note = std::string(ipc::TextOf(status->ui_correction_note));
     view->mask_note = device->mask_note;
     view->intermediate_bytes = status->intermediate_bytes;
@@ -752,33 +752,23 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   }
   if (has_client) {
     uint64_t client_bytes = 0u;
-    std::string client_line;
     if (device->d3d9) {
       client_bytes = device->d3d9->SharedBytes();
-      client_line = device->d3d9->Line();
     } else if (device->d3d10) {
       client_bytes = device->d3d10->SharedBytes();
-      client_line = device->d3d10->Line();
-    } else if (device->vulkan) {
-      client_line = device->vulkan->Line(device->route_reason);  // its imports alias the helper's textures, which the helper's own figure counts
-    } else if (device->gl) {
-      client_line = device->gl->Line();  // the same
-    } else if (device->d3d12) {
-      client_line = device->d3d12->Line();  // the same
-    } else {
+    } else if (device->d3d11) {
       client_bytes = device->d3d11->SharedBytes();
-      client_line = device->d3d11->Line();
     }
     view->intermediate_bytes += client_bytes;
-    std::string line = ((remote != nullptr && owner && remote->Running()) ? std::move(client_line)
-                                                                          : std::format("{} ({}): Uplift's 64-bit helper starts when NR is turned on", api_name, client::BITNESS));
-    const uint64_t busy = (status != nullptr ? status->busy_skips : 0u) + (owner ? remote->BusyFrames() : 0u);
-    if (busy > 0u) {
-      line += std::format(", {} frame(s) without NR while the helper was busy", busy);
-    }
-    view->api_line = std::move(line);
   }
   // The first failing stage, as in 64-bit games (Plan 6, D1), with the helper's own stage after the device's.
+  if (!latch.empty() || !helper_problem.empty() || device->strikes.Stopped() || (status && status->device_lost)) {
+    std::string reason(latch.empty() ? helper_problem : latch);
+    if (reason.empty()) reason = "The helper rendering device stopped.";
+    view->safety_locks.push_back({"64-bit NR helper", std::move(reason), nullptr, true,
+                                  !device->strikes.Exhausted() && !device->strikes.Unretryable() && !helper_problem.empty()});
+  }
+  if (status && status->retries_exhausted) view->safety_locks.push_back({"Automatic NR retries", std::string(ipc::TextOf(status->session_message)), nullptr, true, true});
   if (device->claimed_elsewhere) {
     view->card = ui::BuildStatusCard({.claimed_elsewhere = true, .enabled = true});
   } else if (!device->message.empty()) {
@@ -815,6 +805,8 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   // Plan 14: what runs (the helper's context decided it), and the card's detail.
   if (status != nullptr) {
     FillRunning(&facts, *status, view->card.working);
+    if (settings.enabled && status->nr_applied && view->card.working) view->stage_runs[device->game_facing ? 2u : 3u] = {
+        0u, status->passes_run, {status->canvas_width, status->canvas_height}, static_cast<sources::MotionSource>(status->motion_source)};
   }
   if (device->strikes.Exhausted() && !helper_problem.empty()) {
     facts.stopped = ui::PRIVATE_DEVICE_STOPPED_TWICE_REASON;  // Plan 17: the helper's second stop is a fixed cause

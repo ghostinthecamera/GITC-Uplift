@@ -893,6 +893,7 @@ SessionStatus Session::Status() const {
   }
   for (uint32_t index = 0u; index < pass_count_; ++index) {
     if (!features_[index]) continue;
+    status.pass_models[index] = features_[index]->Model();
     const std::string diagnostic = features_[index]->Diagnostic(index + 1u);
     if (diagnostic.empty()) continue;
     if (!status.network_diagnostic.empty()) {

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 
 #include "vk/nr_functions.hpp"
@@ -40,7 +41,7 @@ class CommandRing {
   Status Begin(VkCommandBuffer* buffer);
   // Ends the begun buffer and submits it to `queue` (the effect queue, through the game's chain: ReShade's hook flushes its immediate list first) with the
   // slot's fence; the ring moves on. The failing call's VkResult otherwise (the slot stays free).
-  VkResult Submit(VkQueue queue);
+  VkResult Submit(VkQueue queue, std::span<const VkSemaphore> present_waits = {});
   // Design §3.4 case 2, as the bridge's Interop::FlushAndWait: the game presents from another queue than the effect queue, so `flush` flushes that queue
   // and signals the ring's own wait fence there, and the CPU waits for it, at most `cap`. A timeout leaves the fence pending: the next call is BUSY until it
   // signals.
@@ -56,6 +57,7 @@ class CommandRing {
   struct Slot {
     VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer buffer = VK_NULL_HANDLE;
+    VkSemaphore relay = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;  // created signalled: a slot never submitted is free
   };
 

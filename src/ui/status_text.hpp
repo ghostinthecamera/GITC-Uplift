@@ -22,6 +22,7 @@ struct OptionState {
   std::string_view why;
   bool temporary = false;  // the cause can clear by itself this session (DLSS starting, Ray Reconstruction off, Launchpad turned on)
 };
+inline constexpr std::string_view FG_PRESENT_OFF_REASON = "Frame generation is on: turn on Present with frame generation (Advanced)";
 inline constexpr std::string_view DLSS_NOT_SEEN_REASON = "Available once the game renders with DLSS";
 // Plan 18 Task 12: the game switched its DLSS off (it released its last DLSS feature, or on Direct3D 11 shut NGX down) after DLSS ran on this device: the
 // DLSS stages, DLSS's vectors and Match game wait for it (a temporary cause: SetupFacts::dlss_off), and NR runs at Present, at Full, meanwhile.
@@ -98,6 +99,7 @@ struct SetupFacts {
   // Plan 15 fix round (minor 6): nothing can run again on this device this session (D3D12_NGX_ABANDONED_REASON): every option of the three rows is greyed
   // with it, a fixed cause, the highlights included (none of them runs).
   std::string_view stopped;
+  bool before_fg_late_effects = false;
   bool game_passes_motion = true;      // false while the latest main evaluate carried no readable motion vectors
   std::string_view dlss_motion_fixed;  // Vulkan at Present on a CPU-ordered bridge: DLSS's motion vectors cannot reach NR there (VULKAN_CPU_ORDERED_MOTION)
   bool launchpad_ready = false;        // Launchpad's technique and Uplift.fx's Uplift technique are enabled

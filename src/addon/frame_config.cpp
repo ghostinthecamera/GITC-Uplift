@@ -21,7 +21,7 @@ FrameConfig BuildFrameConfig(const FrameConfigInputs& inputs, ui::ControlsCoales
       .transfer_strength = settings.transfer_strength,
       .color_strength = settings.color_strength,
       .source = settings.source,
-      .present_with_frame_gen = settings.present_with_frame_gen,
+      .present_with_frame_gen = settings.fg_present == ui::Settings::FgPresent::AFTER,
       .allow_cross_queue_passes = settings.allow_cross_queue_passes,
       // Launchpad and (2026-10-08) Lumenite feed the presented image only: inside the game's frame either runs on DLSS's own vectors.
       .motion_vectors = (settings.motion_vectors == ui::MotionVectorSource::AUTO
@@ -58,6 +58,18 @@ FrameConfig BuildFrameConfig(const FrameConfigInputs& inputs, ui::ControlsCoales
                               .slider_held = inputs.drag.resolution_scale_present}}},
       .stage_keep_faces = {settings.keep_faces_after_dlss, settings.keep_faces_present},
   };
+  if (inputs.game_facing_present) {
+    config.game_facing_present = true;
+    config.before_fg_selected = true;
+    config.present_with_frame_gen = true;
+    config.launchpad_motion = false;
+    config.effects_on = false;
+    if (settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD || settings.motion_vectors == ui::MotionVectorSource::LUMENITE) {
+      config.motion_at_dlss_stage = config.motion_vectors;
+      config.motion_vectors = settings.before_fg_motion == ui::Settings::FgMotion::DLSS;
+      config.motion_vectors_want_launchpad = false;
+    }
+  }
   // Split chain: passes 2..10's "Runs at", which the Defaults view keeps (PASS_STAGE).
   for (size_t index = 0u; index < settings.passes.size(); ++index) {
     config.pass_stages[index] = settings.passes[index].stage;

@@ -22,6 +22,7 @@ class D3D12Side {
   // an independent one from the device factory, or without one D3D12CreateDevice's (ReShade's proxy in a game): release it
   // only outside the add-on's lock. The native device comes from the progress fence's GetDevice (Plan 7 key decision a).
   static std::unique_ptr<D3D12Side> Create(LUID luid, Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
+  static std::unique_ptr<D3D12Side> OnGameQueue(ID3D12CommandQueue* native_queue);
   ~D3D12Side();  // waits up to 2 s for the last signalled progress value, then releases, the created device last
   D3D12Side(const D3D12Side&) = delete;
   D3D12Side& operator=(const D3D12Side&) = delete;
@@ -67,6 +68,7 @@ class D3D12Side {
 
  private:
   D3D12Side() = default;
+  bool CreateListRing();
 
   struct Slot {
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;

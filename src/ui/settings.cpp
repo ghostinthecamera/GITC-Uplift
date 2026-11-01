@@ -45,6 +45,8 @@ Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnin
       if (const std::optional<bool> flag = ParseBoolSetting(*text); flag.has_value()) {
         value = (*flag ? 1.0 : 0.0);
       }
+    } else if (descriptor.key == "PresentWithFrameGen" && (*text == "true" || *text == "false")) {
+      value = (*text == "true" ? 1.0 : 0.0);
     } else if (descriptor.kind == SettingKind::FLOAT) {
       float parsed = 0.f;
       const auto [end, error] = std::from_chars(text->data(), text->data() + text->size(), parsed);
@@ -67,6 +69,9 @@ Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnin
       descriptor.set(settings, *value);
     }
   }
+  if (settings.use_d3d9ex) settings.startup_latches &= ~Settings::LATCH_D3D9EX;
+  if (settings.adjust_vulkan_devices) settings.startup_latches &= ~Settings::LATCH_VK_DEVICE;
+  if (settings.adjust_vulkan_devices_for_ngx) settings.startup_latches &= ~Settings::LATCH_VK_NGX;
   MigrateSettings(&settings);
   return settings;
 }

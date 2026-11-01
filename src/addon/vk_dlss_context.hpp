@@ -76,6 +76,7 @@ struct VkPresentQueues {
   std::function<void()> flush_effects;
   // The game presents from another queue: flushes that queue and has `fence` signalled there (the CPU waits for it before NR); empty otherwise.
   std::function<bool(VkFence)> flush_present_queue;
+  std::span<const VkSemaphore> waits{};
 };
 
 // Plan 19: this frame's UPLIFT_MV for native NR at Present (the Uplift technique's event, while Launchpad runs): a sampled view in SHADER_READ_ONLY_OPTIMAL.

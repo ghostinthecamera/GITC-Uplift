@@ -41,6 +41,13 @@ class FeatureInterface {
   virtual void Abandon() = 0;
   [[nodiscard]] virtual bool Created() const = 0;
   [[nodiscard]] virtual Size Capacity() const = 0;
+  [[nodiscard]] virtual RecordedModel Model() const { return {}; }
+  [[nodiscard]] static RecordedModel DescribeModel(std::string_view network, bool evaluated, uint32_t style) {
+    RecordedNetwork kind = network.empty() ? RecordedNetwork::UNKNOWN : RecordedNetwork::OTHER;
+    if (network == "hnet-crazy-cuckoo-small-fp8") kind = RecordedNetwork::SMALL_FP8;
+    else if (network.find("honest_tench") != std::string_view::npos) kind = RecordedNetwork::LEGACY;
+    return {kind, static_cast<uint8_t>(evaluated && style < 3u ? style : 0xffu)};
+  }
   [[nodiscard]] virtual std::string Diagnostic(uint32_t /*pass*/) const { return {}; }
 };
 
@@ -57,6 +64,7 @@ class Feature final : public FeatureInterface {
   void Abandon() override;
   [[nodiscard]] bool Created() const override { return handle_ != nullptr; }
   [[nodiscard]] Size Capacity() const override { return capacity_; }
+  [[nodiscard]] RecordedModel Model() const override { return DescribeModel(network_, has_evaluation_, last_style_); }
   [[nodiscard]] std::string Diagnostic(uint32_t pass) const override;
 
  private:

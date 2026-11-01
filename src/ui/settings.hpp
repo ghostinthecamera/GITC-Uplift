@@ -229,7 +229,10 @@ struct Settings {
   DlssQualityOverride dlss_quality_mode = DlssQualityOverride::GAME;
   std::array<DlssPresetOverride, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_presets = {};
   AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
-  bool present_with_frame_gen = false;
+  enum class FgPresent : uint8_t { OFF, AFTER, BEFORE };
+  FgPresent fg_present = sizeof(void*) == 8 ? FgPresent::BEFORE : FgPresent::OFF;
+  enum class FgMotion : uint8_t { SELECT, OFF, DLSS };
+  FgMotion before_fg_motion = FgMotion::SELECT;
   bool allow_cross_queue_passes = false;
   float motion_scale_x = 1.f;  // multiplies DLSSNR.MVecScaleX; negative flips the axis
   float motion_scale_y = 1.f;
@@ -272,6 +275,9 @@ struct Settings {
   bool dlss_placement_blocked = false;       // hidden: the device-removal latch (v2 design §3.2)
   uint32_t config_version = CONFIG_VERSION;  // hidden: the version the loaded file declared
   bool auto_retry = true;                    // Plan 6 (D11): retry a failed session on the backoff
+  // These settings can also be turned off manually. Remember which ones Uplift disabled after a failed start.
+  static constexpr uint32_t LATCH_D3D9EX = 1u, LATCH_VK_DEVICE = 2u, LATCH_VK_NGX = 4u;
+  uint32_t startup_latches = 0u;
   bool use_d3d9ex = false;                   // Plan 9 (design §2.9): ask ReShade for a Direct3D 9Ex device (Direct3D 9 games, 32- and 64-bit)
   bool adjust_vulkan_devices = true;         // Plan 11 (Vulkan design §2.3): hidden; 0 keeps the vkCreateDevice hook recording devices but adding nothing
   bool adjust_vulkan_devices_for_ngx = true;  // Plan 19 T1b: hidden; 0 keeps NGX's extensions and bufferDeviceAddress off the game's device (64-bit)

@@ -2,44 +2,31 @@
 // enable "Uplift" and drag it to where DLSS-NR should run: techniques above it see the game's
 // image, techniques below it see NR's output. Without it, Uplift runs NR before every effect.
 //
-// With iMMERSE LaunchPad installed (Plan 6, v2 design §3.20), this technique can also ask LaunchPad for its optical
-// flow and write it to UPLIFT_MV (back-buffer pixels, current -> previous) right before Uplift runs NR here. Put
-// Uplift below LaunchPad. It includes LaunchPad's own header from your install; nothing of LaunchPad's ships with Uplift.
-//
-// Automatic: Uplift sets UPLIFT_USE_LAUNCHPAD itself, through the add-on API, whenever Motion vectors is LaunchPad
-// or Auto and MartysMods_Launchpad is enabled; no preprocessor edit is needed. It stays 0 otherwise, because
-// including LaunchPad's header creates LaunchPad's textures (about 200 MB of VRAM at 4K) and requests optical flow
-// every frame, whether NR is on or not. Without Uplift's add-on loaded, UPLIFT_USE_LAUNCHPAD can still be set by
-// hand in this effect's preprocessor definitions.
-//
-// Plan 8: Direct3D 10 games too. ReShade's D3D10 backend has no compute shaders, so there the marker pass draws one
-// point into a 1x1 texture (as LaunchPad's own IPC passes do); D3D11 and D3D12 keep the compute marker.
-//
-// Plan 9: 32-bit Direct3D 9 games too, with the same one-point marker.
-//
-// Plan 10: LaunchPad's optical flow on Direct3D 9 too (shader model 3, through ReShade's emulation); the gate below is __RENDERER__ >= 0x9000.
-// LaunchPad was checked to compile on ReShade's Direct3D 9 backend, so the gate stays. Only if it fails on some setup, set it back to
-// 0xa000 together with LAUNCHPAD_ON_D3D9 in src/addon/launchpad_link.hpp.
-//
-// Plan 11: Vulkan too, with the compute marker (ReShade's SPIR-V backend reports __RENDERER__ 0x20000, so the compute pass below applies, and so does
-// the LaunchPad block). There is no shader change for Vulkan.
-//
-// Plan 12: OpenGL too, with the compute marker (ReShade's GLSL backend reports __RENDERER__ 0x14xxx for GL 4.6, so the compute pass below applies). There is no shader change for OpenGL.
-//
-// Lumenite (2026-10-08): with LumeniteFX's Kernel ("LUMENITE: Kernel") enabled, this technique can turn Kernel's optical flow into UPLIFT_MV instead.
-// Put Uplift below Kernel. Uplift sets UPLIFT_USE_LUMENITE itself, through the add-on API, whenever Motion vectors is Lumenite, or Auto without
-// LaunchPad; nothing of Lumenite's ships with Uplift. Only Kernel computes the flow, once a frame, for every effect that redeclares its textures, as
-// this file does below. Kernel's flow is at 1/8 of the screen, so the Motion pass below brings it to full size along the edges of this frame's image, and
-// fades it out where Kernel is unsure of it. One of the two is compiled in at a time: LaunchPad's when both are set. Direct3D 10 and newer.
+// The two motion checkboxes permit the add-on to use a provider when its technique is enabled above Uplift.
+// Setup chooses the motion source. The add-on compiles the matching pass so unused provider textures and Launchpad's IPC request can be released.
 
 #ifndef UPLIFT_USE_LAUNCHPAD
-  #define UPLIFT_USE_LAUNCHPAD 0
+  #define UPLIFT_USE_LAUNCHPAD 1
 #endif
 #ifndef UPLIFT_USE_LUMENITE
-  #define UPLIFT_USE_LUMENITE 0
+  #define UPLIFT_USE_LUMENITE 1
+  #define UPLIFT_DETECT_KERNEL
 #endif
 
 #if __RENDERER__ >= 0x9000
+
+uniform bool UpliftAllowLaunchpad <
+  ui_type = "checkbox";
+  ui_label = "Allow Launchpad motion";
+  ui_tooltip = "Use iMMERSE Launchpad when selected in Uplift Setup. Enable its technique above Uplift.";
+> = true;
+#if __RENDERER__ >= 0xa000
+uniform bool UpliftAllowLumenite <
+  ui_type = "checkbox";
+  ui_label = "Allow Lumenite motion";
+  ui_tooltip = "Use Lumenite Kernel when selected in Uplift Setup. Enable its technique above Uplift.";
+> = true;
+#endif
 
 #define UPLIFT_LAUNCHPAD 0
 #if __RENDERER__ >= 0x9000
@@ -59,8 +46,16 @@
 // Lumenite (2026-10-08): only without LaunchPad's, from Direct3D 10 on (the nine-cell upsample below is not checked on shader model 3).
 #define UPLIFT_LUMENITE 0
 #if !UPLIFT_LAUNCHPAD && UPLIFT_USE_LUMENITE && __RENDERER__ >= 0xa000
-  #undef UPLIFT_LUMENITE
-  #define UPLIFT_LUMENITE 1
+  // A renamed Kernel is also supported: the add-on recognizes its technique and explicitly links this pass.
+  #if !defined(UPLIFT_DETECT_KERNEL)
+    #undef UPLIFT_LUMENITE
+    #define UPLIFT_LUMENITE 1
+  #elif __RESHADE__ >= 60000
+    #if exists "lumenite_Kernel.fx"
+      #undef UPLIFT_LUMENITE
+      #define UPLIFT_LUMENITE 1
+    #endif
+  #endif
 #endif
 
 #if UPLIFT_LAUNCHPAD || UPLIFT_LUMENITE
@@ -75,6 +70,7 @@ void UpliftMotionVS(uint id : SV_VertexID, out float4 position : SV_Position, ou
 #if UPLIFT_LAUNCHPAD
 // LaunchPad's motion is a UV offset from this frame to the previous one; NR and Uplift's stabiliser take pixels.
 float2 UpliftMotionPS(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target {
+  if (!UpliftAllowLaunchpad) return 0.0;
   return Deferred::get_motion(texcoord) * float2(BUFFER_WIDTH, BUFFER_HEIGHT);
 }
 #endif
@@ -118,6 +114,7 @@ float UpliftLuma(float3 color) { return clamp(dot(color, float3(0.2126, 0.7152, 
 // of them takes its surroundings' motion (EDGE_TRUST). Each cell's confidence scales its flow but not its weight, so unsure cells pull the result toward
 // zero motion. Then to pixels, as LaunchPad's.
 float2 UpliftLumeniteMotionPS(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target {
+  if (!UpliftAllowLumenite) return 0.0;
   float luma = UpliftLuma(tex2Dlod(UpliftBackBuffer, float4(texcoord, 0.0, 0.0)).rgb);
   float2 cell = texcoord * UPLIFT_FLOW_CELLS - 0.5;  // this pixel in cell-centre coordinates
   float2 nearest = floor(cell + 0.5);
@@ -159,10 +156,14 @@ float UpliftMarkerPS(float4 position : SV_Position) : SV_Target { return 0.0; }
 
 technique Uplift <
   ui_label = "Uplift (DLSS-NR position)";
-  ui_tooltip = "Marks where Uplift runs DLSS-NR among your effects. With iMMERSE LaunchPad above it and Motion "
-               "vectors set to LaunchPad or Auto, Uplift links itself to LaunchPad automatically and hands its "
-               "motion vectors here; no preprocessor edit needed. LumeniteFX's Kernel above it works the same way "
-               "(Motion vectors Lumenite, or Auto without LaunchPad).";
+  ui_tooltip = "Place this technique where Present passes should run among your effects. Enable a motion provider above it and choose the source in Uplift Setup.";
+#if UPLIFT_LAUNCHPAD
+  uplift_motion_source = 1;
+#elif UPLIFT_LUMENITE
+  uplift_motion_source = 2;
+#else
+  uplift_motion_source = 0;
+#endif
 >
 {
 #if UPLIFT_LAUNCHPAD

@@ -18,8 +18,6 @@
 
 namespace uplift::nr {
 
-inline constexpr uint32_t MAX_PASSES = 10u;
-
 // Split chain (2026-10-10, design 3.2): the passes [first, first + count), 0-based and global, that one stage of the frame runs. `stage` (below
 // SESSION_STAGES; addon::Stage's order: Before upscaling, After DLSS, Present) keys that stage's own sizes, resets and Keep faces twin. The default is every
 // pass at one stage: the single chain of before the split.

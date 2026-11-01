@@ -122,21 +122,35 @@ std::unique_ptr<D3D12Side> D3D12Side::Create(LUID luid, ComPtr<ID3D12Device>* cr
     return fail("the private queue could not be created");
   }
   side->queue_->SetName(L"Uplift private queue");
-  side->progress_->SetName(L"Uplift progress fence");  // Plan 17: names DRED's breadcrumbs and page faults can show
+  if (!side->CreateListRing()) return fail("the command recording ring could not be created");
+  return side;
+}
+
+std::unique_ptr<D3D12Side> D3D12Side::OnGameQueue(ID3D12CommandQueue* native_queue) {
+  if (!native_queue || native_queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return {};
+  std::unique_ptr<D3D12Side> side(new D3D12Side());
+  side->queue_ = native_queue;
+  if (FAILED(native_queue->GetDevice(IID_PPV_ARGS(&side->device_)))
+      || FAILED(side->device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&side->progress_)))
+      || !side->CreateListRing()) return {};
+  return side;
+}
+
+bool D3D12Side::CreateListRing() {
+  ID3D12Device* const native = device_.Get();
+  progress_->SetName(L"Uplift progress fence");  // Plan 17: names DRED's breadcrumbs and page faults can show
   for (size_t index = 0u; index < RING; ++index) {
-    Slot& slot = side->ring_[index];
+    Slot& slot = ring_[index];
     if (FAILED(native->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator)))) {
-      return fail("the private command allocators could not be created");
+      return false;
     }
     slot.allocator->SetName(L"Uplift NR frame allocator");
   }
-  if (FAILED(native->CreateCommandList(0u, D3D12_COMMAND_LIST_TYPE_DIRECT, side->ring_[0].allocator.Get(), nullptr,
-                                       IID_PPV_ARGS(&side->list_)))
-      || FAILED(side->list_->Close())) {
-    return fail("the private command list could not be created");
-  }
-  side->list_->SetName(L"Uplift NR frame");
-  return side;
+  if (FAILED(native->CreateCommandList(0u, D3D12_COMMAND_LIST_TYPE_DIRECT, ring_[0].allocator.Get(), nullptr,
+                                       IID_PPV_ARGS(&list_)))
+      || FAILED(list_->Close())) return false;
+  list_->SetName(L"Uplift NR frame");
+  return true;
 }
 
 D3D12Side::~D3D12Side() {

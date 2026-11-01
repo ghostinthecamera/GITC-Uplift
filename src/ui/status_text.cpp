@@ -41,7 +41,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   if (!facts.present_fixed.empty()) {
     at(view.stage_options, SourcePick::PRESENT) = {.why = facts.present_fixed};  // a fixed cause beats the temporary one: it would not clear
   } else if (facts.frame_generation_blocks_present) {
-    at(view.stage_options, SourcePick::PRESENT) = {.why = "Frame generation is on: turn on Present with frame generation (Advanced)", .temporary = true};
+    at(view.stage_options, SourcePick::PRESENT) = {.why = FG_PRESENT_OFF_REASON, .temporary = true};
   }
   // Plan 15: held after the game's NGX shutdown on Direct3D 12, no stage can run until the game's DLSS starts again. That beats the other temporary causes
   // (it is why nothing runs now); a fixed cause keeps its own text, since it would not clear with the hold.
@@ -83,7 +83,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   } else if (view.stage != SourcePick::PRESENT) {
     launchpad = {.why = "Launchpad feeds NR on the presented image only", .temporary = true};
   } else if (!facts.launchpad_ready) {
-    launchpad = {.why = "Turn iMMERSE Launchpad on and enable Uplift.fx's Uplift technique below it", .temporary = true};
+    launchpad = {.why = "Enable Launchpad above Uplift and allow Launchpad motion in Uplift.fx.", .temporary = true};
   }
   // 2026-10-08: Lumenite, as Launchpad.
   OptionState& lumenite = at(view.motion_options, MotionPick::LUMENITE);
@@ -94,7 +94,11 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   } else if (view.stage != SourcePick::PRESENT) {
     lumenite = {.why = "Lumenite feeds NR on the presented image only", .temporary = true};
   } else if (!facts.lumenite_ready) {
-    lumenite = {.why = "Turn LumeniteFX's Kernel on and enable Uplift.fx's Uplift technique below it", .temporary = true};
+    lumenite = {.why = "Enable Lumenite Kernel above Uplift and allow Lumenite motion in Uplift.fx.", .temporary = true};
+  }
+  if (facts.before_fg_late_effects) {
+    launchpad = {.why = "Launchpad runs after frame generation", .temporary = true};
+    lumenite = {.why = "Lumenite runs after frame generation", .temporary = true};
   }
   hold(&dlss);
   hold(&launchpad);

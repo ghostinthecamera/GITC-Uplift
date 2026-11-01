@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -10,13 +11,20 @@
 #include "ui/controls_coalescer.hpp"
 #include "ui/settings.hpp"
 #include "ui/status_text.hpp"
+#include "sources/motion_source.hpp"
 
 namespace uplift::ui {
 
 // What the panel shows besides the settings.
 struct OverlayView {
   std::string status_line;
-  std::string network_diagnostic;
+  std::array<nr::RecordedModel, MAX_PASSES> pass_models{};
+  std::string details_backend, details_note;
+  color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
+  nr::Size output_size;
+  bool lumenite_motion = false;
+  struct Activity { uint64_t real = 0, reshade = 0, passes = 0; };
+  std::optional<Activity> activity;
   bool legacy_runtime = false;
   uint64_t intermediate_bytes = 0u;
   std::optional<uint64_t> runtime_bytes;  // the NR runtime's own allocation, when its stats report it
@@ -24,19 +32,31 @@ struct OverlayView {
   uint32_t last_key_pressed = 0u;         // effect_runtime::last_key_pressed, for hotkey capture
   // The lines the Details header shows after the status line, also promoted into the status card while it is
   // working (its fixed height has spare lines then). Each is the engine's or the bridge's own text.
-  std::string api_line;  // the Direct3D 11/10 bridge's or the helper front's line; empty on native Direct3D 12
+  struct SafetyLock {
+    std::string_view feature;
+    std::string reason;
+    bool Settings::* setting = nullptr;  // For persistent latches, the existing setting to restore at next startup.
+    bool restore_value = true;
+    bool retry_now = false;
+  };
+  std::vector<SafetyLock> safety_locks;
+  void AddStartupLocks(const Settings& settings, bool vulkan, bool d3d9);
+  struct StageRun {
+    uint32_t first = 0, count = 0;
+    nr::Size resolution;
+    sources::MotionSource motion = sources::MotionSource::NONE;
+    uint32_t planned = 0;
+    std::string skip;
+
+  };
+  std::array<StageRun, 4> stage_runs{};  // Pre-DLSS, After DLSS, Before FG, On Present. Only passes actually evaluated.
+  std::string before_fg_unavailable;
   std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
   bool frame_generation_active = false;  // the working card shows frame_generation_line only when this is set
   bool dlss_latched = false;              // DlssPlacementBlocked: the device-removal latch is set (Plan 19 fix round: or, in a Vulkan game, VulkanNativeNr = 0)
   std::string ui_correction_note;  // Plan 5 (D7): why UI correction does nothing on this placement
   std::string keep_faces_unavailable;  // Keep faces (2026-10-08): non-empty greys its rows, and says why (ui::KeepFacesUnavailable)
   StatusCard card;  // Plan 6 (D1): replaces the message line at the top
-  // The engine's own lines, which Details lists under the status line (Plan 14: the rows no longer repeat them as "Now: ..." readouts).
-  std::string placement_line;  // FormatPlacementLine; "Placement: NR is off" before a device exists
-  std::string motion_line;     // "Motion vectors: DLSS (the game's own, scale 1 x 1)"; never empty
-  std::string work_line;       // "Working at 1920x1080 of 3840x2160 (Edge-aware)"; empty before a frame
-  std::string exposure_line;   // Plan 17: "Input exposure: metered (the game's exposure was 6.3 stops off)"; empty when none is used
-  std::string chain_line;      // split chain: "Chain: pass 1 before upscaling (960x540), 2 at Present (1920x1080)", and the chain's note; empty otherwise
   std::string mask_note;       // "NR mask: UPLIFT_MASK (1920x1080)", or why not
   std::string frame_generation_warning;  // shown under Pass count when it applies; empty otherwise
   // ui-review.md §4.1: why no DLSS placement can run this session (bridged, hooks, ReShade version, the
@@ -73,6 +93,10 @@ struct OverlayView {
 struct OverlayState {
   DragState drag;
   bool language_changed = false;
+  OverlayView::Activity activity_start{}, activity_delta{};
+  std::chrono::steady_clock::time_point activity_since{};
+  double activity_seconds = 0.0;
+  Settings::FgPresent activity_mode = Settings::FgPresent::OFF;
   bool capturing_key = false;
   // Set on the frame a new hotkey is captured. That key press is still "pressed" in the same
   // frame's input snapshot, so the hotkey handler must skip it once instead of toggling Enable.
@@ -81,6 +105,7 @@ struct OverlayState {
   std::chrono::steady_clock::time_point capture_seen;
   bool defaults_view = false;   // Plan 6 (D6): session only; the add-on keeps it when the overlay closes
   std::string_view enable_warning_key;  // requested checkbox confirmation; ImGui owns the open modal
+  bool confirm_present_stage = false;  // The diagram changes both Source and FG placement when the warning is accepted.
   bool confirm_restore = false;  // G2: the first click of Restore all defaults
   bool retry_now = false;        // D11: the add-on calls DeviceContext::RetryNow after DrawOverlay and clears it
   // An APPLY_ON_RELEASE slider being held: the value it shows. The setting keeps the applied one until release.
@@ -94,6 +119,8 @@ struct OverlayState {
 // Plan 14: resolves Setup from `facts` (the shown device's), settles its highlights in `state` and, for a working card, builds the card's rows. Sets
 // `view->setup` and `view->live`; `view->card` must be set already. `device`: the shown device's identity. `facts`' views must outlive the draw.
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now);
+
+bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state);
 
 // Draws the Uplift panel (spec §12) inside the window ReShade opened for it, editing `settings`
 // in place. Returns true when a setting changed; the caller then sanitises, saves and applies.

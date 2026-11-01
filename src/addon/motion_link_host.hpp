@@ -20,6 +20,7 @@ inline constexpr char LUMENITE_DEFINE[] = "UPLIFT_USE_LUMENITE";
 inline constexpr char LAUNCHPAD_TECHNIQUE_NAME[] = "MartysMods_Launchpad";
 
 struct MotionLinks {
+  UpliftMvSource last_source = UpliftMvSource::NONE;
   LaunchPadLink launchpad;
   LaunchPadLink lumenite;
   LaunchpadReadiness launchpad_readiness;  // Setup's "ready", held through the effect reload a link itself causes
@@ -48,12 +49,13 @@ struct Definition {
   std::optional<bool> current;  // LaunchPadDefinition: what Uplift.fx compiles with, when known
 };
 
-inline Definition Read(reshade::api::effect_runtime* runtime, const char* define) {
+inline Definition Read(reshade::api::effect_runtime* runtime, const char* define, bool default_on) {
   char effect_value[32] = {};
   const bool effect_scope = runtime->get_preprocessor_definition_for_effect(UPLIFT_FX_EFFECT, define, effect_value);
   // 1.0.1 (review I-4): without one at the effect scope Uplift.fx compiles with the preset's or the global definition (a null effect name reads those).
   char outer_value[32] = {};
   const bool outer = (!effect_scope && runtime->get_preprocessor_definition(define, outer_value));
+  if (!effect_scope && !outer) return {.current = default_on};
   return {.effect_scope = effect_scope,
           .current = LaunchPadDefinition((effect_scope ? std::optional<std::string_view>(effect_value) : std::nullopt),
                                          (outer ? std::optional<std::string_view>(outer_value) : std::nullopt))};
@@ -76,8 +78,18 @@ inline MotionLinkStep UpdateMotionLinks(MotionLinks* links, reshade::api::effect
     runtime->get_technique_effect_name(uplift, effect_name);
     ready = (std::string_view(effect_name) == UPLIFT_FX_EFFECT);
   }
-  const motion_link_detail::Definition launchpad_define = motion_link_detail::Read(runtime, LAUNCHPAD_DEFINE);
-  const motion_link_detail::Definition lumenite_define = motion_link_detail::Read(runtime, LUMENITE_DEFINE);
+  int32_t shader_source = 0;
+  const bool checkboxes = ready && runtime->get_annotation_int_from_technique(uplift, "uplift_motion_source", &shader_source, 1);
+  const auto allowed = [runtime, checkboxes](const char* name) {
+    bool value = true;
+    if (checkboxes) {
+      const auto uniform = runtime->find_uniform_variable(UPLIFT_FX_EFFECT, name);
+      if (uniform.handle) runtime->get_uniform_value_bool(uniform, &value, 1);
+    }
+    return value;
+  };
+  const motion_link_detail::Definition launchpad_define = motion_link_detail::Read(runtime, LAUNCHPAD_DEFINE, checkboxes && shader_source == 1);
+  const motion_link_detail::Definition lumenite_define = motion_link_detail::Read(runtime, LUMENITE_DEFINE, checkboxes && shader_source == 2);
   // An Uplift.fx that failed to compile with "1" lists no technique. Its own entry for either define still means ReShade knows it, so "0" can go back.
   if (!ready && (launchpad_define.effect_scope || lumenite_define.effect_scope)) {
     runtime->enumerate_techniques(nullptr, [&ready](api::effect_runtime*, api::effect_technique) {
@@ -86,8 +98,8 @@ inline MotionLinkStep UpdateMotionLinks(MotionLinks* links, reshade::api::effect
   }
   const api::effect_technique launchpad_technique = (launchpad_here ? runtime->find_technique(nullptr, LAUNCHPAD_TECHNIQUE_NAME) : api::effect_technique{0u});
   const api::effect_technique lumenite_technique = (lumenite_here ? runtime->find_technique(nullptr, LUMENITE_TECHNIQUE) : api::effect_technique{0u});
-  const bool launchpad_on = (launchpad_technique.handle != 0u && runtime->get_technique_state(launchpad_technique));
-  const bool lumenite_on = (lumenite_technique.handle != 0u && runtime->get_technique_state(lumenite_technique));
+  const bool launchpad_on = (launchpad_technique.handle != 0u && runtime->get_technique_state(launchpad_technique) && allowed("UpliftAllowLaunchpad"));
+  const bool lumenite_on = (lumenite_technique.handle != 0u && runtime->get_technique_state(lumenite_technique) && allowed("UpliftAllowLumenite"));
   // Plan 14: Setup offers a source only while its technique and the Uplift technique are both enabled (the Uplift technique's own order shows only at run
   // time). ReShade lists no technique while it reloads Uplift.fx, which choosing a source does: the last ready value holds through that.
   step.launchpad_ready = links->launchpad_readiness.Update((uplift.handle != 0u && launchpad_technique.handle != 0u), (marker && launchpad_on), now);
@@ -110,7 +122,17 @@ inline MotionLinkStep UpdateMotionLinks(MotionLinks* links, reshade::api::effect
     }
   }
   // Uplift.fx compiles Launchpad's pass when both are set (its #if order), so UPLIFT_MV is Lumenite's only without Launchpad's.
-  step.compiled = CompiledUpliftMv(launchpad_here, launchpad_now, lumenite_here, lumenite_now);
+  if (checkboxes) {
+    step.compiled = CompiledUpliftMv(wanted.launchpad, shader_source == 1, wanted.lumenite, shader_source == 2);
+  } else {
+    step.compiled = CompiledUpliftMv(launchpad_here, launchpad_now, lumenite_here, lumenite_now);
+  }
+  if (!marker || !ready || !UpliftMvValid(step.compiled, wanted.launchpad, wanted.lumenite)) step.compiled = UpliftMvSource::NONE;
+  if (step.compiled != links->last_source) {
+    links->last_source = step.compiled;
+    const char* source = step.compiled == UpliftMvSource::LAUNCHPAD ? "Launchpad" : step.compiled == UpliftMvSource::LUMENITE ? "Lumenite" : "Off";
+    nr::Logf(nr::LogLevel::INFO, "Uplift.fx motion source: {}", source);
+  }
   step.uplift_mv_lumenite = (step.compiled == UpliftMvSource::LUMENITE);
   return step;
 }

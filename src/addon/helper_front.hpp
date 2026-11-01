@@ -83,6 +83,9 @@ struct HelperDevice {
   // Plan 17: the 2-strike rule for the helper's stops (its own device removed, a hang, an exit), as for a bridge's private device: Retry now restarts it once.
   BridgeStrikes strikes;
   bool claimed_elsewhere = false;
+  uint64_t before_fg_passes = 0u;
+  bool game_facing = false;
+  color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
   bool nr_returned_logged = false;  // "NR ran on the game's frame" was logged since the client last attached (Reset, helper exit)
   bool ex_checked = false;
   uint32_t ex_presents = 0u;  // present events of a 9Ex device, counted up to 2: the second proves the first real Present returned
@@ -183,7 +186,7 @@ struct HelperFrame {
   // Null for every other API, and for a Vulkan or OpenGL device whose runtime is not up yet (nothing runs then).
   reshade::api::command_queue* queue = nullptr;
   reshade::api::command_queue* present_queue = nullptr;
-  std::string_view vk_hook_error;  // why the vkCreateDevice hook is not installed (an unseen device's Details reason); empty when it is
+  std::string vk_hook_error;  // why the vkCreateDevice hook is not installed (an unseen device's Details reason); empty when it is
   reshade::api::resource back_buffer = {0u};
   reshade::api::effect_technique marker = {0u};  // 0 when the Uplift technique is off
   const ui::Settings* settings = nullptr;
@@ -192,6 +195,9 @@ struct HelperFrame {
   bool claimed_elsewhere = false;  // NR is on and the claim went to another device: Present returns after noting it
   bool drain_now = false;          // transitions (64-bit Vulkan): NR's owner moved away from the helper, which drains with no grace
   std::chrono::steady_clock::time_point now;
+  vk::GameHost* outer_vulkan_host = nullptr;
+  vk::ImageInfo outer_vulkan_image;
+  color::ColorSpace outer_color_space = color::ColorSpace::UNKNOWN;
 };
 
 class HelperFront {
@@ -259,7 +265,7 @@ class HelperFront {
   // runtime's) make the client's host; `at_present`: the calling event is the present event (the back buffer is in the present state, and on OpenGL the
   // present queue's context is checked).
   void RunClient(HelperDevice& device, reshade::api::device* game_device, reshade::api::command_queue* queue, TriggerPoint point, uint64_t source,
-                 uint64_t launchpad_motion, bool at_present);
+                 uint64_t launchpad_motion, bool at_present, vk::GameHost* outer_host = nullptr, const vk::ImageInfo* outer_image = nullptr);
 
   std::string addon_file_;
   std::filesystem::path addon_directory_;

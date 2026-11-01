@@ -1,5 +1,7 @@
 #include "vk/command_ring.hpp"
 
+#include <vector>
+
 #include <format>
 
 namespace uplift::vk {
@@ -55,14 +57,30 @@ CommandRing::Status CommandRing::Begin(VkCommandBuffer* buffer) {
   return Status::READY;
 }
 
-VkResult CommandRing::Submit(VkQueue queue) {
+VkResult CommandRing::Submit(VkQueue queue, std::span<const VkSemaphore> waits) {
   if (!begun_) return VK_ERROR_INITIALIZATION_FAILED;
   begun_ = false;
   Slot& slot = slots_[current_];
   if (const VkResult ended = functions_.vkEndCommandBuffer(slot.buffer); ended != VK_SUCCESS) return ended;
+  const std::vector<VkPipelineStageFlags> stages(waits.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+  const bool relay = !waits.empty();
+  if (relay && slot.relay == VK_NULL_HANDLE) {
+    const VkSemaphoreCreateInfo create{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    if (const VkResult made = functions_.vkCreateSemaphore(device_, &create, nullptr, &slot.relay); made != VK_SUCCESS) return made;
+  }
   if (const VkResult reset = functions_.vkResetFences(device_, 1u, &slot.fence); reset != VK_SUCCESS) return reset;
-  const VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1u, .pCommandBuffers = &slot.buffer};
-  const VkResult submitted = functions_.vkQueueSubmit(queue, 1u, &submit, slot.fence);
+  const VkPipelineStageFlags relay_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+  // The second batch consumes our semaphore and restores the application's binary signals. The slot fence covers both batches.
+  const VkSubmitInfo batches[] = {
+    {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+     .waitSemaphoreCount = static_cast<uint32_t>(waits.size()), .pWaitSemaphores = waits.data(), .pWaitDstStageMask = stages.data(),
+     .commandBufferCount = 1u, .pCommandBuffers = &slot.buffer,
+     .signalSemaphoreCount = relay ? 1u : 0u, .pSignalSemaphores = relay ? &slot.relay : nullptr},
+    {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+     .waitSemaphoreCount = 1u, .pWaitSemaphores = &slot.relay, .pWaitDstStageMask = &relay_stage,
+     .signalSemaphoreCount = static_cast<uint32_t>(waits.size()), .pSignalSemaphores = waits.data()}
+  };
+  const VkResult submitted = functions_.vkQueueSubmit(queue, relay ? 2u : 1u, batches, slot.fence);
   if (submitted != VK_SUCCESS) {
     // Nothing reached the queue, so nothing will signal the fence: a fresh signalled one keeps the slot free (an unsignalled one would stay busy forever).
     functions_.vkDestroyFence(device_, slot.fence, nullptr);
@@ -121,6 +139,7 @@ void CommandRing::Destroy() {
     if (slot.fence != VK_NULL_HANDLE) {
       functions_.vkDestroyFence(device_, slot.fence, nullptr);
     }
+    if (slot.relay != VK_NULL_HANDLE) functions_.vkDestroySemaphore(device_, slot.relay, nullptr);
     slot = {};
   }
   if (wait_fence_ != VK_NULL_HANDLE) {

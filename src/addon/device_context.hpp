@@ -58,6 +58,9 @@ struct FrameConfig {
   float color_strength = 1.f;
   ui::PlacementSource source = ui::PlacementSource::AUTO;
   bool present_with_frame_gen = false;  // spec §11: the Present path runs with frame generation only when set
+  bool game_facing_present = false;
+  bool before_fg_selected = false;
+  std::optional<bool> motion_at_dlss_stage;  // Preserve the game-stage choice when Before FG overrides only Present.
   bool allow_cross_queue_passes = false;
   bool motion_vectors = true;           // MotionVectors is not None, or must act like it is (ui-review.md Q1(a):
                                          // MotionVectors == Launchpad while placement is inside the game's frame)
@@ -249,6 +252,11 @@ class DeviceContext {
   // the latch); empty when they can. The add-on decides it at start (Task 11).
   void SetDlssUnavailableReason(std::string reason);
   // First thing in the present event of the primary swap chain.
+  [[nodiscard]] ngx_hooks::FrameGenState FrameGeneration() const { return frame_generation_.State(); }
+  void NoteDisplayedPresent(std::chrono::steady_clock::time_point now) {
+    frame_generation_.OnPresent(now);
+    frame_generation_.Update(now, config_.ngx_frame_generation);
+  }
   TriggerPoint BeginFrame(ID3D12CommandQueue* queue, const FrameConfig& config, const TargetInfo& target,
                           bool marker_expected, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
   TriggerPoint OnBeginEffects(bool usable) { return trigger_.OnBeginEffects(usable); }  // 1.1.6

@@ -6,6 +6,13 @@
 
 namespace uplift::nr {
 
+inline constexpr uint32_t MAX_PASSES = 10u;
+enum class RecordedNetwork : uint8_t { UNKNOWN, LEGACY, SMALL_FP8, OTHER };
+struct RecordedModel {
+  RecordedNetwork network = RecordedNetwork::UNKNOWN;
+  uint8_t style = 0xff;  // No evaluation recorded.
+};
+
 struct Size {
   uint32_t width = 0u;
   uint32_t height = 0u;

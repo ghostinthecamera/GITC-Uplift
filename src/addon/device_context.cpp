@@ -146,7 +146,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   timeline_->BeginFrame(queue);
   timeline_->StampAged(now);
   present_queue_ = queue;
-  frame_generation_.OnPresent(now);
+  if (!config.game_facing_present) frame_generation_.OnPresent(now);
   frame_generation_.Update(now, config.ngx_frame_generation);
 
   // Plan 18 Task 12: the game switched its DLSS off after DLSS ran here (it released its last DLSS feature, or on Direct3D 11 shut NGX down; fix round 1,
@@ -306,11 +306,11 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
     return {.reason = reason};
   };
   // Spec §11: on the Present path NR would also run on generated frames.
-  if (frame_generation_.State().active && !config_.present_with_frame_gen) return skip("frame generation is on");
+  if ((frame_generation_.State().active || config_.before_fg_selected) && !config_.present_with_frame_gen) return skip("frame generation is on");
   // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before its source copy and encode.
   if (group > 0u && !session_->SliceRuns(slices_[group])) return skip(SliceSkipReason(group));
   // Default: keep distinct queues apart until UpdateChain remaps Present. The experimental opt-in uses the game's existing image handoff; it adds no wait.
-  if (group > 0u && !config_.allow_cross_queue_passes && !timeline_->StageWorkDone(dlss_stage_token_, present_queue_)) {
+  if (group > 0u && !config_.game_facing_present && !config_.allow_cross_queue_passes && !timeline_->StageWorkDone(dlss_stage_token_, present_queue_)) {
     return skip("waiting for the earlier stages' NR");
   }
   host->FlushPending();
@@ -655,12 +655,13 @@ void DeviceContext::UpdateChain() {
   std::string_view present_cause;
   if (!present_cannot_.empty()) {
     present_cause = present_cannot_;
-  } else if (frame_generation_.State().active && !config_.present_with_frame_gen) {
+  } else if (frame_generation_.State().active && !config_.present_with_frame_gen && !config_.before_fg_selected) {
     present_cause = "frame generation is on";
-  } else if (!config_.allow_cross_queue_passes && other_dlss_queue_ != nullptr) {
+  } else if (!config_.game_facing_present && !config_.allow_cross_queue_passes && other_dlss_queue_ != nullptr) {
     present_cause = (frame_generation_.State().active ? FRAME_GEN_QUEUE_REASON : OTHER_QUEUE_REASON);
   }
-  facts.cannot[static_cast<size_t>(Stage::PRESENT)] = present_cause;
+  // An explicit Before FG selection keeps its stored Present group even while the handoff is unavailable.
+  facts.cannot[static_cast<size_t>(Stage::PRESENT)] = config_.before_fg_selected ? std::string_view{} : present_cause;
   ChainPlan chain = DecideChain(facts);
 
   const auto same_groups = [](const ChainPlan& first, const ChainPlan& second) {
@@ -807,7 +808,7 @@ sources::AfterDlssConfig DeviceContext::DlssConfig(const sources::WorkLayout& la
       .diffuse_white_nits = config_.diffuse_white_nits,
       .transfer_strength = config_.transfer_strength,
       .color_strength = config_.color_strength,
-      .motion_vectors = config_.motion_vectors,
+      .motion_vectors = config_.motion_at_dlss_stage.value_or(config_.motion_vectors),
       .motion_scale_x = config_.motion_scale_x,
       .motion_scale_y = config_.motion_scale_y,
       .depth_inverted = config_.depth_inverted,

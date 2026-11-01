@@ -547,6 +547,10 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     }
     const bool exists = (result >= VK_SUCCESS && device != nullptr);
     if (exists) {
+      for (uint32_t i = 0; i < info->queueCreateInfoCount; ++i) {
+        const auto& queue_info = info->pQueueCreateInfos[i];
+        record.queue_families.push_back({queue_info.queueFamilyIndex, queue_info.queueCount, queue_info.flags});
+      }
       record.graphics_family = GraphicsFamily(physical, *info);  // Plan 19: the game's queues, which no request of Uplift's changes
     }
     {

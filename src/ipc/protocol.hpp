@@ -16,7 +16,7 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read; 7 (Plan 17): Status::exposure_line (+256 bytes).
 // 8: Frame::uplift_mv_lumenite (+8 bytes); 9: Status::network_diagnostic (+256 bytes); 10: Status::legacy_runtime (+8 with alignment).
 // 11: network diagnostics for all ten passes (+3840 bytes).
-inline constexpr uint32_t PROTOCOL_VERSION = 11u;
+inline constexpr uint32_t PROTOCOL_VERSION = 13u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t NETWORK_DIAGNOSTIC_BYTES = 4096u;
 inline constexpr size_t PATH_BYTES = 1024u;
@@ -90,7 +90,7 @@ struct Frame {
   uint32_t mask_running = 0u;  // an enabled technique writes UPLIFT_MASK (helper_front.hpp's MaskEffectRunning); Plan 10: every transport
   uint32_t drain_now = 0u;     // transitions (2026-10-08): NR's owner moved away from the helper: with nr_allowed 0, it drains with no grace (was reserved)
   uint32_t uplift_mv_lumenite = 0u;  // 2026-10-08 (protocol 8): UPLIFT_MV holds Lumenite's vectors, not Launchpad's (the readouts name it)
-  uint32_t reserved = 0u;
+  uint32_t game_facing_present = 0u;
   Target target;
 };
 
@@ -190,6 +190,9 @@ struct Status {
   char transport_line[TEXT_BYTES] = {};  // the helper's half of the Details line
   char exposure_line[TEXT_BYTES] = {};   // Plan 17: ContextStatus::exposure_line
   char network_diagnostic[NETWORK_DIAGNOSTIC_BYTES] = {};
+  struct PassModel { uint8_t network = 0u; uint8_t style = 0xffu; };
+  PassModel models[10]{};
+
 };
 
 struct Reply {
@@ -237,7 +240,7 @@ struct ControlBlock {
   LogRing log;
 };
 
-inline constexpr size_t CONTROL_BLOCK_BYTES = 60248u;  // protocol 11 expands the per-pass network diagnostics
+inline constexpr size_t CONTROL_BLOCK_BYTES = 60264u;  // protocol 13 includes per-pass model and style
 static_assert(sizeof(ControlBlock) == CONTROL_BLOCK_BYTES, "the add-on and the helper disagree on the control block");
 static_assert(offsetof(ControlBlock, request) % 8u == 0u && offsetof(ControlBlock, reply) % 8u == 0u);
 // Both processes use the Interlocked*64 functions on it, which need 8 alignment on x86 too.

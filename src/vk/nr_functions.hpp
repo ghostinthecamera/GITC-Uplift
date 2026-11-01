@@ -74,7 +74,7 @@ struct NrFunctions {
   PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR = nullptr;
 
   // nullopt when the loader is missing or one function is not there (the push-descriptor one included).
-  [[nodiscard]] static std::optional<NrFunctions> Open(VkDevice device);
+  [[nodiscard]] static std::optional<NrFunctions> Open(VkDevice device, bool pipeline = true);
 };
 
 }  // namespace uplift::vk

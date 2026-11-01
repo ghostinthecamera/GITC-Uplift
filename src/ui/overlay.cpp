@@ -26,7 +26,7 @@ namespace {
 // slider's label would sit at (ui-review.md §4.3's RadioRow sketch, adapted to draw buttons). Returns
 // the clicked option, or -1.
 int RadioRow(const char* label, std::span<const char* const> options, std::span<const std::string_view> why,
-             std::span<const std::string_view> tips, int selected) {
+             std::span<const std::string_view> tips, int selected, std::span<const size_t> display_order = {}) {
   const ImGuiStyle& style = gui::GetStyle();
   const float total_width = gui::CalcItemWidth();
   const float gap = style.ItemInnerSpacing.x;
@@ -34,8 +34,9 @@ int RadioRow(const char* label, std::span<const char* const> options, std::span<
   const float button_width = (total_width - static_cast<float>(count - 1u) * gap) / static_cast<float>(count);
   const float label_x = gui::GetCursorPosX() + total_width + gap;
   int clicked = -1;
-  for (size_t index = 0u; index < count; ++index) {
-    if (index > 0u) {
+  for (size_t column = 0u; column < count; ++column) {
+    const size_t index = display_order.empty() ? column : display_order[column];
+    if (column > 0u) {
       gui::SameLine(0.f, gap);
     }
     gui::PushID(static_cast<int>(index));
@@ -80,6 +81,8 @@ std::string SavedNote(std::string_view preference) {
 // One schema row. Returns true when the value changed. Called both from DrawOverlay (the Enable
 // row) and from its own draw_rows lambda (every other row), so it stays a free function.
 bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state) {
+  if (descriptor.key == "BeforeFGMotion" && (settings->fg_present != Settings::FgPresent::BEFORE
+      || (settings->motion_vectors != MotionVectorSource::LAUNCHPAD && settings->motion_vectors != MotionVectorSource::LUMENITE))) return false;
   const std::string label(descriptor.label);
   // Plan 6 (D6): with Compare = Built-in, a look-group row shows its built-in value, read-only: edits never reach `settings`.
   const bool read_only = (state->defaults_view && InDefaultsView(descriptor));
@@ -268,6 +271,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           if (!disabled_reason.empty()) {
             why.fill(disabled_reason);  // e.g. Game state after NR, greyed while no DLSS placement can run
           }
+          if (descriptor.key == "PresentWithFrameGen") why[static_cast<size_t>(Settings::FgPresent::BEFORE)] = view.before_fg_unavailable;
           if (descriptor.key == "VulkanNr" && disabled_reason.empty()) {
             // Plan 19 (the owner's UI rules): Native greyed where it cannot run, with why; the highlight is the route that runs. T5: Direct3D 12 too.
             why[static_cast<size_t>(VulkanNrMode::NATIVE)] = view.vulkan_native_unavailable;
@@ -284,9 +288,17 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           const std::span<const char* const> options(labels.data(), descriptor.choices.size());
           const std::span<const std::string_view> why_span(why.data(), descriptor.choices.size());
           const std::span<const std::string_view> tips_span(tips.data(), descriptor.choices.size());
-          if (const int clicked = RadioRow(label.c_str(), options, why_span, tips_span, value); clicked >= 0) {
-            descriptor.set(*settings, static_cast<double>(clicked));
-            changed = true;
+          // Show FG placements in pipeline order while retaining the stored values used by existing presets.
+          static constexpr size_t fg_order[]{static_cast<size_t>(Settings::FgPresent::OFF), static_cast<size_t>(Settings::FgPresent::BEFORE), static_cast<size_t>(Settings::FgPresent::AFTER)};
+          const std::span<const size_t> order = descriptor.key == "PresentWithFrameGen" ? std::span<const size_t>{fg_order} : std::span<const size_t>{};
+          if (const int clicked = RadioRow(label.c_str(), options, why_span, tips_span, value, order); clicked >= 0) {
+            if (descriptor.key == "PresentWithFrameGen" && clicked == static_cast<int>(Settings::FgPresent::AFTER)) {
+              state->confirm_present_stage = false;
+              state->enable_warning_key = descriptor.key;
+            } else {
+              descriptor.set(*settings, static_cast<double>(clicked));
+              changed = true;
+            }
           }
         } else if (descriptor.key == "ResolutionMode" || descriptor.key == "ResolutionAfterDlss" || descriptor.key == "ResolutionPresent") {
           // Plan 14 (the user's decision 1): the entries that cannot run now are greyed, each with its reason, and the preview is the mode that runs.
@@ -399,7 +411,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   return changed && !read_only;
 }
 
-bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, OverlayState* state) {
+bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, OverlayState* state, bool explicit_dlss) {
   const std::string title = std::format("{} - performance warning", descriptor.label);
   if (state->enable_warning_key == descriptor.key) {
     state->enable_warning_key = {};
@@ -411,7 +423,7 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
   if (!gui::BeginPopupModal(title.c_str(), &open, ImGuiWindowFlags_AlwaysAutoResize)) return false;
   gui::TextWrapped("%s", descriptor.enable_warning.data());
   gui::Separator();
-  const bool cancel = gui::Button("Keep disabled");
+  const bool cancel = gui::Button(descriptor.key == "PresentWithFrameGen" ? "Keep current mode" : "Keep disabled");
   gui::SetItemDefaultFocus();
   gui::SameLine();
   const bool enable = gui::Button("Enable anyway");
@@ -420,82 +432,13 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
   }
   if (enable) {
     descriptor.set(*settings, 1.0);
+    if (descriptor.key == "PresentWithFrameGen" && state->confirm_present_stage) {
+      SetSourcePick(settings, SourcePick::PRESENT, explicit_dlss);
+      state->setup_settle.Clicked(SetupRow::STAGE, static_cast<uint32_t>(SourcePick::PRESENT));
+    }
   }
   gui::EndPopup();
   return enable;
-}
-
-// Plan 14: the NR stage row -- Before upscaling / After DLSS / Present -- from Setup: an option that cannot run now is greyed (its reason on hover), the
-// highlight is what runs, and a click writes the stored preference as before. Not folded into DrawRow: it reads and writes two schema keys (Source,
-// PreUpscale) as one composite choice, and it carries the DLSS-placement latch's Clear latch button.
-bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* state) {
-  gui::PushID("Source");
-  static constexpr std::array<const char*, 3> OPTIONS = {"Before upscaling", "After DLSS", "Present"};
-  const std::array<std::string_view, 3> direct3d_tips = {
-      "NR works on the game's render-size image, and the game's DLSS upscales the result. Cheaper. Experimental.",
-      "NR works on DLSS's output inside the game's frame, before the HUD, post-processing and frame "
-      "generation. Runs on Present until the game runs DLSS.",
-      "NR works on the finished frame, HUD included. Works in every game. Uplift.fx's Uplift technique "
-      "sets where among your effects.",
-  };
-  // Plan 13 (the user's decision 1): on Vulkan the DLSS placements are explicit choices, and their tips name what stays after the first use.
-  const std::array<std::string_view, 3> vulkan_tips = {
-      "NR works on the game's render-size image, natively on the game's Vulkan device, and the game's DLSS upscales the result. Experimental. About "
-      "0.6 GB of VRAM stays with the game's device after the first use, until the game exits.",
-      "NR works on DLSS's output inside the game's frame, natively on the game's Vulkan device, before the HUD and post-processing. Runs on "
-      "Present until the game runs DLSS. About 0.6 GB of VRAM stays with the game's device after the first use, until the game exits.",
-      "NR works on the finished frame, HUD included. The default on Vulkan. Uplift.fx's Uplift technique sets where among your effects.",
-  };
-  std::array<std::string_view, 3> tips = (view.dlss_explicit ? vulkan_tips : direct3d_tips);
-  // Split-chain design 11 (the owner, 2026-10-15): with Ray Reconstruction, Before upscaling works on RR's input.
-  std::string before_tip;
-  if (view.setup.before_upscaling_on_rr) {
-    before_tip = std::format("{}\nThe game's DLSS is Ray Reconstruction: NR works on its input, before it denoises and upscales it.", tips[0]);
-    tips[0] = before_tip;
-  }
-  std::array<std::string_view, 3> why = {};
-  for (size_t index = 0u; index < why.size(); ++index) {
-    why[index] = view.setup.stage_options[index].why;
-  }
-  const SourcePick preferred = SourcePickOf(*settings, view.dlss_explicit);
-  const int shown = static_cast<int>(view.setup.stage);
-  std::string saved_tip;  // the highlighted option's tip, with the stored preference when it is not the one that runs
-  const OptionState& stored_stage = view.setup.stage_options[static_cast<size_t>(preferred)];
-  if (view.setup.stage != preferred && (stored_stage.why.empty() || stored_stage.temporary)) {  // a fixed cause never clears: no promise
-    saved_tip = std::format("{}\n{}", tips[static_cast<size_t>(shown)], SavedNote(OPTIONS[static_cast<size_t>(preferred)]));
-    tips[static_cast<size_t>(shown)] = saved_tip;
-  }
-  bool changed = false;
-  if (const int clicked = RadioRow("NR stage", OPTIONS, why, tips, shown); clicked >= 0) {
-    SetSourcePick(settings, static_cast<SourcePick>(clicked), view.dlss_explicit);
-    state->setup_settle.Clicked(SetupRow::STAGE, static_cast<uint32_t>(clicked));
-    changed = true;
-  }
-  if (!IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"))) {
-    gui::SameLine();
-    const bool reset_clicked = gui::SmallButton("<");
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      gui::SetTooltip(view.dlss_explicit ? "Reset to default (Present on Vulkan)" : "Reset to default (After DLSS)");
-    }
-    if (reset_clicked) {
-      // The defaults themselves (Auto, PreUpscale off): After DLSS on Direct3D 12, Present on Vulkan.
-      const SourcePick default_pick = (view.dlss_explicit ? SourcePick::PRESENT : SourcePick::AFTER_DLSS);
-      SetSourcePick(settings, default_pick, view.dlss_explicit);
-      state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(default_pick), view.setup);  // at once, to the best that can run
-      changed = true;
-    }
-  }
-  // ui-review.md §4.1: the latch's one surviving Clear latch button, unless the status card already shows it.
-  if (view.dlss_latched && view.card.button != CardButton::CLEAR_LATCH) {
-    gui::SameLine();
-    if (gui::SmallButton("Clear latch")) {
-      settings->dlss_placement_blocked = false;
-      settings->vulkan_native_nr = true;  // Plan 19 fix round (I-C): native Vulkan NR's latch too, from the next start
-      changed = true;
-    }
-  }
-  gui::PopID();
-  return changed;
 }
 
 // Split chain (Task 3, design 6.2): pass n's Runs at row, as the NR stage row but a combo (four long choices): a choice that cannot run is greyed with why,
@@ -665,10 +608,122 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
   if (state->setup_device != device) {
     state->setup_device = device;
     state->setup_settle.Reset();
+    state->activity_since = {};
+    state->activity_seconds = 0.0;
   }
   view->setup = state->setup_settle.Update(ResolveSetup(facts), now);
   if (view->card.working) {
     view->live = BuildLiveCard(facts, view->setup);
+  }
+}
+
+namespace {
+void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState& state) {
+  if (!view.details_backend.empty()) gui::TextUnformatted(view.details_backend.c_str());
+  if (!view.output_size.Empty()) {
+    const char* space = "";
+    switch (view.output_space) {
+      case color::ColorSpace::SRGB_NONLINEAR: space = "sRGB"; break;
+      case color::ColorSpace::EXTENDED_SRGB_LINEAR: space = "scRGB"; break;
+      case color::ColorSpace::HDR10_ST2084: space = "HDR10"; break;
+      case color::ColorSpace::HDR10_HLG: space = "HLG"; break;
+      default: break;
+    }
+    ImGui::Text("%s  %u x %u  %s", gui::Display("Display output").c_str(), view.output_size.width, view.output_size.height, space);
+  }
+  if (view.frame_generation_active) gui::TextUnformatted("Frame generation active");
+  else if (!view.frame_generation_line.empty()) gui::TextUnformatted("Frame generation: off");
+
+  const bool compact = gui::GetContentRegionAvail().x < gui::GetFontSize() * 38.f;
+  if (gui::BeginTable("##executed_passes", compact ? 3 : 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+    const auto column = [](const char* label, float weight) { gui::TableSetupColumn(gui::Display(label).c_str(), ImGuiTableColumnFlags_WidthStretch, weight); };
+    column("Pass", 0.50f);
+    column("Ran at", 1.15f);
+    column(compact ? "NR evaluation" : "Network / style", 1.3f);
+    if (!compact) { column("NR size", 1.f); column("Motion used", 1.25f); }
+    gui::TableHeadersRow();
+    constexpr std::array stages{"Pre-DLSS", "After DLSS", "Before Framegen", "On Present"};
+    bool any = false;
+    for (size_t i = 0; i < view.stage_runs.size(); ++i) {
+      const auto& group = view.stage_runs[i];
+      for (uint32_t n = 0; n < group.count && group.first + n < view.pass_models.size(); ++n) {
+        const uint32_t pass = group.first + n;
+        const auto& model = view.pass_models[pass];
+        const char* network = "Unconfirmed";
+        switch (model.network) {
+          case nr::RecordedNetwork::LEGACY: network = "Legacy"; break;
+          case nr::RecordedNetwork::SMALL_FP8: network = "Small FP8"; break;
+          case nr::RecordedNetwork::OTHER: network = "Other network"; break;
+          default: break;
+        }
+        const std::string name = model.style < 3u ? std::format("{} / {}", gui::Display(network), static_cast<char>('A' + model.style)) : gui::Display(network);
+        const char* motion = "None";
+        switch (group.motion) {
+          case sources::MotionSource::DIRECT: motion = "DLSS"; break;
+          case sources::MotionSource::PRESENT_COPY: motion = "DLSS copy"; break;
+          case sources::MotionSource::LAUNCHPAD: motion = view.lumenite_motion ? "Lumenite" : "Launchpad"; break;
+          default: break;
+        }
+        gui::TableNextRow();
+        gui::TableNextColumn(); gui::Text("P%u", pass + 1u);
+        gui::TableNextColumn(); gui::TextWrapped("%s", stages[i]);
+        gui::TableNextColumn(); ImGui::TextWrapped("%s", name.c_str());
+        if (!compact) gui::TableNextColumn();
+        if (group.resolution.Empty()) gui::TextDisabled("Unknown"); else gui::Text("%u x %u", group.resolution.width, group.resolution.height);
+        if (!compact) gui::TableNextColumn();
+        gui::TextWrapped("%s", motion);
+        any = true;
+      }
+    }
+    gui::EndTable();
+    if (!any) gui::TextDisabled("No pass recorded.");
+  }
+  if (!view.details_note.empty()) gui::TextWrapped("%s", view.details_note.c_str());
+  for (const auto& group : view.stage_runs) {
+    if (group.skip.empty() || group.planned <= group.count) continue;
+    const uint32_t first = group.first + group.count + 1u, last = group.first + group.planned;
+    const std::string passes = first == last ? std::format("P{}", first) : std::format("P{}-{}", first, last);
+    ImGui::TextWrapped("%s: %s", passes.c_str(), gui::Display(group.skip).c_str());
+  }
+  const auto now = std::chrono::steady_clock::now();
+  const double elapsed = std::chrono::duration<double>(now - state.activity_since).count();
+  if (view.activity) {
+    const auto& v = *view.activity;
+    const auto& base = state.activity_start;
+    if (state.activity_mode != settings.fg_present || elapsed > 2.5 || v.real < base.real || v.reshade < base.reshade || v.passes < base.passes) {
+      state.activity_since = now;
+      state.activity_start = v;
+      state.activity_seconds = 0.0;
+      state.activity_mode = settings.fg_present;
+    } else if (elapsed >= 1.0) {
+      state.activity_delta = {v.real-base.real, v.reshade-base.reshade, v.passes-base.passes};
+      state.activity_seconds = elapsed;
+      state.activity_start = v;
+      state.activity_since = now;
+    }
+    if (state.activity_seconds > 0 && state.activity_delta.real > 0) {
+      const auto& delta = state.activity_delta;
+      const auto line = std::format("{} {:.1f} s: {} {} / {} {} / {} {}", gui::Display("FG activity over"), state.activity_seconds,
+          delta.real, gui::Display("real frames"), delta.reshade, gui::Display("ReShade Presents"), delta.passes, gui::Display("Present-pass runs"));
+      ImGui::TextWrapped("%s", line.c_str());
+    }
+  } else {
+    state.activity_since = {};
+    state.activity_seconds = 0.0;
+  }
+  gui::TextWrapped("%s", VramLine(view).c_str());
+}
+}  // namespace
+
+void OverlayView::AddStartupLocks(const Settings& settings, bool vulkan, bool d3d9) {
+  if (d3d9 && (settings.startup_latches & Settings::LATCH_D3D9EX)) {
+    safety_locks.push_back({"Direct3D 9Ex", "The previous 9Ex startup ended before the first frame.", &Settings::use_d3d9ex});
+  }
+  if (vulkan && (settings.startup_latches & Settings::LATCH_VK_DEVICE)) {
+    safety_locks.push_back({"Vulkan device adjustments", "The previous startup ended before the adjusted device presented a frame.", &Settings::adjust_vulkan_devices});
+  }
+  if (vulkan && (settings.startup_latches & Settings::LATCH_VK_NGX)) {
+    safety_locks.push_back({"Vulkan NGX device extensions", "The previous startup with these extensions ended before the first frame.", &Settings::adjust_vulkan_devices_for_ngx});
   }
 }
 
@@ -742,6 +797,38 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     }
   }
 
+  if (!view.safety_locks.empty()) {
+    const auto& bg = gui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    const ImVec4 red = bg.x + bg.y + bg.z > 1.5f ? ImVec4(0.72f, 0.08f, 0.08f, 1.f) : ImVec4(1.f, 0.42f, 0.39f, 1.f);
+    const ImVec2 warning_start = gui::GetCursorScreenPos();
+    const float inset = gui::GetFontSize() * 0.7f;
+    gui::Indent(inset);
+    gui::PushStyleColor(ImGuiCol_Text, red);
+    gui::SeparatorText("SAFETY LATCH ACTIVE");
+    gui::PopStyleColor();
+    for (const auto& lock : view.safety_locks) {
+      gui::PushID(lock.feature.data());
+      gui::TextColored(red, "%s", lock.feature.data());
+      gui::TextWrapped("%s", lock.reason.c_str());
+      if (lock.setting != nullptr) {
+        if (settings->*(lock.setting) == lock.restore_value) {
+          gui::TextWrapped("Latch cleared for next launch. Restart the game to retry.");
+        } else if (gui::Button("Clear latch for next launch")) {
+          settings->*(lock.setting) = lock.restore_value;
+          changed = true;
+        }
+      } else if (lock.retry_now) {
+        if (gui::Button("Retry now")) state->retry_now = true;
+      } else {
+        gui::TextWrapped("Restart the game to retry this feature.");
+      }
+      gui::PopID();
+    }
+    gui::Unindent(inset);
+    gui::GetWindowDrawList()->AddRectFilled(warning_start, {warning_start.x + 3.f, gui::GetCursorScreenPos().y}, gui::GetColorU32(red));
+    gui::Separator();
+  }
+
   // Plan 6 (v2 design §3.18, D1): the status card -- the first failing stage, its reason and its one fix/button.
   // Plan 7 (the controller's addition): a fixed-height region, sized for the card's worst case (a title, a
   // two-line wrapped reason, at most two fix bullets, and one button row), so a transient reason or bullet --
@@ -795,21 +882,9 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
       }
       break;
     case CardButton::RETRY_NOW:
-      if (gui::Button(view.dlss_latched ? "Retry now and clear the latch" : "Retry now")) {
-        state->retry_now = true;
-        if (view.dlss_latched) {
-          settings->dlss_placement_blocked = false;
-          settings->vulkan_native_nr = true;
-          changed = true;
-        }
-      }
+      if (gui::Button("Retry now")) state->retry_now = true;
       break;
-    case CardButton::CLEAR_LATCH:
-      if (gui::Button("Clear latch##card")) {
-        settings->dlss_placement_blocked = false;
-        settings->vulkan_native_nr = true;
-        changed = true;
-      }
+    case CardButton::CLEAR_LATCH:  // Each blocked feature has its own explicit recovery action above the card.
       break;
   }
   gui::EndChild();
@@ -848,7 +923,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     state->setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(defaults.resolution_mode), view.setup);
     changed = true;
   }
-  changed |= DrawSourceRow(view, settings, state);
+  changed |= DrawStagePicker(view, settings, state);
   changed |= DrawMotionRow(view, settings, state);
   changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state);
   changed |= DrawRow(*FindSetting("Preset"), view, settings, state);
@@ -964,30 +1039,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     changed |= draw_rows(SettingSection::ADVANCED);
   }
 
-  // ui-review.md §2 finding 2: the wall of status text moves into one closed Details header. It always lists
-  // everything, so its content does not depend on the card's state; a working card repeats its details lines.
-  if (gui::CollapsingHeader("Details")) {
-    gui::TextUnformatted(view.status_line.c_str());
-    if (!view.network_diagnostic.empty()) {
-      gui::TextWrapped("%s", view.network_diagnostic.c_str());
-      gui::TextDisabled("Calls count successful command recordings; see ReShade.log for each feature and network change.");
-    }
-    gui::TextWrapped("Native inputs: depth and bidirectional distortion are not bound. Native guided upsampling is not enabled; reduced resolution uses Uplift's own upsampling.");
-    gui::TextWrapped("Native mask blend mode defaults to 1. Full mask-combination behavior on the Ada compatibility runtime remains under validation. Global tone and native Performance have no verified effect.");
-    // Plan 14: the engine's own lines, which the rows no longer show under themselves.
-    for (const std::string* line : {&view.placement_line, &view.chain_line, &view.motion_line, &view.work_line, &view.exposure_line}) {
-      if (!line->empty()) {
-        gui::TextUnformatted(line->c_str());
-      }
-    }
-    if (!view.frame_generation_line.empty()) {
-      gui::TextUnformatted(view.frame_generation_line.c_str());
-    }
-    if (!view.api_line.empty()) {
-      gui::TextUnformatted(view.api_line.c_str());
-    }
-    gui::TextDisabled("%s", VramLine(view).c_str());
-  }
+  if (gui::CollapsingHeader("Details")) DrawDetails(view, *settings, *state);
 
   // G2: Restore all defaults, confirmed once before it takes effect.
   gui::Separator();
@@ -1007,8 +1059,8 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     }
   }
 
-  changed |= DrawEnableWarning(*FindSetting("PresentWithFrameGen"), settings, state);
-  changed |= DrawEnableWarning(*FindSetting("AllowCrossQueuePasses"), settings, state);
+  changed |= DrawEnableWarning(*FindSetting("PresentWithFrameGen"), settings, state, view.dlss_explicit);
+  changed |= DrawEnableWarning(*FindSetting("AllowCrossQueuePasses"), settings, state, view.dlss_explicit);
   return changed;
 }
 

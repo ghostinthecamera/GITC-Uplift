@@ -30,6 +30,8 @@ constexpr std::array<std::string_view, 3> VRAM_CHECKS = {"Careful", "Relaxed", "
 constexpr std::array<std::string_view, 3> VULKAN_NR_MODES = {"Native", "Direct3D 12", "Helper"};  // Plan 19; T5: Helper
 constexpr std::array<std::string_view, 6> RESOLUTION_MODES = {"Full", "Quality (67 %)", "Balanced (58 %)",
                                                               "Performance (50 %)", "Match game", "Custom"};
+constexpr std::array<std::string_view, 3> BEFORE_FG_MOTION = {"Choose", "Off", "DLSS"};
+constexpr std::array<std::string_view, 3> FG_PRESENT_MODES = {"Off", "On Present", "Before Framegen"};
 constexpr std::array<std::string_view, 2> UPSAMPLING_MODES = {"Classic", "Edge-aware"};
 // Split chain (2026-10-10): a pass's Runs at after its first choice, "Same as pass n-1" (PassStageChoices), in stored-index order.
 constexpr std::array<std::string_view, 3> PASS_STAGES = {"Before upscaling", "After DLSS", "Present"};
@@ -701,19 +703,29 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     },
     {
         .key = "PresentWithFrameGen",
-        .kind = SettingKind::BOOL,
+        .kind = SettingKind::CHOICE,
         .section = SettingSection::ADVANCED,
         .label = "Present with frame generation",
-        .tooltip = "Runs NR at Present on generated frames too. Can dramatically reduce FPS and the benefit of frame generation. "
-                   "Shows a performance warning before enabling.",
+        .tooltip = "With frame generation active, Before Framegen processes the finished real frame before Streamline generates frames. On Present processes each frame ReShade presents, including generated frames when ReShade runs after frame generation.",
         .enable_warning = "NR will run on every presented frame, including the frames created by frame generation.\n\n"
                           "This can dramatically reduce FPS and wipe out much of frame generation's performance benefit. At 3x or 4x "
                           "frame generation, each Present pass may run three or four times per game-rendered frame. Higher resolutions "
                           "and more Present passes increase the cost further.\n\n"
                           "NR at After DLSS runs before frame generation and avoids processing the generated frames. "
                           "The result of NR on generated frames is not guaranteed.",
-        .get = [](const Settings& s) { return Flag(s.present_with_frame_gen); },
-        .set = [](Settings& s, double v) { s.present_with_frame_gen = (v != 0.0); },
+        .choices = FG_PRESENT_MODES,
+        .get = [](const Settings& s) { return Index(s.fg_present); },
+        .set = [](Settings& s, double v) { s.fg_present = FromIndex<Settings::FgPresent>(v); },
+    },
+    {
+        .key = "BeforeFGMotion",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::ADVANCED,
+        .label = "Motion when ReShade runs after FG",
+        .tooltip = "Launchpad and Lumenite have not produced this real frame's vectors yet. Select motion for Before FG here. Ordinary Present keeps your original choice.",
+        .choices = BEFORE_FG_MOTION,
+        .get = [](const Settings& s) { return Index(s.before_fg_motion); },
+        .set = [](Settings& s, double v) { s.before_fg_motion = FromIndex<Settings::FgMotion>(v); },
     },
     {
         .key = "AllowCrossQueuePasses",
@@ -1314,6 +1326,17 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 1000000.0,
         .get = [](const Settings& s) { return static_cast<double>(s.diagnostic_remove_device); },
         .set = [](Settings& s, double v) { s.diagnostic_remove_device = static_cast<uint32_t>(v); },
+    },
+    {
+        .key = "StartupSafetyLatches",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::HIDDEN,
+        .label = "Startup safety latches",
+        .min = 0.0,
+        .max = 7.0,
+        .flags = BOOKKEEPING,
+        .get = [](const Settings& s) { return static_cast<double>(s.startup_latches); },
+        .set = [](Settings& s, double v) { s.startup_latches = static_cast<uint32_t>(v); },
     },
     {
         .key = "DlssPlacementBlocked",

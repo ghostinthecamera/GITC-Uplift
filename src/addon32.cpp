@@ -401,7 +401,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     const std::unique_lock lock(g_state->mutex);
     AddonState32& state = *g_state;
     const auto now = std::chrono::steady_clock::now();
-    ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed(), .placement_line = "Placement: NR is off", .motion_line = "Motion vectors: NR is off"};
+    ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed()};
     view.dlss_unavailable = std::string(ui::BRIDGED_DLSS_REASON);  // no DLSS placement without a Direct3D 12 game
     const api::device_api overlay_api = runtime->get_device()->get_api();
     const auto found = state.devices.find(runtime->get_device());
@@ -423,6 +423,8 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       facts.dlss_unavailable = view.dlss_unavailable;
       ui::FinishSetup(&view, &state.overlay, runtime->get_device(), facts, now);
     }
+    view.before_fg_unavailable = "Before FG needs a game-facing 64-bit Streamline integration";
+    view.AddStartupLocks(state.settings, overlay_api == api::device_api::vulkan, overlay_api == api::device_api::d3d9);
     if (ui::DrawOverlay(view, &state.settings, &state.overlay)) {
       SaveAndApply(&state);
     } else if (state.overlay.language_changed) {
@@ -506,6 +508,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   const std::optional<addon::ModuleVersion> reshade_version = addon::ReadModuleVersion(reshade_module);
   const std::filesystem::path vk_marker = addon::LatchMarkerPath(addon::UpliftStateDirectory(), game_exe_path).replace_extension(L".vkdevice-pending");
   if (vk::DeviceHook::CheckMarker(vk_marker) != vk::DeviceHook::MarkerVerdict::NONE) {  // the 32-bit half never adds NGX's: one tier
+    g_state->settings.startup_latches |= ui::Settings::LATCH_VK_DEVICE;
     g_state->settings.adjust_vulkan_devices = false;
     ui::SaveSettings(g_state->settings, &g_state->config);
     g_state->front->SettingsChanged(g_state->settings);

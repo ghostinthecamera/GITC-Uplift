@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <optional>
+#include <vector>
 #include <string>
 
 namespace uplift::vk {
@@ -11,6 +12,8 @@ namespace uplift::vk {
 // What the detour learned about one device it saw being created (Vulkan design §2.2).
 struct DeviceRecord {
   VkPhysicalDevice physical = VK_NULL_HANDLE;
+  struct QueueFamily { uint32_t index; uint32_t count; VkDeviceQueueCreateFlags flags; };
+  std::vector<QueueFamily> queue_families;
   bool memory_win32 = false;     // VK_KHR_external_memory_win32 is on the device, whoever enabled it
   bool semaphore_win32 = false;  // VK_KHR_external_semaphore_win32
   bool timeline = false;         // timeline semaphores

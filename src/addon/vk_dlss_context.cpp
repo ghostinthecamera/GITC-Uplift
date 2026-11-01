@@ -278,7 +278,7 @@ TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& c
   present_holds_nr_ = present_holds_nr;
   controls_ = config.controls;
   nr::Timeline& timeline = completion_->Timeline();
-  timeline.BeginFrame(nr::AsQueue(present_queue));  // signals the previous frame's value on the effect runtime's queue
+  if (!config.before_fg_selected || config.game_facing_present) timeline.BeginFrame(nr::AsQueue(present_queue));  // signals the previous frame's value on the effect runtime's queue
   timeline.StampAged(now);                          // on Vulkan only the stuck-token warning: nothing is stamped
   completion_->DropStale(now, timeline.CurrentFrame());
   pipeline_->FreeFinished();  // final review C-1: the retired copy slots and mask copies whose marks the GPU has passed
@@ -476,12 +476,12 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   // Split chain (Task 5): the Present group is pass 1's (group 0, the single chain of before) or a later one, whose result only Status's groups report.
   const uint32_t group = GroupAt(Stage::PRESENT).value_or(0u);
   // Spec §11: on the Present path NR would also run on generated frames.
-  if (config_.ngx_frame_generation > 0u && !config_.present_with_frame_gen) return SkipPresent("frame generation is on", group);
+  if ((config_.ngx_frame_generation > 0u || config_.before_fg_selected) && !config_.present_with_frame_gen) return SkipPresent("frame generation is on", group);
   // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before anything is recorded. No GPU waits (fix round 1, I1):
   // DLSS-stage NR on another queue keeps Present off for later groups (UpdateChain); until that shows, a later Present group runs only once every earlier
   // DLSS-stage recording off the effect queue has completed, else it skips this frame. On the effect queue itself the queue's order keeps them apart.
   if (group > 0u && !session_->SliceRuns(slices_[group])) return SkipPresent(SliceSkipReason(group), group);
-  if (group > 0u && !StageWorkDone()) return SkipPresent("waiting for the earlier stages' NR", group);
+  if (group > 0u && queues.waits.empty() && !StageWorkDone()) return SkipPresent("waiting for the earlier stages' NR", group);
   const auto log_failure = [this](std::string_view what) {
     if (!std::exchange(present_failure_logged_, true)) {
       nr::Logf(nr::LogLevel::WARN, "Vulkan: {}; NR skips such frames at Present", what);
@@ -580,7 +580,7 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   if (result.recorded) {
     // Hard rule 2: the game's frame, ReShade's work so far, then Uplift's NR (the rest of ReShade's work follows on the same queue).
     queues.flush_effects();
-    if (const VkResult submitted = ring_->Submit(queues.queue); submitted != VK_SUCCESS) {
+    if (const VkResult submitted = ring_->Submit(queues.queue, queues.waits); submitted != VK_SUCCESS) {
       if (submitted == VK_ERROR_DEVICE_LOST) {
         NoteDeviceLost(now);
         return {};
@@ -851,12 +851,13 @@ void VkDlssContext::UpdateChain() {
     present_cause = NOT_NATIVE_PRESENT_REASON;  // decision Q6: the bridge and the helper hold one stage only
   } else if (!present_problem_.empty()) {
     present_cause = present_problem_;  // the back buffer cannot take NR (ResolvePresentFrame): a lasting cause, never one frame's missing image
-  } else if (config_.ngx_frame_generation > 0u && !config_.present_with_frame_gen) {
+  } else if (config_.ngx_frame_generation > 0u && !config_.present_with_frame_gen && !config_.before_fg_selected) {
     present_cause = "frame generation is on";
   } else if (other_dlss_queue_ != nullptr) {
     present_cause = OTHER_QUEUE_REASON;
   }
-  facts.cannot[static_cast<size_t>(Stage::PRESENT)] = present_cause;
+  // Keep the stored Present group until its requested Before FG handoff is usable.
+  facts.cannot[static_cast<size_t>(Stage::PRESENT)] = config_.before_fg_selected ? std::string_view{} : present_cause;
   ChainPlan chain = DecideChain(facts);
 
   const auto same_groups = [](const ChainPlan& first, const ChainPlan& second) {
@@ -1247,7 +1248,7 @@ VkDlssContext::ReadFrame VkDlssContext::ReadDlssFrame(const ngx_hooks::DlssFrame
                                                              .diffuse_white_nits = config_.diffuse_white_nits,
                                                              .transfer_strength = config_.transfer_strength,
                                                              .color_strength = config_.color_strength,
-                                                             .motion_vectors = config_.motion_vectors,
+                                                             .motion_vectors = config_.motion_at_dlss_stage.value_or(config_.motion_vectors),
                                                              .motion_scale_x = config_.motion_scale_x,
                                                              .motion_scale_y = config_.motion_scale_y,
                                                              .depth_inverted = config_.depth_inverted,

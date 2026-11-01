@@ -6,7 +6,7 @@
 
 namespace uplift::vk {
 
-std::optional<NrFunctions> NrFunctions::Open(VkDevice device) {
+std::optional<NrFunctions> NrFunctions::Open(VkDevice device, bool pipeline) {
   const Loader* const loader = Loader::Get();
   if (loader == nullptr || device == VK_NULL_HANDLE) return std::nullopt;
   NrFunctions opened;
@@ -17,6 +17,7 @@ std::optional<NrFunctions> NrFunctions::Open(VkDevice device) {
   complete = complete && (opened.name != nullptr);
   UPLIFT_VK_NR_FUNCTIONS(UPLIFT_VK_NR_RESOLVE)
 #undef UPLIFT_VK_NR_RESOLVE
+  if (!pipeline) return complete ? std::optional<NrFunctions>(opened) : std::nullopt;
 #define UPLIFT_VK_NR_RESOLVE_KHR(name)                                                         \
   opened.name = reinterpret_cast<PFN_##name>(resolve(#name));                                  \
   if (opened.name == nullptr) {                                                                \
