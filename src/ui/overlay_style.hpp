@@ -35,11 +35,13 @@ inline ImVec4 SelectedFill(ImVec4 accent) { return Tint(accent, 0.28f); }
 
 // ReShade's reference UI font is 13 px. Resolve every inset and gap from the live font size.
 inline float Units(float count) { return gui::GetFontSize() * (4.f / 13.f) * count; }
-inline float LabelGap() { return Units(1); }
-inline float RowGap() { return Units(2); }
-inline float PanelInset() { return Units(3); }
-inline float BlockGap() { return Units(4); }
-inline float SectionGap() { return Units(6); }
+inline float ControlPadding() { return Units(1); }
+inline float ControlHeight() { return Units(6); }
+inline float LabelGap() { return Units(0.75f); }
+inline float RowGap() { return Units(1.25f); }
+inline float PanelInset() { return Units(2); }
+inline float BlockGap() { return Units(3); }
+inline float SectionGap() { return Units(4.5f); }
 inline bool FitPairedGroups() { return gui::GetContentRegionAvail().x >= Units(144); }
 inline ImVec4 Surface(float tint = 0.065f) {
   return Tint(gui::GetStyleColorVec4(ImGuiCol_Text), tint);
@@ -57,7 +59,7 @@ class OverlayStyle {
     gui::PushStyleColor(ImGuiCol_ButtonActive, SelectedFill(accent));
     gui::PushStyleColor(ImGuiCol_SliderGrab, accent);
     gui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
-    gui::PushStyleVar(ImGuiStyleVar_FramePadding, {LabelGap(), (SectionGap() - gui::GetFontSize()) * 0.5f});
+    gui::PushStyleVar(ImGuiStyleVar_FramePadding, {ControlPadding(), (ControlHeight() - gui::GetFontSize()) * 0.5f});
     gui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, {LabelGap(), LabelGap()});
     gui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {RowGap(), RowGap()});
     gui::PushStyleVar(ImGuiStyleVar_SeparatorTextBorderSize, Units(0.25f));
