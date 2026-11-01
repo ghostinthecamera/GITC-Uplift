@@ -642,7 +642,6 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
     column(compact ? "NR evaluation" : "Network / style", 1.3f);
     if (!compact) { column("NR size", 1.f); column("Motion used", 1.25f); }
     gui::TableHeadersRow();
-    constexpr std::array stages{"Pre-DLSS", "After DLSS", "Before Framegen", "On Present"};
     bool any = false;
     for (size_t i = 0; i < view.stage_runs.size(); ++i) {
       const auto& group = view.stage_runs[i];
@@ -666,7 +665,7 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
         }
         gui::TableNextRow();
         gui::TableNextColumn(); gui::Text("P%u", pass + 1u);
-        gui::TableNextColumn(); gui::TextWrapped("%s", stages[i]);
+        gui::TableNextColumn(); gui::TextWrapped("%s", NR_STAGE_NAMES[i]);
         gui::TableNextColumn(); ImGui::TextWrapped("%s", name.c_str());
         if (!compact) gui::TableNextColumn();
         if (group.resolution.Empty()) gui::TextDisabled("Unknown"); else gui::Text("%u x %u", group.resolution.width, group.resolution.height);
@@ -848,7 +847,8 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
       gui::SameLine(value_x);
       CardLine(value, false);
     };
-    row("Running at", view.live.stage);
+    const char* recorded = view.RecordedStageName(0u);
+    row("Running at", recorded ? recorded : view.live.stage);
     row("Motion vectors", view.live.motion);
     row("Resolution", view.live.resolution);
     if (!view.setup.why.empty()) {

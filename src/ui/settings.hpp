@@ -57,6 +57,13 @@ enum class SourcePick : uint32_t {
   PRESENT,
 };
 
+inline constexpr std::array<const char*, 4> NR_STAGE_NAMES{"Pre-DLSS", "After DLSS", "Before Framegen", "On Present"};
+
+inline constexpr const char* StageLabel(SourcePick stage, bool before_framegen = false) {
+  return NR_STAGE_NAMES[stage == SourcePick::PRESENT ? (before_framegen ? 2u : 3u) : static_cast<size_t>(stage)];
+}
+
+
 // ui-review.md §4.2: the Motion vectors toggle, in pipeline order. `MotionPickOf`/`SetMotionPick` translate
 // to and from the persisted MotionVectorSource.
 enum class MotionPick : uint32_t {

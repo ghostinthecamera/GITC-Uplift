@@ -50,6 +50,13 @@ struct OverlayView {
 
   };
   std::array<StageRun, 4> stage_runs{};  // Pre-DLSS, After DLSS, Before FG, On Present. Only passes actually evaluated.
+  [[nodiscard]] const char* RecordedStageName(uint32_t pass) const {
+    for (size_t i = 0; i < stage_runs.size(); ++i) {
+      const auto& group = stage_runs[i];
+      if (pass >= group.first && pass - group.first < group.count) return NR_STAGE_NAMES[i];
+    }
+    return nullptr;
+  }
   std::string before_fg_unavailable;
   std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
   bool frame_generation_active = false;  // the working card shows frame_generation_line only when this is set

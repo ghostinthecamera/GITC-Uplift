@@ -11,7 +11,6 @@
 namespace uplift::ui {
 namespace {
 
-constexpr std::array<const char*, 4> HOOKS{"Pre-DLSS", "After DLSS", "Before Framegen", "On Present"};
 constexpr std::array<const char*, 4> TIPS{
     "Run pass 1 on the game's render-resolution input before DLSS upscales it.",
     "Run pass 1 on the upscaled image before the game's remaining post-processing.",
@@ -117,7 +116,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
   const auto preferred = SourcePickOf(*settings, view.dlss_explicit);
   const size_t selected = preferred == SourcePick::PRESENT ? (settings->fg_present == Settings::FgPresent::BEFORE ? 2u : 3u) : static_cast<size_t>(preferred);
   constexpr std::array<int, 4> preceding{0, 2, 3, 4};
-  for (size_t i = 0; i < HOOKS.size(); ++i) {
+  for (size_t i = 0; i < NR_STAGE_NAMES.size(); ++i) {
     const int prior = preceding[i];
     const ImVec2 c = centers[prior];
     const bool at_fold = folded && prior == 2;
@@ -146,7 +145,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
       fill.x = fill.x * 0.78f + color.x * 0.22f; fill.y = fill.y * 0.78f + color.y * 0.22f; fill.z = fill.z * 0.78f + color.z * 0.22f;
       gui::PushStyleColor(ImGuiCol_Button, fill);
     }
-    std::string label = gui::Display(HOOKS[i]);
+    std::string label = gui::Display(NR_STAGE_NAMES[i]);
     if (i == 2 && ImGui::CalcTextSize(label.c_str()).x + 2.f * gui::GetStyle().FramePadding.x > button_w) label = gui::Display("Before FG");
     gui::BeginDisabled(view.setup.stopped || !why.empty());
     const bool clicked = ImGui::Button(label.c_str(), {button_w, button_h});

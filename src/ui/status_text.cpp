@@ -291,11 +291,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
 
 LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
   LiveCard card;
-  switch (shown.stage) {
-    case SourcePick::BEFORE_UPSCALING: card.stage = "Before upscaling"; break;
-    case SourcePick::AFTER_DLSS:       card.stage = "After DLSS"; break;
-    case SourcePick::PRESENT:          card.stage = "Present"; break;
-  }
+  card.stage = StageLabel(shown.stage);
   switch (shown.motion) {
     case MotionPick::OFF:       card.motion = "none"; break;
     case MotionPick::DLSS:      card.motion = (facts.motion_copied ? "DLSS (the game's, copied for Present)" : "DLSS (the game's)"); break;
