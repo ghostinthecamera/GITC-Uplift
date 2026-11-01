@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
@@ -64,7 +65,12 @@ inline ImVec2 CalcTextSize(const char* text, const char* end = nullptr, bool hid
 }
 inline void SeparatorText(const char* text) { ImGui::SeparatorText(Display(text).c_str()); }
 inline bool Button(const char* label, const ImVec2& size = ImVec2(0.f, 0.f)) { return ImGui::Button(Label(label).c_str(), size); }
-inline bool SmallButton(const char* label) { return ImGui::SmallButton(Label(label).c_str()); }
+inline float ResetButtonWidth(const char* label = "<") {
+  return ImGui::CalcTextSize(Label(label).c_str(), nullptr, true).x + 2.f * std::max(GetStyle().FramePadding.x, GetFontSize() * 0.58f);
+}
+inline bool ResetButton(const char* label = "<") {
+  return Button(label, {ResetButtonWidth(label), std::max(GetFrameHeight(), GetFontSize() * 1.4f)});
+}
 inline bool Checkbox(const char* label, bool* value) { return ImGui::Checkbox(Label(label).c_str(), value); }
 inline bool SliderFloat(const char* label, float* value, float low, float high, const char* format = "%.3f", ImGuiSliderFlags flags = 0) { return ImGui::SliderFloat(Label(label).c_str(), value, low, high, format, flags); }
 inline bool SliderInt(const char* label, int* value, int low, int high, const char* format = "%d", ImGuiSliderFlags flags = 0) { return ImGui::SliderInt(Label(label).c_str(), value, low, high, format, flags); }

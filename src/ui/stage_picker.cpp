@@ -41,13 +41,14 @@ ImVec4 RunColor(uint32_t first, size_t stage) {
 
 bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state) {
   gui::PushID("Source");
+  gui::AlignTextToFramePadding();
   gui::TextUnformatted("NR stage");
   gui::SameLine();
   gui::TextDisabled("Choose a stage for pass 1");
   bool changed = false;
   if (!IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"))) {
     gui::SameLine();
-    if (gui::SmallButton("<")) {
+    if (gui::ResetButton()) {
       const auto pick = view.dlss_explicit ? SourcePick::PRESENT : SourcePick::AFTER_DLSS;
       SetSourcePick(settings, pick, view.dlss_explicit);
       state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(pick), view.setup);

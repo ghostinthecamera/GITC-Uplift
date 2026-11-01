@@ -99,10 +99,10 @@ bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayS
   if (descriptor.section == SettingSection::TOP || IsDefault(settings, descriptor)) return false;
   gui::SameLine();
   if (align_right) {
-    const float remaining = gui::GetContentRegionAvail().x - gui::CalcTextSize("<").x - 2.f * gui::GetStyle().FramePadding.x;
+    const float remaining = gui::GetContentRegionAvail().x - gui::ResetButtonWidth();
     if (remaining > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + remaining);
   }
-  const bool reset = gui::SmallButton("<");
+  const bool reset = gui::ResetButton();
   if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
     const std::string value = descriptor.key == "MotionVectors" ? "DLSS" : FormatSettingValue(descriptor, DefaultSettings());
     gui::SetTooltip("Reset to default (%s)", value.c_str());
@@ -226,12 +226,13 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   bool changed = false;
   if (grouped) {
     const char* caption = descriptor.key == "ResolutionMode" ? "Working resolution" : descriptor.key == "ResolutionScale" ? "Custom scale" : label.c_str();
+    gui::AlignTextToFramePadding();
     gui::TextUnformatted(caption);
     if (descriptor.key == "ResolutionScale") {
       gui::SameLine();
       const auto percent = std::format("{:.0f}%", settings->resolution_scale);
       float space = gui::GetContentRegionAvail().x - ImGui::CalcTextSize(percent.c_str()).x;
-      if (!IsDefault(*settings, descriptor)) space -= gui::CalcTextSize("<").x + 2.f * gui::GetStyle().FramePadding.x + gui::GetStyle().ItemSpacing.x;
+      if (!IsDefault(*settings, descriptor)) space -= gui::ResetButtonWidth() + gui::GetStyle().ItemSpacing.x;
       if (space > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + space);
       gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_SliderGrab), "%s", percent.c_str());
     }
@@ -568,7 +569,7 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
   }
   if (!IsDefault(*settings, descriptor)) {
     gui::SameLine();
-    const bool reset_clicked = gui::SmallButton("<");
+    const bool reset_clicked = gui::ResetButton();
     if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
       gui::SetTooltip("Reset to default (%s)", descriptor.choices[0].data());
     }
@@ -606,6 +607,7 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
     saved_tip = std::format("{}\n{}", tips[static_cast<size_t>(shown)], SavedNote(stored));
     tips[static_cast<size_t>(shown)] = saved_tip;
   }
+  gui::AlignTextToFramePadding();
   gui::TextUnformatted("Motion vectors");
   bool changed = DrawReset(*FindSetting("MotionVectors"), *settings, *state, true, view.setup);
   if (const int clicked = RadioRow(nullptr, OPTIONS, why, tips, shown); clicked >= 0) {
@@ -666,6 +668,11 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
     gui::PushStyleColor(ImGuiCol_ButtonActive, active);
     gui::PushStyleColor(ImGuiCol_SliderGrab, accent);
     gui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
+    const float pad = em * 0.12f;
+    const ImGuiStyle& style = gui::GetStyle();
+    gui::PushStyleVar(ImGuiStyleVar_FramePadding, {style.FramePadding.x + pad, style.FramePadding.y + pad});
+    gui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, {style.ItemInnerSpacing.x + pad, style.ItemInnerSpacing.y});
+    gui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {style.ItemSpacing.x, style.ItemSpacing.y + pad});
     gui::PushStyleVar(ImGuiStyleVar_FrameRounding, em * 0.28f);
     gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
     gui::TableNextRow();
@@ -703,7 +710,7 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
     DrawWorkingSize(view, *settings);
     changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
     gui::PopItemWidth();
-    gui::PopStyleVar(2);
+    gui::PopStyleVar(5);
     gui::PopStyleColor(5);
     gui::EndTable();
   }
@@ -1082,7 +1089,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     // section reset must not rewrite Mine's own settings while they are not even shown.
     if (!section_has_changed || state->defaults_view) return false;
     gui::SameLine();
-    return gui::SmallButton(std::format("Reset##{}", id).c_str());
+    return gui::ResetButton(std::format("Reset##{}", id).c_str());
   };
 
   // ui-review.md §2 finding 1 / §3: the NR stage and Motion vectors toggles, in pipeline order, at the top
