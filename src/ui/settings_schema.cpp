@@ -31,10 +31,10 @@ constexpr std::array<std::string_view, 3> VULKAN_NR_MODES = {"Native", "Direct3D
 constexpr std::array<std::string_view, 6> RESOLUTION_MODES = {"Full", "Quality (67 %)", "Balanced (58 %)",
                                                               "Performance (50 %)", "Match game", "Custom"};
 constexpr std::array<std::string_view, 3> BEFORE_FG_MOTION = {"Choose", "Off", "DLSS"};
-constexpr std::array<std::string_view, 3> FG_PRESENT_MODES = {"Off", "On Present", "Before Framegen"};
+constexpr std::array<std::string_view, 3> FG_PRESENT_MODES = {"Off", NR_STAGE_NAMES[3], NR_STAGE_NAMES[2]};
 constexpr std::array<std::string_view, 2> UPSAMPLING_MODES = {"Classic", "Edge-aware"};
 // Split chain (2026-10-10): a pass's Runs at after its first choice, "Same as pass n-1" (PassStageChoices), in stored-index order.
-constexpr std::array<std::string_view, 3> PASS_STAGES = {"Before upscaling", "After DLSS", "Present"};
+constexpr std::array<std::string_view, 3> PASS_STAGES = {NR_STAGE_NAMES[0], NR_STAGE_NAMES[1], NR_STAGE_NAMES[3]};
 constexpr std::array<std::string_view, 2> MASK_MODES = {"Auto (UPLIFT_MASK)", "Off"};
 constexpr std::array<std::string_view, 3> UI_CORRECTION_MODES = {"Auto", "Off", "On"};
 constexpr std::array<std::string_view, 3> STABILIZE_MODES = {"Off", "Static", "Motion"};
@@ -1554,9 +1554,7 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .kind = SettingKind::CHOICE,
           .section = SettingSection::PASSES,
           .label = "Runs at",
-          .tooltip = "Where in the game's frame this pass runs. Before upscaling is cheapest: NR works at the game's render size, and DLSS "
-                     "upscales the result. After DLSS and Present work on the upscaled image (Present with the HUD). A pass never runs before "
-                     "the pass before it.",
+          .tooltip = "Choose a stage for this pass. Present passes share the placement set in Advanced. Each pass runs at or after the previous pass.",
           .choices = PassStageChoices()[Index],
           .flags = PASS_SWITCH | PASS_STAGE,
           .get = &PassGet<Index, &PassSettings::stage>,

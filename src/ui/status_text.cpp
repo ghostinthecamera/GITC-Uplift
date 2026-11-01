@@ -158,14 +158,6 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     }
   }
   view.split_capable = facts.split_capable;
-  const auto runs_at = [](SourcePick stage) -> std::string_view {
-    switch (stage) {
-      case SourcePick::BEFORE_UPSCALING: return "before upscaling";
-      case SourcePick::AFTER_DLSS:       return "after DLSS";
-      case SourcePick::PRESENT:          break;
-    }
-    return "at Present";
-  };
   for (uint32_t pass = 1u; pass < passes; ++pass) {
     PassStageRow& row = view.pass_stages[pass - 1u];
     const SourcePick pass_before = runs[pass - 1u];
@@ -187,7 +179,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
       const auto pick = static_cast<SourcePick>(stage);
       const OptionState& setup_option = view.stage_options[stage];
       if (pick < pass_before) {
-        option = {.why = std::format("Runs the chain backwards: pass {} runs {}", pass, runs_at(pass_before))};
+        option = {.why = std::format("Pass {} already runs at {}.", pass, StageLabel(pass_before, facts.before_framegen))};
       } else if (pick != pass_before && !setup_option.why.empty()) {
         option = {.why = std::string(setup_option.why), .temporary = setup_option.temporary};  // never the pass before's stage, which always takes it
       }
@@ -232,7 +224,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   const bool motion_falls_back = (facts.preferred_motion == MotionPick::DLSS && view.motion != MotionPick::DLSS);
   const bool motion_waits = (motion_falls_back
                              && (motion_wish.why == DLSS_NOT_SEEN_REASON || (selectable(motion_wish) && facts.dlss_motion_gap == MotionGap::NONE)));
-  const std::string_view stage_name = (facts.preferred_stage == SourcePick::BEFORE_UPSCALING ? "Before upscaling" : "After DLSS");
+  const std::string_view stage_name = StageLabel(facts.preferred_stage, facts.before_framegen);
   // Plan 18 Task 12: the game switched its DLSS off: what fell back returns when it is on again.
   const bool stage_off = (view.stage != facts.preferred_stage && facts.preferred_stage != SourcePick::PRESENT && stage_wish.why == DLSS_OFF_REASON);
   const bool motion_off = (motion_falls_back && motion_wish.why == DLSS_OFF_REASON);
@@ -243,7 +235,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     add(motion_waits ? std::format("{} and DLSS's motion vectors start when the game renders with DLSS.", stage_name)
                      : std::format("{} starts when the game renders with DLSS.", stage_name));
   } else if (view.stage != facts.preferred_stage && stage_wish.temporary && facts.preferred_stage == SourcePick::BEFORE_UPSCALING) {
-    add("Before upscaling returns when the game's DLSS is not Ray Reconstruction.");
+    add("Pre-DLSS returns when the game's DLSS is not Ray Reconstruction.");
   }
   if (motion_off) {
     if (!stage_off) {
@@ -281,7 +273,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     add("Match game applies when the game renders with DLSS.");
   } else if (view.resolution != facts.preferred_resolution && facts.preferred_resolution == ResolutionMode::MATCH_GAME
              && resolution_wish.why == VULKAN_MATCH_GAME_REASON) {
-    add("Match game applies when NR runs at After DLSS or Before upscaling.");
+    add("Match game applies when NR runs at After DLSS or Pre-DLSS.");
   } else if (view.resolution != facts.preferred_resolution && facts.preferred_resolution == ResolutionMode::MATCH_GAME
              && resolution_wish.why == DLSS_OFF_REASON) {
     add("Match game applies when the game's DLSS is on again.");  // Plan 18 Task 12 (fix round 1, M-1)

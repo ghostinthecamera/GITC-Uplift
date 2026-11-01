@@ -100,6 +100,7 @@ struct SetupFacts {
   // with it, a fixed cause, the highlights included (none of them runs).
   std::string_view stopped;
   bool before_fg_late_effects = false;
+  bool before_framegen = false;  // UI name for the shared Present group.
   bool game_passes_motion = true;      // false while the latest main evaluate carried no readable motion vectors
   std::string_view dlss_motion_fixed;  // Vulkan at Present on a CPU-ordered bridge: DLSS's motion vectors cannot reach NR there (VULKAN_CPU_ORDERED_MOTION)
   bool launchpad_ready = false;        // Launchpad's technique and Uplift.fx's Uplift technique are enabled

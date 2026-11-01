@@ -146,7 +146,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
       gui::PushStyleColor(ImGuiCol_Button, fill);
     }
     std::string label = gui::Display(NR_STAGE_NAMES[i]);
-    if (i == 2 && ImGui::CalcTextSize(label.c_str()).x + 2.f * gui::GetStyle().FramePadding.x > button_w) label = gui::Display("Before FG");
+    if (i == 2 && ImGui::CalcTextSize(label.c_str()).x + 2.f * gui::GetStyle().FramePadding.x > button_w) label = gui::Display("Before\nFramegen");
     gui::BeginDisabled(view.setup.stopped || !why.empty());
     const bool clicked = ImGui::Button(label.c_str(), {button_w, button_h});
     gui::EndDisabled();

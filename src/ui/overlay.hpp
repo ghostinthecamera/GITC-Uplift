@@ -57,6 +57,11 @@ struct OverlayView {
     }
     return nullptr;
   }
+  [[nodiscard]] const char* SharedPresentName(const Settings& settings) const {
+    if (stage_runs[2].count) return NR_STAGE_NAMES[2];
+    if (stage_runs[3].count) return NR_STAGE_NAMES[3];
+    return StageLabel(SourcePick::PRESENT, settings.fg_present == Settings::FgPresent::BEFORE && before_fg_unavailable.empty());
+  }
   std::string before_fg_unavailable;
   std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
   bool frame_generation_active = false;  // the working card shows frame_generation_line only when this is set

@@ -44,6 +44,7 @@ void FillStageAndMotion(ui::SetupFacts* facts, Placement placement, sources::Mot
 
 void FillPreference(ui::SetupFacts* facts, const ui::Settings& settings, bool explicit_dlss) {
   facts->preferred_stage = ui::SourcePickOf(settings, explicit_dlss);
+  facts->before_framegen = settings.fg_present == ui::Settings::FgPresent::BEFORE;
   facts->preferred_motion = ui::MotionPickOf(settings);
   facts->motion_auto = (settings.motion_vectors == ui::MotionVectorSource::AUTO);
   facts->preferred_resolution = settings.resolution_mode;

@@ -83,7 +83,9 @@ std::string SavedNote(std::string_view preference) {
 bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state) {
   if (descriptor.key == "BeforeFGMotion" && (settings->fg_present != Settings::FgPresent::BEFORE
       || (settings->motion_vectors != MotionVectorSource::LAUNCHPAD && settings->motion_vectors != MotionVectorSource::LUMENITE))) return false;
-  const std::string label(descriptor.label);
+  std::string label(descriptor.label);
+  if (descriptor.key == "ResolutionPresent") label = std::format("Resolution at {}", view.SharedPresentName(*settings));
+  if (descriptor.key == "ResolutionScalePresent") label = std::format("Custom scale at {} (%)", view.SharedPresentName(*settings));
   // Plan 6 (D6): with Compare = Built-in, a look-group row shows its built-in value, read-only: edits never reach `settings`.
   const bool read_only = (state->defaults_view && InDefaultsView(descriptor));
   Settings built_in;
@@ -452,12 +454,13 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
   gui::BeginDisabled(!view.setup.split_capable || view.setup.stopped);  // fix round 1 (M5): greyed with Setup's other rows once NR stopped (Plan 15)
   const auto stored = static_cast<size_t>(settings->passes[later].stage);
   const auto shown = static_cast<size_t>(row.shown);
+  const std::array names{descriptor.choices[0].data(), NR_STAGE_NAMES[0], NR_STAGE_NAMES[1], view.SharedPresentName(*settings)};
   bool changed = false;
-  if (gui::BeginCombo(label.c_str(), descriptor.choices[shown].data())) {  // literals and static strings: NUL-terminated
+  if (gui::BeginCombo(label.c_str(), names[shown])) {  // literals and static strings: NUL-terminated
     for (size_t index = 0u; index < row.options.size(); ++index) {
       const PassStageOption& option = row.options[index];
       gui::BeginDisabled(!option.why.empty());
-      if (gui::Selectable(descriptor.choices[index].data(), shown == index) && index != stored) {
+      if (gui::Selectable(names[index], shown == index) && index != stored) {
         descriptor.set(*settings, static_cast<double>(index));
         changed = true;
       }
@@ -473,7 +476,7 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
     if (!view.setup.split_capable) {
       tooltip = std::format("Greyed: {}\n{}", ONE_STAGE_REASON, descriptor.tooltip);
     } else if (shown != stored && (row.options[stored].why.empty() || row.options[stored].temporary)) {  // a fixed cause never clears: no promise
-      tooltip += "\n" + SavedNote(descriptor.choices[stored]);
+      tooltip += "\n" + SavedNote(names[stored]);
     }
     gui::SetTooltip("%s", tooltip.c_str());
   }
@@ -957,16 +960,14 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   for (uint32_t pass = 2u; pass <= settings->pass_count; ++pass) {
     const bool follows = settings->passes[pass - 2u].follow_pass1;
     const PassStageRow& stage_row = view.setup.pass_stages[pass - 2u];
-    std::string_view runs_at;
+    std::string suffix;
     if (view.setup.chain_split) {
-      switch (stage_row.runs) {
-        case SourcePick::BEFORE_UPSCALING: runs_at = " - Before upscaling"; break;
-        case SourcePick::AFTER_DLSS:       runs_at = " - After DLSS"; break;
-        case SourcePick::PRESENT:          runs_at = " - At Present"; break;
-      }
+      const char* stage = view.RecordedStageName(pass - 1u);
+      if (!stage) stage = stage_row.runs == SourcePick::PRESENT ? view.SharedPresentName(*settings) : StageLabel(stage_row.runs);
+      suffix = " - " + gui::Display(stage);
     }
     const std::string tree_label =
-        std::format("{}{}{}###pass{}", gui::Display(std::format("Pass {}", pass)), gui::Display(follows ? " (same look as pass 1)" : ""), gui::Display(runs_at), pass);
+        std::format("{}{}{}###pass{}", gui::Display(std::format("Pass {}", pass)), gui::Display(follows ? " (same look as pass 1)" : ""), suffix, pass);
     if (gui::TreeNode(tree_label.c_str())) {
       const auto is_stage_row = [](const SettingDescriptor& descriptor) { return (descriptor.flags & setting_flags::PASS_STAGE) != 0u; };
       for (const SettingDescriptor& descriptor : SettingsSchema()) {
