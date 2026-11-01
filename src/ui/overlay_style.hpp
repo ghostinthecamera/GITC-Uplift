@@ -51,6 +51,7 @@ class GroupStyle {
 };
 
 inline ImU32 GroupSurface() { return gui::GetColorU32(ImGuiCol_Text, 0.065f); }
+inline float GroupGap() { return std::max(gui::GetStyle().ItemSpacing.y, gui::GetFontSize() * 0.3f); }
 inline bool FitPairedGroups() { return gui::GetContentRegionAvail().x >= gui::GetFontSize() * 44.f; }
 
 }  // namespace uplift::ui::style

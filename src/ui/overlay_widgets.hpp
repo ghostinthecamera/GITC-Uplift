@@ -170,7 +170,9 @@ void PairedGroups(const char* id, Left left, Right right) {
   };
   cell(0, left);
   if (!paired) {
-    gui::TableNextRow(ImGuiTableRowFlags_None, gui::GetStyle().ItemSpacing.y);
+    gui::PushStyleVar(ImGuiStyleVar_CellPadding, {gui::GetStyle().CellPadding.x, 0.f});
+    gui::TableNextRow(ImGuiTableRowFlags_None, style::GroupGap());
+    gui::PopStyleVar();
     gui::TableNextRow();
   }
   cell(paired ? 1 : 0, right);

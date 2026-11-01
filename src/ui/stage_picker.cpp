@@ -168,7 +168,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     }
   }
   gui::SetCursorScreenPos(origin);
-  gui::Dummy({width, bottom - origin.y});
+  gui::Dummy({width, bottom - origin.y + style::GroupGap() - gui::GetStyle().ItemSpacing.y});
   gui::PopID();
   return changed;
 }
