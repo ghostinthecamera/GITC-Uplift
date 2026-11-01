@@ -108,6 +108,39 @@ inline void PercentTicks(double low, double high) {
   gui::Dummy({0.f, gui::GetTextLineHeight()});
 }
 
+inline bool SectionHeading(const char* title, const char* id, bool show_reset) {
+  if (!show_reset) {
+    gui::SeparatorText(title);
+    return false;
+  }
+  const auto& theme = gui::GetStyle();
+  const auto reset_label = std::format("Reset##{}", id);
+  const ImVec2 start = gui::GetCursorScreenPos();
+  const float width = gui::GetContentRegionAvail().x, gap = theme.ItemSpacing.x;
+  const float content = gui::CalcTextSize(title).x + gap + gui::ResetButtonWidth(reset_label.c_str());
+  const float spare = width - content - 2.f * theme.SeparatorTextPadding.x;
+  if (spare < 0.f) {
+    gui::SeparatorText(title);
+    return gui::ResetButton(reset_label.c_str());
+  }
+
+  gui::SetCursorPosX(gui::GetCursorPosX() + theme.SeparatorTextPadding.x + spare * theme.SeparatorTextAlign.x);
+  gui::AlignTextToFramePadding();
+  gui::TextUnformatted(title);
+  const float before_title = gui::GetItemRectMin().x - gap;
+  gui::SameLine();
+  const bool reset = gui::ResetButton(reset_label.c_str());
+  const ImVec2 button_min = gui::GetItemRectMin(), button_max = gui::GetItemRectMax();
+  const float y = (button_min.y + button_max.y) * 0.5f;
+  const auto rule = [&](float from, float to) {
+    if (to > from && theme.SeparatorTextBorderSize > 0.f)
+      gui::GetWindowDrawList()->AddLine({from, y}, {to, y}, gui::GetColorU32(ImGuiCol_Separator), theme.SeparatorTextBorderSize);
+  };
+  rule(start.x, before_title);
+  rule(button_max.x + gap, start.x + width);
+  return reset;
+}
+
 inline void GroupHeading(const char* title, const char* note = nullptr) {
   gui::AlignTextToFramePadding();
   gui::TextUnformatted(title);

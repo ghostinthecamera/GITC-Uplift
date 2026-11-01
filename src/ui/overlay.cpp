@@ -936,8 +936,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   // ui-review.md §2 finding 1 / §3: the NR stage and Motion vectors toggles, in pipeline order, at the top
   // of the panel -- the decisions that shape everything else, instead of about the 45th line. Plan 14: Setup.
   const bool placement_changed = SectionChanged(*settings, SettingSection::PLACEMENT);
-  gui::SeparatorText(placement_changed ? "Setup (changed)" : "Setup");
-  if (section_reset("placement", placement_changed)) {
+  if (widgets::SectionHeading(placement_changed ? "Setup (changed)" : "Setup", "placement", placement_changed && !state->defaults_view)) {
     ResetSection(settings, SettingSection::PLACEMENT);
     const Settings defaults = DefaultSettings();  // the three highlights follow at once, each to the best option that can run (the stage first)
     state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(SourcePickOf(defaults, view.dlss_explicit)), view.setup);
@@ -950,8 +949,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
 
   // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look.
   const bool look_changed = SectionChanged(*settings, SettingSection::LOOK);
-  gui::SeparatorText(look_changed ? "Look (changed)" : "Look");
-  if (section_reset("look", look_changed)) {
+  if (widgets::SectionHeading(look_changed ? "Look (changed)" : "Look", "look", look_changed && !state->defaults_view)) {
     ResetSection(settings, SettingSection::LOOK);
     changed = true;
   }
