@@ -133,6 +133,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     widgets::SettingCaption(caption, value, !IsDefault(*settings, descriptor));
     gui::EndDisabled();
     changed |= DrawReset(descriptor, *settings, *state, true, view.setup);
+    widgets::NextGap(style::LabelGap());
     label = "##value";
   }
   std::string saved_note;  // Plan 14 (R90): the Resolution combo's tooltip, while the mode that runs is not the stored one
@@ -507,6 +508,7 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
   gui::AlignTextToFramePadding();
   gui::TextUnformatted("Motion vectors");
   bool changed = DrawReset(*FindSetting("MotionVectors"), *settings, *state, true, view.setup);
+  widgets::NextGap(style::LabelGap());
   if (const int clicked = widgets::SegmentedControl(nullptr, OPTIONS, why, tips, shown); clicked >= 0) {
     SetMotionPick(settings, static_cast<MotionPick>(clicked));
     state->setup_settle.Clicked(SetupRow::MOTION, static_cast<uint32_t>(clicked));
@@ -550,15 +552,13 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
   widgets::PairedGroups("##setup_groups", [&] {
     widgets::GroupHeading("Frame inputs");
     changed |= DrawMotionRow(view, settings, state);
-    gui::Spacing();
     changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state, true);
-    gui::Spacing();
+    widgets::NextGap(style::BlockGap());
     widgets::GroupHeading("Passes");
     changed |= DrawRow(*FindSetting("PassCount"), view, settings, state, true);
   }, [&] {
     widgets::GroupHeading("NR processing", "Pass 1 defaults");
     changed |= DrawRow(*FindSetting("Preset"), view, settings, state, true);
-    gui::Spacing();
     changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state, true);
     changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state, true);
     DrawWorkingSize(view, *settings);
@@ -571,7 +571,6 @@ bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* s
   static constexpr std::array<const char*, 2> options{"Mine", "Built-in"};
   static constexpr std::array<std::string_view, 2> why{}, tips{"", "The built-in look, read-only; your own settings are kept."};
   {
-    const style::GroupStyle controls;
     if (gui::BeginTable("##compare", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings)) {
       gui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, gui::CalcTextSize("Compare").x);
       const float choices_width = gui::CalcTextSize(options[0]).x + gui::CalcTextSize(options[1]).x + 4.f * gui::GetStyle().FramePadding.x + gui::GetStyle().ItemInnerSpacing.x;
@@ -591,6 +590,7 @@ bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* s
 
   bool changed = false;
   const auto row = [&](const char* key, bool grouped = true) { changed |= DrawRow(*FindSetting(key), view, settings, state, grouped); };
+  widgets::NextGap(style::BlockGap());
   widgets::PairedGroups("##look_groups", [&] {
     widgets::GroupHeading("Image", "Pass 1");
     row("Style");
@@ -798,35 +798,21 @@ void OverlayView::AddStartupLocks(const Settings& settings, bool vulkan, bool d3
   }
 }
 
-bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state) {
+static bool DrawOverlayContent(const OverlayView& view, Settings* settings, OverlayState* state) {
   state->drag.pass_slider = false;  // the rows OR into it
   state->language_changed = false;
-  const ImVec2 top = ImGui::GetCursorPos();
-  const float language_width = ImGui::GetFontSize() * 12.f;
-  ImGui::SetCursorPosX(top.x + std::max(0.f, ImGui::GetContentRegionAvail().x - language_width));
-  ImGui::SetNextItemWidth(language_width);
-  int selected_language = static_cast<int>(settings->language);
-  const char* languages[] = {"English", "简体中文 / Chinese"};
-  if (ImGui::Combo("##UpliftLanguage", &selected_language, languages, 2)) {
-    FindSetting("Language")->set(*settings, selected_language);
-    state->language_changed = true;
-  }
-  if (ImGui::IsItemHovered()) {
-    const gui::LanguageScope tooltip_language(settings->language);
-    gui::SetTooltip("English / Simplified Chinese. If Chinese appears as boxes, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc). No extra Uplift files are needed.");
-  }
-  ImGui::SetCursorPos(top);
   const gui::LanguageScope language_scope(settings->language);
   bool changed = false;
 
   changed |= DrawRow(*FindSetting(ENABLED_KEY), view, settings, state);
   gui::SameLine();
-  const float hotkey_width = std::max(1.f, gui::GetContentRegionAvail().x - language_width - gui::GetStyle().ItemSpacing.x);
+
   // 1.1.0 (a player's report): Esc also closes ReShade's overlay, so it cannot be the way to clear the hotkey. A right-click on the button clears it
   // (capturing or not); Esc only cancels a capture. A capture whose overlay closed ends by itself (ExpireKeyCapture), so the hotkey never stays off.
   if (state->capturing_key) {
     state->capture_seen = std::chrono::steady_clock::now();
-    gui::Button("Press a key (right-click clears)", ImVec2(hotkey_width, 0.f));
+    if (gui::CalcTextSize("Press a key (right-click clears)").x + 2.f * gui::GetStyle().FramePadding.x > gui::GetContentRegionAvail().x) gui::NewLine();
+    gui::Button("Press a key (right-click clears)");
     if (gui::IsItemClicked(ImGuiMouseButton_Right)) {
       settings->enable_key = 0u;
       state->capturing_key = false;
@@ -856,7 +842,8 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
         key_label = std::format("Hotkey: key {:#04x}", settings->enable_key);
       }
     }
-    if (gui::Button(key_label.c_str(), ImVec2(std::min(hotkey_width, gui::CalcTextSize(key_label.c_str()).x + gui::GetStyle().FramePadding.x * 2.f), 0.f))) {
+    if (gui::CalcTextSize(key_label.c_str()).x + 2.f * gui::GetStyle().FramePadding.x > gui::GetContentRegionAvail().x) gui::NewLine();
+    if (gui::Button(key_label.c_str())) {
       state->capturing_key = true;
       state->capture_seen = std::chrono::steady_clock::now();
     } else if (gui::IsItemClicked(ImGuiMouseButton_Right) && settings->enable_key != 0u) {
@@ -868,10 +855,28 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     }
   }
 
+  gui::SameLine();
+  const float min_language_width = ImGui::CalcTextSize(settings->language == Language::ENGLISH ? "English" : "简体中文 / Chinese").x + gui::GetFrameHeight() + style::RowGap();
+  if (gui::GetContentRegionAvail().x < min_language_width) gui::NewLine();
+  const float language_width = std::min(gui::GetContentRegionAvail().x, std::max(min_language_width, 12.f * gui::GetFontSize()));
+  gui::SetCursorPosX(gui::GetCursorPosX() + gui::GetContentRegionAvail().x - language_width);
+  gui::SetNextItemWidth(language_width);
+  int selected_language = static_cast<int>(settings->language);
+  const char* languages[] = {"English", "简体中文 / Chinese"};
+  if (ImGui::Combo("##UpliftLanguage", &selected_language, languages, 2)) {
+    FindSetting("Language")->set(*settings, selected_language);
+    state->language_changed = true;
+  }
+  if (ImGui::IsItemHovered()) {
+    const gui::LanguageScope tooltip_language(settings->language);
+    gui::SetTooltip("English / Simplified Chinese. If Chinese appears as boxes, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc). No extra Uplift files are needed.");
+  }
+
+  widgets::NextGap(style::BlockGap());
   if (!view.safety_locks.empty()) {
     const ImVec4 red = style::SafetyRed();
     const ImVec2 warning_start = gui::GetCursorScreenPos();
-    const float inset = gui::GetFontSize() * 0.7f;
+    const float inset = style::PanelInset();
     gui::Indent(inset);
     gui::PushStyleColor(ImGuiCol_Text, red);
     gui::SeparatorText("SAFETY LATCH ACTIVE");
@@ -899,66 +904,63 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     gui::Separator();
   }
 
-  // Plan 6 (v2 design §3.18, D1): the status card -- the first failing stage, its reason and its one fix/button.
-  // Plan 7 (the controller's addition): a fixed-height region, sized for the card's worst case (a title, a
-  // two-line wrapped reason, at most two fix bullets, and one button row), so a transient reason or bullet --
-  // e.g. the "resizing" and "Running k of k+1 passes." lines a Pass Count change used to flash -- never
-  // shifts the rows below it. Same in D3D12 and D3D11 (bridged): this is ordinary ImGui, backend-agnostic.
-  constexpr float CARD_TEXT_LINES = 5.f;  // title + up to 2 reason lines + up to 2 fix bullets
   const StatusCard& card = view.card;
-  gui::BeginChild("##status_card", ImVec2(0.f, gui::GetTextLineHeightWithSpacing() * CARD_TEXT_LINES + gui::GetFrameHeightWithSpacing()),
-                    ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-  if (card.working) {
-    // Plan 14 (design §1): green while NR works, three rows that say what Setup highlights (keys muted on the left, values in normal text from one column),
-    // one muted Why line for a temporary fallback (else the note), and the footer. The height above is unchanged; whatever does not fit is left out.
-    gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_CheckMark), "%s", card.title.c_str());
-    const float value_x = gui::GetCursorPosX() + gui::CalcTextSize("Motion vectors").x + 2.f * gui::GetStyle().ItemSpacing.x;
-    const auto row = [value_x](const char* key, const std::string& value) {
-      gui::TextDisabled("%s", key);
-      gui::SameLine(value_x);
-      CardLine(value, false);
-    };
-    const char* recorded = view.RecordedStageName(0u);
-    row("Running at", recorded ? recorded : view.live.stage);
-    row("Motion vectors", view.live.motion);
-    row("Resolution", view.live.resolution);
-    if (!view.setup.why.empty()) {
-      // Muted and wrapped: two lines in the card's spare height; the child clips anything longer, and the full text is the tooltip.
-      const std::string why = "Why: " + view.setup.why;
-      gui::PushStyleColor(ImGuiCol_Text, gui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-      gui::TextWrapped("%s", why.c_str());
-      gui::PopStyleColor();
-      if (gui::IsItemHovered()) {
-        gui::SetTooltip("%s", why.c_str());
+  const float card_inset = style::PanelInset();
+  gui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {style::RowGap(), style::LabelGap()});
+  widgets::Inset("##status_card", {card_inset, card_inset}, [&] {
+    if (card.working) {
+      // Plan 14 (design §1): green while NR works, three rows that say what Setup highlights (keys muted on the left, values in normal text from one column),
+      // one muted Why line for a temporary fallback (else the note), and the footer. The height above is unchanged; whatever does not fit is left out.
+      gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_CheckMark), "%s", card.title.c_str());
+      const float value_x = gui::GetCursorPosX() + gui::CalcTextSize("Motion vectors").x + 2.f * gui::GetStyle().ItemSpacing.x;
+      const auto row = [value_x](const char* key, const std::string& value) {
+        gui::TextDisabled("%s", key);
+        gui::SameLine(value_x);
+        CardLine(value, false);
+      };
+      const char* recorded = view.RecordedStageName(0u);
+      row("Running at", recorded ? recorded : view.live.stage);
+      row("Motion vectors", view.live.motion);
+      if (!view.details_backend.empty()) row("Backend", view.details_backend);
+      row("Resolution", view.live.resolution);
+      if (!view.setup.why.empty()) {
+        // Muted and wrapped: two lines in the card's spare height; the child clips anything longer, and the full text is the tooltip.
+        const std::string why = "Why: " + view.setup.why;
+        gui::PushStyleColor(ImGuiCol_Text, gui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        gui::TextWrapped("%s", why.c_str());
+        gui::PopStyleColor();
+        if (gui::IsItemHovered()) {
+          gui::SetTooltip("%s", why.c_str());
+        }
+      } else {
+        CardDetailLine(view.live.note);
       }
+      CardDetailLine(view.live.footer);
     } else {
-      CardDetailLine(view.live.note);
-    }
-    CardDetailLine(view.live.footer);
-  } else {
-    gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_PlotHistogram), "%s", card.title.c_str());
-    if (!card.reason.empty()) {
-      gui::TextWrapped("%s", card.reason.c_str());
-    }
-    for (const std::string& fix : card.fixes) {
-      gui::BulletText("%s", fix.c_str());
-    }
-  }
-  switch (card.button) {
-    case CardButton::NONE: break;
-    case CardButton::TURN_ON:
-      if (gui::Button("Turn on")) {
-        settings->enabled = true;
-        changed = true;
+      gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_PlotHistogram), "%s", card.title.c_str());
+      if (!card.reason.empty()) {
+        gui::TextWrapped("%s", card.reason.c_str());
       }
-      break;
-    case CardButton::RETRY_NOW:
-      if (gui::Button("Retry now")) state->retry_now = true;
-      break;
-    case CardButton::CLEAR_LATCH:  // Each blocked feature has its own explicit recovery action above the card.
-      break;
-  }
-  gui::EndChild();
+      for (const std::string& fix : card.fixes) {
+        gui::BulletText("%s", fix.c_str());
+      }
+    }
+    switch (card.button) {
+      case CardButton::NONE: break;
+      case CardButton::TURN_ON:
+        if (gui::Button("Turn on")) {
+          settings->enabled = true;
+          changed = true;
+        }
+        break;
+      case CardButton::RETRY_NOW:
+        if (gui::Button("Retry now")) state->retry_now = true;
+        break;
+      case CardButton::CLEAR_LATCH:  // Each blocked feature has its own explicit recovery action above the card.
+        break;
+    }
+  }, true, style::Units(27));
+  gui::PopStyleVar();
 
   // Every row of one section. All its call sites are here in DrawOverlay, so it stays a local
   // lambda rather than a file-scope helper.
@@ -984,6 +986,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
 
   // ui-review.md §2 finding 1 / §3: the NR stage and Motion vectors toggles, in pipeline order, at the top
   // of the panel -- the decisions that shape everything else, instead of about the 45th line. Plan 14: Setup.
+  widgets::NextGap(style::SectionGap());
   const bool placement_changed = SectionChanged(*settings, SettingSection::PLACEMENT);
   if (widgets::SectionHeading(placement_changed ? "Setup (changed)" : "Setup", "placement", placement_changed && !state->defaults_view)) {
     ResetSection(settings, SettingSection::PLACEMENT);
@@ -993,17 +996,25 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     state->setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(defaults.resolution_mode), view.setup);
     changed = true;
   }
+  widgets::NextGap(style::BlockGap());
   changed |= DrawStagePicker(view, settings, state);
+  widgets::NextGap(style::BlockGap());
   changed |= DrawSetupGroups(view, settings, state);
 
   // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look.
+  widgets::NextGap(style::SectionGap());
   const bool look_changed = SectionChanged(*settings, SettingSection::LOOK);
   if (widgets::SectionHeading(look_changed ? "Look (changed)" : "Look", "look", look_changed && !state->defaults_view)) {
     ResetSection(settings, SettingSection::LOOK);
     changed = true;
   }
+  widgets::NextGap(style::BlockGap());
   changed |= DrawLookGroups(view, settings, state);
-  if (settings->pass_count > 1u) gui::SeparatorText("Passes");
+  if (settings->pass_count > 1u) {
+    widgets::NextGap(style::SectionGap());
+    gui::SeparatorText("Passes");
+    widgets::NextGap(style::BlockGap());
+  }
   // Plan 5: pass 2..pass_count, each its own collapsible tree (P4-P13), so the per-pass rows do not
   // flood the panel for the common one-pass case. ui-review.md §5: the tree's own label shows its state.
   // Split chain (Task 3, design 6.2): Runs at first; on the first pass of a later stage group, that stage's Resolution (and Custom scale) and, while Keep
@@ -1113,6 +1124,15 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
 
   changed |= DrawEnableWarning(*FindSetting("PresentWithFrameGen"), settings, state, view.dlss_explicit);
   changed |= DrawEnableWarning(*FindSetting("AllowCrossQueuePasses"), settings, state, view.dlss_explicit);
+  return changed;
+}
+
+bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state) {
+  const style::OverlayStyle theme;
+  const auto host = gui::GetStyle().WindowPadding;
+  const ImVec2 inset{std::max(0.f, style::BlockGap() - host.x), std::max(0.f, style::BlockGap() - host.y)};
+  bool changed = false;
+  widgets::Inset("##uplift_sheet", inset, [&] { changed = DrawOverlayContent(view, settings, state); });
   return changed;
 }
 

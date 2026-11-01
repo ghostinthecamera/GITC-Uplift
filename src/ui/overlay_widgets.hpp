@@ -170,29 +170,61 @@ inline void GroupHeading(const char* title, const char* note = nullptr) {
   gui::Separator();
 }
 
+// The preceding item has already advanced by ItemSpacing.y. Replace that gap instead of adding a second margin.
+inline void NextGap(float gap) {
+  gui::SetCursorPosY(gui::GetCursorPosY() + gap - gui::GetStyle().ItemSpacing.y);
+}
+
+template <typename Contents>
+void Inset(const char* id, ImVec2 padding, Contents contents, bool surface = false, float min_height = 0.f) {
+  gui::PushStyleVar(ImGuiStyleVar_CellPadding, padding);
+  if (gui::BeginTable(id, 1, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX | ImGuiTableFlags_NoSavedSettings)) {
+    gui::TableNextRow(ImGuiTableRowFlags_None, min_height);
+    gui::TableSetColumnIndex(0);
+    if (surface) gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, style::GroupSurface());
+    gui::PushItemWidth(-1.f);
+    gui::PushTextWrapPos(0.f);
+    contents();
+    gui::PopTextWrapPos();
+    gui::PopItemWidth();
+    gui::EndTable();
+  }
+  gui::PopStyleVar();
+}
+
+template <typename Contents>
+void Panel(const char* id, Contents contents) {
+  const float inset = style::PanelInset();
+  Inset(id, {inset, inset}, contents, true);
+}
+
 template <typename Left, typename Right>
 void PairedGroups(const char* id, Left left, Right right) {
-  const bool paired = style::FitPairedGroups();
-  const style::GroupStyle group_style;
-  const auto flags = ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX | ImGuiTableFlags_NoSavedSettings;
-  if (!gui::BeginTable(id, paired ? 2 : 1, paired ? flags | ImGuiTableFlags_BordersInnerV : flags)) return;
-  gui::TableNextRow();
-  const auto cell = [](int column, auto& contents) {
-    gui::TableSetColumnIndex(column);
-    gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, style::GroupSurface());
-    gui::PushItemWidth(-1.f);
-    contents();
-    gui::PopItemWidth();
-  };
-  cell(0, left);
-  if (!paired) {
-    gui::PushStyleVar(ImGuiStyleVar_CellPadding, {gui::GetStyle().CellPadding.x, 0.f});
-    gui::TableNextRow(ImGuiTableRowFlags_None, style::GroupGap());
-    gui::PopStyleVar();
-    gui::TableNextRow();
+  const float inset = style::PanelInset();
+  if (!style::FitPairedGroups()) {
+    gui::PushID(id);
+    Panel("##left", left);
+    NextGap(inset);
+    Panel("##right", right);
+    gui::PopID();
+    return;
   }
-  cell(paired ? 1 : 0, right);
-  gui::EndTable();
+  gui::PushStyleVar(ImGuiStyleVar_CellPadding, {0.f, 0.f});
+  if (gui::BeginTable(id, 3, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoPadInnerX | ImGuiTableFlags_NoPadOuterX | ImGuiTableFlags_NoSavedSettings)) {
+    gui::TableSetupColumn("##left", ImGuiTableColumnFlags_WidthStretch);
+    gui::TableSetupColumn("##gutter", ImGuiTableColumnFlags_WidthFixed, inset);
+    gui::TableSetupColumn("##right", ImGuiTableColumnFlags_WidthStretch);
+    gui::TableNextRow();
+    const auto cell = [inset](int index, const char* name, auto& contents) {
+      gui::TableSetColumnIndex(index);
+      gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, style::GroupSurface());
+      Inset(name, {inset, inset}, contents);
+    };
+    cell(0, "##left_content", left);
+    cell(2, "##right_content", right);
+    gui::EndTable();
+  }
+  gui::PopStyleVar();
 }
 
 }  // namespace uplift::ui::widgets

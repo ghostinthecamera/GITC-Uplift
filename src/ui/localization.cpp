@@ -99,6 +99,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Automatic retries stopped: change a setting, or retry now.", "已停止自动重试：请更改设置或立即重试。"},
     {"Available once the game renders with DLSS", "游戏使用 DLSS 渲染后即可使用"},
     {"B: Small FP8", "B：小型 FP8（Small FP8）"},
+    {"Backend", "后端"},
     {"Balanced", "均衡"},
     {"Balanced (58 %)", "均衡（58 %）"},
     {"Balanced preset", "均衡预设"},

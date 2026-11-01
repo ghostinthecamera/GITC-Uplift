@@ -53,13 +53,13 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
   const float em = gui::GetFontSize();
   const ImVec2 origin = gui::GetCursorScreenPos();
   const float width = std::max(1.f, gui::GetContentRegionAvail().x);
-  const bool folded = width < em * 43.f;
+  const bool folded = width < style::Units(168);
   const int columns = folded ? 3 : 6;
   const float margin = std::min(0.55f * em, width * 0.025f);
   const float gap = std::min(1.05f * em, width * 0.04f);
   const float cell = std::max(1.f, (width - 2.f * margin - gap * (columns - 1)) / columns);
   const float height = em * 3.0f, pitch = cell + gap, row = em * 9.6f;
-  const float button_h = em * 2.35f, hook_y = em * 3.f;
+  const float button_h = 2.f * em + 2.f * style::LabelGap(), hook_y = em * 3.f;
   const float button_w = std::max(1.f, std::min(9.2f * em, pitch - em * 0.28f));
   float bottom = origin.y;
   ImDrawList& draw = *gui::GetWindowDrawList();
@@ -130,6 +130,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     const ImVec4 color = style::PassAccent(run.first, i);
     gui::PushID(static_cast<int>(i));
     gui::SetCursorScreenPos({x - button_w * 0.5f, y});
+    gui::PushStyleVar(ImGuiStyleVar_FramePadding, {style::LabelGap(), style::LabelGap() * 0.5f});
     gui::PushStyleVar(ImGuiStyleVar_FrameRounding, button_h * 0.5f);
     gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, selected == i ? 2.f : 1.f);
     gui::PushStyleColor(ImGuiCol_Border, run.count ? color : gui::GetStyleColorVec4(selected == i ? ImGuiCol_Text : ImGuiCol_TextDisabled));
@@ -145,7 +146,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
       gui::SetTooltip("%s", why.empty() ? (i == 0 && view.setup.before_upscaling_on_rr ? "NR works on Ray Reconstruction's input." : TIPS[i]) : why.data());
     }
     gui::PopStyleColor(run.count ? 2 : 1);
-    gui::PopStyleVar(2);
+    gui::PopStyleVar(3);
     gui::PopID();
 
     float stage_bottom = y + button_h;
@@ -168,7 +169,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     }
   }
   gui::SetCursorScreenPos(origin);
-  gui::Dummy({width, bottom - origin.y + style::GroupGap() - gui::GetStyle().ItemSpacing.y});
+  gui::Dummy({width, bottom - origin.y});
   gui::PopID();
   return changed;
 }

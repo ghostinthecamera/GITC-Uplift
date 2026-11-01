@@ -24,34 +24,38 @@ inline ImVec4 SelectedFill(ImVec4 accent) {
   return {base.x + tint * (accent.x - base.x), base.y + tint * (accent.y - base.y), base.z + tint * (accent.z - base.z), base.w};
 }
 
-class GroupStyle {
+// ReShade's reference UI font is 13 px. Resolve every inset and gap from the live font size.
+inline float Units(float count) { return gui::GetFontSize() * (4.f / 13.f) * count; }
+inline float LabelGap() { return Units(1); }
+inline float RowGap() { return Units(2); }
+inline float PanelInset() { return Units(3); }
+inline float BlockGap() { return Units(4); }
+inline float SectionGap() { return Units(6); }
+inline bool FitPairedGroups() { return gui::GetContentRegionAvail().x >= Units(144); }
+inline ImU32 GroupSurface() { return gui::GetColorU32(ImGuiCol_Text, 0.065f); }
+
+class OverlayStyle {
  public:
-  GroupStyle() {
+  OverlayStyle() {
     const auto& theme = gui::GetStyle();
-    const float em = gui::GetFontSize(), pad = em * 0.12f;
     const auto base = theme.Colors[ImGuiCol_WindowBg], accent = theme.Colors[ImGuiCol_CheckMark];
     gui::PushStyleColor(ImGuiCol_Button, base);
     gui::PushStyleColor(ImGuiCol_FrameBg, base);
     gui::PushStyleColor(ImGuiCol_ButtonActive, SelectedFill(accent));
     gui::PushStyleColor(ImGuiCol_SliderGrab, accent);
     gui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
-    gui::PushStyleVar(ImGuiStyleVar_CellPadding, {0.75f * em, 0.55f * em});
-    gui::PushStyleVar(ImGuiStyleVar_FramePadding, {theme.FramePadding.x + pad, theme.FramePadding.y + pad});
-    gui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, {theme.ItemInnerSpacing.x + pad, theme.ItemInnerSpacing.y});
-    gui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {theme.ItemSpacing.x, theme.ItemSpacing.y + pad});
-    gui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::max(theme.FrameRounding, em * 0.28f));
+    gui::PushStyleVar(ImGuiStyleVar_FramePadding, {LabelGap(), (SectionGap() - gui::GetFontSize()) * 0.5f});
+    gui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, {LabelGap(), LabelGap()});
+    gui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {RowGap(), RowGap()});
+    gui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::max(theme.FrameRounding, LabelGap()));
     gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, std::max(theme.FrameBorderSize, 1.f));
   }
-  ~GroupStyle() {
-    gui::PopStyleVar(6);
+  ~OverlayStyle() {
+    gui::PopStyleVar(5);
     gui::PopStyleColor(5);
   }
-  GroupStyle(const GroupStyle&) = delete;
-  GroupStyle& operator=(const GroupStyle&) = delete;
+  OverlayStyle(const OverlayStyle&) = delete;
+  OverlayStyle& operator=(const OverlayStyle&) = delete;
 };
-
-inline ImU32 GroupSurface() { return gui::GetColorU32(ImGuiCol_Text, 0.065f); }
-inline float GroupGap() { return std::max(gui::GetStyle().ItemSpacing.y, gui::GetFontSize() * 0.3f); }
-inline bool FitPairedGroups() { return gui::GetContentRegionAvail().x >= gui::GetFontSize() * 44.f; }
 
 }  // namespace uplift::ui::style
