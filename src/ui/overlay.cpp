@@ -28,9 +28,13 @@ namespace {
 int RadioRow(const char* label, std::span<const char* const> options, std::span<const std::string_view> why,
              std::span<const std::string_view> tips, int selected, std::span<const size_t> display_order = {}) {
   const ImGuiStyle& style = gui::GetStyle();
-  const float total_width = gui::CalcItemWidth();
+  const float total_width = label ? gui::CalcItemWidth() : gui::GetContentRegionAvail().x;
   const float gap = style.ItemInnerSpacing.x;
   const size_t count = options.size();
+  float labels_width = 0.f;
+  if (!label) {
+    for (const char* option : options) labels_width += gui::CalcTextSize(option).x + 2.f * style.FramePadding.x;
+  }
   const float button_width = (total_width - static_cast<float>(count - 1u) * gap) / static_cast<float>(count);
   const float label_x = gui::GetCursorPosX() + total_width + gap;
   int clicked = -1;
@@ -45,8 +49,18 @@ int RadioRow(const char* label, std::span<const char* const> options, std::span<
       gui::PushStyleColor(ImGuiCol_Button, gui::GetStyleColorVec4(ImGuiCol_ButtonActive));
     }
     gui::BeginDisabled(!why[index].empty());
-    if (gui::Button(options[index], ImVec2(button_width, 0.f))) {
+    float width = button_width;
+    if (!label && labels_width > 0.f) {
+      const float inner = std::max(1.f, total_width - (count - 1u) * gap);
+      const float need = gui::CalcTextSize(options[index]).x + 2.f * style.FramePadding.x;
+      width = inner >= labels_width ? need + (inner - labels_width) / count : inner * need / labels_width;
+    }
+    if (gui::Button(options[index], ImVec2(width, 0.f))) {
       clicked = static_cast<int>(index);
+    }
+    if (!label && selected_option) {
+      const auto a = gui::GetItemRectMin(), b = gui::GetItemRectMax();
+      gui::GetWindowDrawList()->AddLine({a.x + 2.f, b.y - 1.f}, {b.x - 2.f, b.y - 1.f}, gui::GetColorU32(ImGuiCol_SliderGrab), 2.f);
     }
     gui::EndDisabled();
     if (selected_option) {
@@ -67,9 +81,11 @@ int RadioRow(const char* label, std::span<const char* const> options, std::span<
     }
     gui::PopID();
   }
-  gui::SameLine();
-  gui::SetCursorPosX(std::max(gui::GetCursorPosX(), label_x));
-  gui::TextUnformatted(label);
+  if (label) {
+    gui::SameLine();
+    gui::SetCursorPosX(std::max(gui::GetCursorPosX(), label_x));
+    gui::TextUnformatted(label);
+  }
   return clicked;
 }
 
@@ -78,9 +94,29 @@ std::string SavedNote(std::string_view preference) {
   return std::format("Saved: {}; it runs again by itself when it can.", preference);
 }
 
+bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayState& state, bool align_right, const SetupView& setup) {
+  if (descriptor.section == SettingSection::TOP || IsDefault(settings, descriptor)) return false;
+  gui::SameLine();
+  if (align_right) {
+    const float remaining = gui::GetContentRegionAvail().x - gui::CalcTextSize("<").x - 2.f * gui::GetStyle().FramePadding.x;
+    if (remaining > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + remaining);
+  }
+  const bool reset = gui::SmallButton("<");
+  if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    const std::string value = descriptor.key == "MotionVectors" ? "DLSS" : FormatSettingValue(descriptor, DefaultSettings());
+    gui::SetTooltip("Reset to default (%s)", value.c_str());
+  }
+  if (reset) {
+    ResetSetting(&settings, descriptor);
+    if (descriptor.key == "ResolutionMode") state.setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(DefaultSettings().resolution_mode), setup);
+    if (descriptor.key == "MotionVectors") state.setup_settle.ClickedBest(SetupRow::MOTION, static_cast<uint32_t>(MotionPick::DLSS), setup, true);
+  }
+  return reset;
+}
+
 // One schema row. Returns true when the value changed. Called both from DrawOverlay (the Enable
 // row) and from its own draw_rows lambda (every other row), so it stays a free function.
-bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state) {
+bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state, bool grouped = false) {
   if (descriptor.key == "BeforeFGMotion" && (settings->fg_present != Settings::FgPresent::BEFORE
       || (settings->motion_vectors != MotionVectorSource::LAUNCHPAD && settings->motion_vectors != MotionVectorSource::LUMENITE))) return false;
   std::string label(descriptor.label);
@@ -148,8 +184,23 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                                                                                : std::string_view();
   gui::BeginDisabled(!disabled_reason.empty() || read_only);
   bool changed = false;
+  if (grouped) {
+    const char* caption = descriptor.key == "ResolutionMode" ? "Working resolution" : descriptor.key == "ResolutionScale" ? "Custom scale" : label.c_str();
+    gui::TextUnformatted(caption);
+    changed |= DrawReset(descriptor, *settings, *state, true, view.setup);
+    label = "##value";
+  }
   std::string saved_note;  // Plan 14 (R90): the Resolution combo's tooltip, while the mode that runs is not the stored one
-  if (descriptor.key == "SkinStructure") {
+  if (grouped && descriptor.key == "MaskBlendMode") {
+    static constexpr std::array<const char*, 4> modes{"0", "1", "2", "3"};
+    const std::array<std::string_view, 4> why{disabled_reason, disabled_reason, disabled_reason, disabled_reason};
+    const std::array<std::string_view, 4> tips{descriptor.tooltip, descriptor.tooltip, descriptor.tooltip, descriptor.tooltip};
+    const int clicked = RadioRow(nullptr, modes, why, tips, static_cast<int>(settings->mask_blend_mode));
+    if (clicked >= 0) {
+      descriptor.set(*settings, clicked);
+      changed = true;
+    }
+  } else if (descriptor.key == "SkinStructure") {
     bool follows = (settings->skin_structure < 0.f);
     if (gui::Checkbox("Skin follows Structure", &follows)) {
       settings->skin_structure = (follows ? SKIN_SAME_AS_STRUCTURE : settings->local_structure);
@@ -293,7 +344,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           // Show FG placements in pipeline order while retaining the stored values used by existing presets.
           static constexpr size_t fg_order[]{static_cast<size_t>(Settings::FgPresent::OFF), static_cast<size_t>(Settings::FgPresent::BEFORE), static_cast<size_t>(Settings::FgPresent::AFTER)};
           const std::span<const size_t> order = descriptor.key == "PresentWithFrameGen" ? std::span<const size_t>{fg_order} : std::span<const size_t>{};
-          if (const int clicked = RadioRow(label.c_str(), options, why_span, tips_span, value, order); clicked >= 0) {
+          if (const int clicked = RadioRow(grouped ? nullptr : label.c_str(), options, why_span, tips_span, value, order); clicked >= 0) {
             if (descriptor.key == "PresentWithFrameGen" && clicked == static_cast<int>(Settings::FgPresent::AFTER)) {
               state->confirm_present_stage = false;
               state->enable_warning_key = descriptor.key;
@@ -391,23 +442,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty() && !view.vulkan_nr_note.empty()) {
     gui::TextDisabled("%s", view.vulkan_nr_note.c_str());
   }
-  // The reset arrow after a row that differs from its default (design §3.16, G1). The Enable
-  // switch itself is the one row without an arrow: "reset" would only mean "switch NR off".
-  if (descriptor.section != SettingSection::TOP && !IsDefault(*settings, descriptor)) {
-    gui::SameLine();
-    const bool reset_clicked = gui::SmallButton("<");
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      gui::SetTooltip("Reset to default (%s)", FormatSettingValue(descriptor, DefaultSettings()).c_str());
-    }
-    if (reset_clicked) {
-      ResetSetting(settings, descriptor);
-      if (descriptor.key == "ResolutionMode") {
-        // The highlight follows at once, to the default when it can run and else to the best that can.
-        state->setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(DefaultSettings().resolution_mode), view.setup);
-      }
-      changed = true;
-    }
-  }
+  if (!grouped) changed |= DrawReset(descriptor, *settings, *state, false, view.setup);
   gui::EndDisabled();
   gui::PopID();
   return changed && !read_only;
@@ -520,25 +555,78 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
     saved_tip = std::format("{}\n{}", tips[static_cast<size_t>(shown)], SavedNote(stored));
     tips[static_cast<size_t>(shown)] = saved_tip;
   }
-  bool changed = false;
-  if (const int clicked = RadioRow("Motion vectors", OPTIONS, why, tips, shown); clicked >= 0) {
+  gui::TextUnformatted("Motion vectors");
+  bool changed = DrawReset(*FindSetting("MotionVectors"), *settings, *state, true, view.setup);
+  if (const int clicked = RadioRow(nullptr, OPTIONS, why, tips, shown); clicked >= 0) {
     SetMotionPick(settings, static_cast<MotionPick>(clicked));
     state->setup_settle.Clicked(SetupRow::MOTION, static_cast<uint32_t>(clicked));
     changed = true;
   }
-  if (!IsDefault(*settings, *FindSetting("MotionVectors"))) {
-    gui::SameLine();
-    const bool reset_clicked = gui::SmallButton("<");
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      gui::SetTooltip("Reset to default (DLSS)");
-    }
-    if (reset_clicked) {
-      SetMotionPick(settings, MotionPick::DLSS);
-      state->setup_settle.ClickedBest(SetupRow::MOTION, static_cast<uint32_t>(MotionPick::DLSS), view.setup, true);  // DLSS is stored as Auto
-      changed = true;
-    }
-  }
   gui::PopID();
+  return changed;
+}
+
+bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
+  const float em = gui::GetFontSize();
+  const bool paired = gui::GetContentRegionAvail().x >= 44.f * em;
+  bool changed = false;
+  gui::PushStyleVar(ImGuiStyleVar_CellPadding, {0.75f * em, 0.55f * em});
+  if (gui::BeginTable("##setup_groups", paired ? 3 : 1, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX | ImGuiTableFlags_NoSavedSettings)) {
+    gui::TableSetupColumn("##inputs", ImGuiTableColumnFlags_WidthStretch);
+    if (paired) {
+      gui::TableSetupColumn("##gap", ImGuiTableColumnFlags_WidthFixed, 1.f);
+      gui::TableSetupColumn("##processing", ImGuiTableColumnFlags_WidthStretch);
+    }
+    const ImU32 surface = gui::GetColorU32(ImGuiCol_Text, 0.065f);
+    const ImVec4 accent = {0.32f, 0.82f, 0.72f, 1.f};
+    const auto& base = gui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    const ImVec4 active = {base.x * 0.72f + accent.x * 0.28f, base.y * 0.72f + accent.y * 0.28f, base.z * 0.72f + accent.z * 0.28f, 1.f};
+    gui::PushStyleColor(ImGuiCol_Button, base);
+    gui::PushStyleColor(ImGuiCol_FrameBg, base);
+    gui::PushStyleColor(ImGuiCol_ButtonActive, active);
+    gui::PushStyleColor(ImGuiCol_SliderGrab, accent);
+    gui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
+    gui::PushStyleVar(ImGuiStyleVar_FrameRounding, em * 0.28f);
+    gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+    gui::TableNextRow();
+    gui::TableSetColumnIndex(0);
+    gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, surface);
+    gui::AlignTextToFramePadding();
+    gui::TextUnformatted("Frame inputs");
+    gui::Separator();
+    gui::PushItemWidth(-1.f);
+    changed |= DrawMotionRow(view, settings, state);
+    gui::Spacing();
+    changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state, true);
+    gui::PopItemWidth();
+
+    if (paired) {
+      gui::TableSetColumnIndex(2);
+    } else {
+      gui::TableNextRow(ImGuiTableRowFlags_None, em * 0.5f);
+      gui::TableNextRow();
+      gui::TableSetColumnIndex(0);
+    }
+    gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, surface);
+    gui::AlignTextToFramePadding();
+    gui::TextUnformatted("NR processing");
+    gui::SameLine();
+    const float space = gui::GetContentRegionAvail().x - gui::CalcTextSize("Pass 1 defaults").x;
+    if (space > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + space);
+    gui::TextDisabled("Pass 1 defaults");
+    gui::Separator();
+    gui::PushItemWidth(-1.f);
+    changed |= DrawRow(*FindSetting("Preset"), view, settings, state, true);
+    gui::Spacing();
+    changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state, true);
+    changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state, true);
+    changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
+    gui::PopItemWidth();
+    gui::PopStyleVar(2);
+    gui::PopStyleColor(5);
+    gui::EndTable();
+  }
+  gui::PopStyleVar();
   return changed;
 }
 
@@ -927,12 +1015,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     changed = true;
   }
   changed |= DrawStagePicker(view, settings, state);
-  changed |= DrawMotionRow(view, settings, state);
-  changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state);
-  changed |= DrawRow(*FindSetting("Preset"), view, settings, state);
-  changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state);
-  changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state);
-  changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state);
+  changed |= DrawSetupGroups(view, settings, state);
 
   // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look.
   const bool look_changed = SectionChanged(*settings, SettingSection::LOOK);
