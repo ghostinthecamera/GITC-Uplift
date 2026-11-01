@@ -3,10 +3,46 @@
 #include <format>
 #include <span>
 #include <string_view>
+#include <type_traits>
 
 #include "ui/overlay_style.hpp"
 
 namespace uplift::ui::widgets {
+
+// ImGui checkboxes and buttons do not wrap their own labels. Wrap the display text but keep the original widget ID.
+inline std::string WrapLabel(std::string_view text, float width) {
+  const char* line = text.data();
+  const char* end = line + text.size();
+  std::string result;
+  while (line < end) {
+    const char* at = line;
+    const char* space = nullptr;
+    while (at < end && *at != '\n') {
+      const char* next = at + 1;
+      while (next < end && (static_cast<unsigned char>(*next) & 0xc0) == 0x80) ++next;
+      if (at > line && ImGui::CalcTextSize(line, next).x > width) break;
+      if (*at == ' ') space = at;
+      at = next;
+    }
+    if (at < end && *at != '\n' && *at != ' ' && space && space > line) at = space;
+    result.append(line, at);
+    line = at;
+    while (line < end && *line == ' ') ++line;
+    if (line < end) {
+      if (*line == '\n') ++line;
+      result += '\n';
+    }
+  }
+  return result;
+}
+
+inline bool Checkbox(const char* label, bool* value, bool has_reset) {
+  const float reserved = has_reset ? gui::ResetButtonWidth() + style::RowGap() : 0.f;
+  const float width = gui::GetContentRegionAvail().x - gui::GetFrameHeight() - gui::GetStyle().ItemInnerSpacing.x - reserved;
+  if (gui::CalcTextSize(label).x <= width) return gui::Checkbox(label, value);
+  const std::string wrapped = WrapLabel(gui::Display(label), width) + "###" + label;
+  return ImGui::Checkbox(wrapped.c_str(), value);
+}
 
 inline int SegmentedControl(const char* label, std::span<const char* const> options, std::span<const std::string_view> why,
                             std::span<const std::string_view> tips, int selected, std::span<const size_t> display_order = {}) {
@@ -38,7 +74,12 @@ inline int SegmentedControl(const char* label, std::span<const char* const> opti
       const float need = gui::CalcTextSize(options[index]).x + 2.f * style.FramePadding.x;
       width = inner >= labels_width ? need + (inner - labels_width) / count : inner * need / labels_width;
     }
-    if (gui::Button(options[index], ImVec2(width, 0.f))) {
+    const float text_width = width - 2.f * style.FramePadding.x;
+    const std::string shown = gui::Display(options[index]);
+    const bool wrap = !label && ImGui::CalcTextSize(shown.c_str()).x > text_width;
+    const bool pressed = wrap ? ImGui::Button((WrapLabel(shown, text_width) + "###" + options[index]).c_str(), {width, 0.f})
+                              : gui::Button(options[index], {width, 0.f});
+    if (pressed) {
       clicked = static_cast<int>(index);
     }
     if (!label && selected_option) {
@@ -73,20 +114,23 @@ inline int SegmentedControl(const char* label, std::span<const char* const> opti
 }
 
 // The native slider owns mouse, keyboard and Ctrl+click input. Keep the native text field visible during typed edits.
-inline bool RailSlider(const char* label, float& value, float low, float high, const char* format, ImGuiSliderFlags flags = 0) {
+template <typename T>
+bool RailSlider(const char* label, T& value, T low, T high, const char* format, ImGuiSliderFlags flags = 0) {
   const ImGuiID id = gui::GetID(gui::Label(label).c_str());
   auto* storage = gui::GetStateStorage();
   const int frame = gui::GetFrameCount();
   const bool typing = gui::GetIO().WantTextInput && storage->GetInt(id, -2) == frame - 1;
   if (!typing) gui::PushStyleVar(ImGuiStyleVar_Alpha, 0.f);
-  const bool edited = gui::SliderFloat(label, &value, low, high, format, flags);
+  bool edited;
+  if constexpr (std::is_same_v<T, int>) edited = gui::SliderInt(label, &value, low, high, format, flags);
+  else edited = gui::SliderFloat(label, &value, low, high, format, flags);
   if (gui::IsItemActive()) storage->SetInt(id, frame);
   if (!typing) {
     gui::PopStyleVar();
     const ImVec2 a = gui::GetItemRectMin(), b = gui::GetItemRectMax();
     const float radius = std::min(gui::GetFontSize() * 0.43f, (b.x - a.x) * 0.25f);
     const float y = (a.y + b.y) * 0.5f, start = a.x + radius, end = b.x - radius;
-    const float t = (value - low) / (high - low);
+    const float t = static_cast<float>(value - low) / static_cast<float>(high - low);
     const float x = start + (end - start) * std::clamp(t, 0.f, 1.f);
     auto* draw = gui::GetWindowDrawList();
     const ImU32 accent = gui::GetColorU32(ImGuiCol_SliderGrab);
@@ -143,6 +187,39 @@ inline bool SectionHeading(const char* title, const char* id, bool show_reset) {
   rule(start.x, before_title);
   rule(button_max.x + gap, start.x + width);
   return reset;
+}
+
+inline bool Disclosure(const char* title, const char* hint = nullptr, const char* reset_id = nullptr, bool* reset = nullptr) {
+  const auto base = gui::GetStyleColorVec4(ImGuiCol_WindowBg), text = gui::GetStyleColorVec4(ImGuiCol_Text);
+  gui::PushStyleColor(ImGuiCol_Header, ImVec4(base.x+(text.x-base.x)*0.065f, base.y+(text.y-base.y)*0.065f, base.z+(text.z-base.z)*0.065f, base.w));
+  gui::PushStyleVar(ImGuiStyleVar_FramePadding, {style::PanelInset(), style::RowGap()});
+  const bool open = gui::CollapsingHeader(title, ImGuiTreeNodeFlags_AllowOverlap);
+  const ImVec2 a = gui::GetItemRectMin(), b = gui::GetItemRectMax();
+  gui::PopStyleVar();
+  gui::PopStyleColor();
+  const ImVec2 next = gui::GetCursorScreenPos();
+  const std::string label = gui::Label(title);
+  const float text_end = a.x + gui::GetFontSize() + 3.f * style::PanelInset() + ImGui::CalcTextSize(label.c_str(), nullptr, true).x;
+  float free_from = text_end + style::RowGap();
+  if (reset && reset_id) {
+    const auto id = std::format("Reset##{}", reset_id);
+    const float width = gui::ResetButtonWidth(id.c_str());
+    if (free_from + width + style::PanelInset() <= b.x) {
+      gui::SetCursorScreenPos({free_from, a.y + ((b.y - a.y) - gui::GetFrameHeight()) * 0.5f});
+      *reset = gui::ResetButton(id.c_str());
+      gui::SetCursorScreenPos(next);
+      free_from += width + style::RowGap();
+    } else {
+      *reset = gui::ResetButton(id.c_str());
+    }
+  }
+  if (hint) {
+    const std::string shown = gui::Display(hint);
+    const ImVec2 size = ImGui::CalcTextSize(shown.c_str());
+    const float x = b.x - style::PanelInset() - size.x;
+    if (x >= free_from) gui::GetWindowDrawList()->AddText({x, (a.y+b.y-size.y)*0.5f}, gui::GetColorU32(ImGuiCol_TextDisabled), shown.c_str());
+  }
+  return open;
 }
 
 inline void SettingCaption(const char* label, const std::string& value, bool has_reset) {

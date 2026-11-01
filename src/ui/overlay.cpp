@@ -123,12 +123,28 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       changed = true;
     }
   }
-  if (grouped) {
+  if (descriptor.key == "DiffuseWhiteNits") {
+    bool automatic = (settings->diffuse_white_nits <= 0.f);
+    if (gui::Checkbox("Automatic diffuse white", &automatic)) {
+      settings->diffuse_white_nits = (automatic ? 0.f : std::clamp(view.effective_diffuse_white_nits, 48.f, 500.f));
+      changed = true;
+    }
+  }
+  const bool captioned = grouped && descriptor.kind != SettingKind::BOOL;
+  if (captioned) {
     const char* caption = descriptor.key == "ResolutionMode" ? "Working resolution" : descriptor.key == "ResolutionScale" ? "Custom scale" : label.c_str();
     std::string value;
     const bool inherited_skin = descriptor.key == "SkinStructure" && settings->skin_structure < 0.f;
     if (descriptor.key == "ResolutionScale") value = std::format("{:.0f}%", settings->resolution_scale);
-    else if (descriptor.kind == SettingKind::FLOAT) value = std::format("{:.2f}", inherited_skin ? settings->local_structure : descriptor.get(*settings));
+    else if (descriptor.key == "DiffuseWhiteNits") {
+      const float nits = settings->diffuse_white_nits <= 0.f ? view.effective_diffuse_white_nits : settings->diffuse_white_nits;
+      value = nits > 0.f ? std::format("{:.0f}", nits) : gui::Display("Unknown");
+    }
+    else if (descriptor.key == "AutoExposureBlend") value = std::format("{:.0f}%", settings->auto_exposure_blend * 100.f);
+    else if (inherited_skin) value = std::format("{:.2f}", settings->local_structure);
+    else if (descriptor.kind == SettingKind::FLOAT) value = FormatSettingValue(descriptor, *settings);
+    else if (descriptor.kind == SettingKind::UINT && descriptor.max <= 100.0)
+      value = state->pending_key == descriptor.key && state->pending_release ? std::to_string(*state->pending_release) : FormatSettingValue(descriptor, *settings);
     gui::BeginDisabled(inherited_skin);
     widgets::SettingCaption(caption, value, !IsDefault(*settings, descriptor));
     gui::EndDisabled();
@@ -161,14 +177,10 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   } else if (descriptor.key == "DiffuseWhiteNits") {
     // ui-review.md §3 rule 2 (the Skin pattern): an Automatic checkbox, the control greyed at the value
     // in use -- shown, not hidden, so the effective value always reads even while it is automatic.
-    bool automatic = (settings->diffuse_white_nits <= 0.f);
-    if (gui::Checkbox("Automatic diffuse white", &automatic)) {
-      settings->diffuse_white_nits = (automatic ? 0.f : std::clamp(view.effective_diffuse_white_nits, 48.f, 500.f));
-      changed = true;
-    }
+    const bool automatic = settings->diffuse_white_nits <= 0.f;
     gui::BeginDisabled(automatic);
     float nits = (automatic ? view.effective_diffuse_white_nits : settings->diffuse_white_nits);
-    if (gui::SliderFloat(label.c_str(), &nits, 48.f, 500.f, "%.0f") && !automatic) {
+    if (widgets::RailSlider(label.c_str(), nits, 48.f, 500.f, "%.0f") && !automatic) {
       settings->diffuse_white_nits = nits;
       changed = true;
     }
@@ -177,7 +189,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     switch (descriptor.kind) {
       case SettingKind::BOOL: {
         bool value = (descriptor.get(*settings) != 0.0);
-        if (gui::Checkbox(label.c_str(), &value)) {
+        if (widgets::Checkbox(label.c_str(), &value, !IsDefault(*settings, descriptor) && descriptor.section != SettingSection::TOP)) {
           if (value && !descriptor.enable_warning.empty()) {
             state->enable_warning_key = descriptor.key;
           } else {
@@ -192,9 +204,10 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         const bool on_release = ((descriptor.flags & setting_flags::APPLY_ON_RELEASE) != 0u);
         const bool held_here = (on_release && state->pending_release.has_value() && state->pending_key == descriptor.key);
         int value = (held_here ? *state->pending_release : applied);
-        const bool edited = (descriptor.max > 100.0 ? gui::InputInt(label.c_str(), &value, 64, 512)
-                                                    : gui::SliderInt(label.c_str(), &value, static_cast<int>(descriptor.min),
-                                                                       static_cast<int>(descriptor.max)));
+        const int low = static_cast<int>(descriptor.min), high = static_cast<int>(descriptor.max);
+        const bool edited = descriptor.max > 100.0 ? gui::InputInt(label.c_str(), &value, 64, 512)
+            : grouped ? widgets::RailSlider(label.c_str(), value, low, high, "%d")
+                      : gui::SliderInt(label.c_str(), &value, low, high);
         if (!on_release) {
           if (edited) {
             descriptor.set(*settings, std::clamp(static_cast<double>(value), descriptor.min, descriptor.max));
@@ -392,7 +405,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     gui::TextDisabled("%s", view.vulkan_nr_note.c_str());
   }
   if (grouped && descriptor.key == "ResolutionScale") widgets::PercentTicks(descriptor.min, descriptor.max);
-  if (!grouped) changed |= DrawReset(descriptor, *settings, *state, false, view.setup);
+  if (!captioned) changed |= DrawReset(descriptor, *settings, *state, grouped, view.setup);
   gui::EndDisabled();
   gui::PopID();
   return changed && !read_only;
@@ -431,7 +444,7 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
 // Split chain (Task 3, design 6.2): pass n's Runs at row, as the NR stage row but a combo (four long choices): a choice that cannot run is greyed with why,
 // the preview is where the pass runs, and the stored pick is named while it runs elsewhere. Where every pass runs at one stage the whole row is greyed.
 // Not folded into DrawRow: its choices' states come from Setup's pass rows, not from the schema.
-bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings) {
+bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state) {
   const size_t later = descriptor.pass - 2u;
   const PassStageRow& row = view.setup.pass_stages[later];
   const std::string label(descriptor.label);
@@ -441,7 +454,11 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
   const auto shown = static_cast<size_t>(row.shown);
   const std::array names{descriptor.choices[0].data(), NR_STAGE_NAMES[0], NR_STAGE_NAMES[1], view.SharedPresentName(*settings)};
   bool changed = false;
-  if (gui::BeginCombo(label.c_str(), names[shown])) {  // literals and static strings: NUL-terminated
+  gui::AlignTextToFramePadding();
+  gui::TextUnformatted(label.c_str());
+  changed |= DrawReset(descriptor, *settings, *state, true, view.setup);
+  widgets::NextGap(style::LabelGap());
+  if (gui::BeginCombo("##stage", names[shown])) {  // literals and static strings: NUL-terminated
     for (size_t index = 0u; index < row.options.size(); ++index) {
       const PassStageOption& option = row.options[index];
       gui::BeginDisabled(!option.why.empty());
@@ -464,17 +481,6 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
       tooltip += "\n" + SavedNote(names[stored]);
     }
     gui::SetTooltip("%s", tooltip.c_str());
-  }
-  if (!IsDefault(*settings, descriptor)) {
-    gui::SameLine();
-    const bool reset_clicked = gui::ResetButton();
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      gui::SetTooltip("Reset to default (%s)", descriptor.choices[0].data());
-    }
-    if (reset_clicked) {
-      ResetSetting(settings, descriptor);
-      changed = true;
-    }
   }
   gui::EndDisabled();
   gui::PopID();
@@ -599,10 +605,10 @@ bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* s
     row("LocalTone");
   }, [&] {
     widgets::GroupHeading("Characters");
-    row("AutoMask", false);
+    row("AutoMask");
     row("SkinStructure");
     gui::Separator();
-    row("KeepFaces", false);
+    row("KeepFaces");
     row("FaceProtection");
     row("LightingScale");
   });
@@ -691,28 +697,39 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
 
 namespace {
 void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState& state) {
-  if (!view.details_backend.empty()) gui::TextUnformatted(view.details_backend.c_str());
-  if (!view.output_size.Empty()) {
-    const char* space = "";
-    switch (view.output_space) {
-      case color::ColorSpace::SRGB_NONLINEAR: space = "sRGB"; break;
-      case color::ColorSpace::EXTENDED_SRGB_LINEAR: space = "scRGB"; break;
-      case color::ColorSpace::HDR10_ST2084: space = "HDR10"; break;
-      case color::ColorSpace::HDR10_HLG: space = "HLG"; break;
-      default: break;
+  const auto fact = [](const char* key, const std::string& value) {
+    gui::TableNextRow();
+    gui::TableSetColumnIndex(0); gui::TextDisabled("%s", gui::Display(key).c_str());
+    gui::TableSetColumnIndex(1); ImGui::TextWrapped("%s", value.c_str());
+  };
+  if (gui::BeginTable("##runtime_facts", 2, ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_SizingStretchProp)) {
+    gui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthFixed, std::max(gui::CalcTextSize("Display output").x, gui::CalcTextSize("Frame generation").x));
+    gui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
+    if (!view.details_backend.empty()) fact("Backend", gui::Display(view.details_backend));
+    if (!view.output_size.Empty()) {
+      const char* space = "";
+      switch (view.output_space) {
+        case color::ColorSpace::SRGB_NONLINEAR: space = "sRGB"; break;
+        case color::ColorSpace::EXTENDED_SRGB_LINEAR: space = "scRGB"; break;
+        case color::ColorSpace::HDR10_ST2084: space = "HDR10"; break;
+        case color::ColorSpace::HDR10_HLG: space = "HLG"; break;
+        default: break;
+      }
+      fact("Display output", std::format("{} × {}  {}", view.output_size.width, view.output_size.height, space));
     }
-    ImGui::Text("%s  %u x %u  %s", gui::Display("Display output").c_str(), view.output_size.width, view.output_size.height, space);
+    if (view.frame_generation_active || !view.frame_generation_line.empty())
+      fact("Frame generation", gui::Display(view.frame_generation_active ? "On" : "Off"));
+    gui::EndTable();
   }
-  if (view.frame_generation_active) gui::TextUnformatted("Frame generation active");
-  else if (!view.frame_generation_line.empty()) gui::TextUnformatted("Frame generation: off");
 
-  const bool compact = gui::GetContentRegionAvail().x < gui::GetFontSize() * 38.f;
-  if (gui::BeginTable("##executed_passes", compact ? 3 : 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+  const bool compact = gui::GetContentRegionAvail().x < style::Units(112);
+  if (gui::BeginTable("##executed_passes", compact ? 2 : 5, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) {
     const auto column = [](const char* label, float weight) { gui::TableSetupColumn(gui::Display(label).c_str(), ImGuiTableColumnFlags_WidthStretch, weight); };
-    column("Pass", 0.50f);
-    column("Ran at", 1.15f);
-    column(compact ? "NR evaluation" : "Network / style", 1.3f);
-    if (!compact) { column("NR size", 1.f); column("Motion used", 1.25f); }
+    column("Pass", 0.5f);
+    if (compact) column("NR evaluation", 3.f);
+    else {
+      column("Ran at", 1.15f); column("Network / style", 1.3f); column("NR size", 1.f); column("Motion used", 1.25f);
+    }
     gui::TableHeadersRow();
     bool any = false;
     for (size_t i = 0; i < view.stage_runs.size(); ++i) {
@@ -737,12 +754,16 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
         }
         gui::TableNextRow();
         gui::TableNextColumn(); gui::Text("P%u", pass + 1u);
-        gui::TableNextColumn(); gui::TextWrapped("%s", NR_STAGE_NAMES[i]);
-        gui::TableNextColumn(); ImGui::TextWrapped("%s", name.c_str());
-        if (!compact) gui::TableNextColumn();
-        if (group.resolution.Empty()) gui::TextDisabled("Unknown"); else gui::Text("%u x %u", group.resolution.width, group.resolution.height);
-        if (!compact) gui::TableNextColumn();
-        gui::TextWrapped("%s", motion);
+        const auto record = [compact](const char* label, const std::string& value) {
+          if (!compact) gui::TableNextColumn();
+          if (compact) ImGui::TextWrapped("%s  %s", gui::Display(label).c_str(), value.c_str());
+          else ImGui::TextWrapped("%s", value.c_str());
+        };
+        if (compact) gui::TableNextColumn();
+        record("Ran at", gui::Display(NR_STAGE_NAMES[i]));
+        record("Network / style", name);
+        record("NR size", group.resolution.Empty() ? gui::Display("Unknown") : std::format("{} × {}", group.resolution.width, group.resolution.height));
+        record("Motion used", gui::Display(motion));
         any = true;
       }
     }
@@ -962,28 +983,9 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   }, true, style::Units(27));
   gui::PopStyleVar();
 
-  // Every row of one section. All its call sites are here in DrawOverlay, so it stays a local
-  // lambda rather than a file-scope helper.
-  const auto draw_rows = [&view, settings, state](SettingSection section) {
-    bool section_changed = false;
-    for (const SettingDescriptor& descriptor : SettingsSchema()) {
-      if (descriptor.section == section && descriptor.kind != SettingKind::KEY) {
-        section_changed |= DrawRow(descriptor, view, settings, state);
-      }
-    }
-    return section_changed;
+  const auto rows = [&](std::initializer_list<std::string_view> keys) {
+    for (const auto key : keys) changed |= DrawRow(*FindSetting(key), view, settings, state, true);
   };
-  // A section title's Reset button (L1, P1, F1), shown only once the section has changed. All its
-  // call sites are here in DrawOverlay too, so it is also a local lambda. Plan 17: on a CollapsingHeader's
-  // line the header must carry HEADER_FLAGS, or it keeps the hover and the click (Reset opened or closed the section).
-  const auto section_reset = [state](const char* id, bool section_has_changed) {
-    // Plan 6 (D6): with Compare = Built-in, every row already reads read-only at its built-in value; a hidden
-    // section reset must not rewrite Mine's own settings while they are not even shown.
-    if (!section_has_changed || state->defaults_view) return false;
-    gui::SameLine();
-    return gui::ResetButton(std::format("Reset##{}", id).c_str());
-  };
-
   // ui-review.md §2 finding 1 / §3: the NR stage and Motion vectors toggles, in pipeline order, at the top
   // of the panel -- the decisions that shape everything else, instead of about the 45th line. Plan 14: Setup.
   widgets::NextGap(style::SectionGap());
@@ -1022,87 +1024,127 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   for (uint32_t pass = 2u; pass <= settings->pass_count; ++pass) {
     const bool follows = settings->passes[pass - 2u].follow_pass1;
     const PassStageRow& stage_row = view.setup.pass_stages[pass - 2u];
-    std::string suffix;
-    if (view.setup.chain_split) {
-      const char* stage = view.RecordedStageName(pass - 1u);
-      if (!stage) stage = stage_row.runs == SourcePick::PRESENT ? view.SharedPresentName(*settings) : StageLabel(stage_row.runs);
-      suffix = " - " + gui::Display(stage);
-    }
-    const std::string tree_label =
-        std::format("{}{}{}###pass{}", gui::Display(std::format("Pass {}", pass)), gui::Display(follows ? " (same look as pass 1)" : ""), suffix, pass);
-    if (gui::TreeNode(tree_label.c_str())) {
-      const auto is_stage_row = [](const SettingDescriptor& descriptor) { return (descriptor.flags & setting_flags::PASS_STAGE) != 0u; };
-      for (const SettingDescriptor& descriptor : SettingsSchema()) {
-        if (descriptor.pass == pass && is_stage_row(descriptor)) {
-          changed |= DrawPassStageRow(descriptor, view, settings);
-        }
-      }
-      changed |= DrawRow(*FindSetting(std::format("Pass{}Preset", pass)), view, settings, state);
-      if (stage_row.starts_group && stage_row.runs != SourcePick::BEFORE_UPSCALING) {  // Before upscaling is always pass 1's stage
-        const bool after_dlss = (stage_row.runs == SourcePick::AFTER_DLSS);
-        for (const std::string_view key : {(after_dlss ? "ResolutionAfterDlss" : "ResolutionPresent"), (after_dlss ? "ResolutionScaleAfterDlss" : "ResolutionScalePresent"),
-                                           (after_dlss ? "KeepFacesAfterDlss" : "KeepFacesPresent")}) {
-          changed |= DrawRow(*FindSetting(key), view, settings, state);
-        }
-      }
-      for (const SettingDescriptor& descriptor : SettingsSchema()) {
-        if (descriptor.pass == pass && !is_stage_row(descriptor) && (descriptor.flags & setting_flags::NETWORK_PRESET) == 0u) {
-          changed |= DrawRow(descriptor, view, settings, state);
-        }
-      }
-      gui::TreePop();
+    const char* stage = view.RecordedStageName(pass - 1u);
+    if (!stage) stage = stage_row.runs == SourcePick::PRESENT ? view.SharedPresentName(*settings) : StageLabel(stage_row.runs);
+    const std::string summary = gui::Display(stage) + " · " + gui::Display(follows ? "Same look as pass 1" : "Own look");
+    const std::string label = std::format("{}###pass{}", gui::Display(std::format("Pass {}", pass)), pass);
+    if (widgets::Disclosure(label.c_str(), summary.c_str())) {
+      gui::PushID(static_cast<int>(pass));
+      widgets::Inset("##pass_body", {style::PanelInset(), style::PanelInset()}, [&] {
+        widgets::PairedGroups("##pass_groups", [&] {
+          widgets::GroupHeading("Placement and network");
+          changed |= DrawPassStageRow(*FindSetting(std::format("Pass{}Stage", pass)), view, settings, state);
+          changed |= DrawRow(*FindSetting(std::format("Pass{}Preset", pass)), view, settings, state, true);
+          if (stage_row.starts_group && stage_row.runs != SourcePick::BEFORE_UPSCALING) {
+            if (stage_row.runs == SourcePick::AFTER_DLSS) rows({"ResolutionAfterDlss", "ResolutionScaleAfterDlss", "KeepFacesAfterDlss"});
+            else rows({"ResolutionPresent", "ResolutionScalePresent", "KeepFacesPresent"});
+          }
+        }, [&] {
+          widgets::GroupHeading("Pass look");
+          for (const SettingDescriptor& descriptor : SettingsSchema()) {
+            if (descriptor.pass == pass && (descriptor.flags & (setting_flags::PASS_STAGE | setting_flags::NETWORK_PRESET)) == 0u)
+              changed |= DrawRow(descriptor, view, settings, state, true);
+          }
+        });
+      }, true);
+      gui::PopID();
     }
   }
 
-  // ui-review.md §2 finding 4: Result and Limits merge under one header, opened at start only for a
-  // user who already shapes (SetNextItemOpen(look.enabled, ImGuiCond_Once) keeps the "stay usable" intent).
-  // Plan 17: the headers below let their title's Reset button (drawn on the same line) take the hover and the click.
-  constexpr ImGuiTreeNodeFlags HEADER_FLAGS = ImGuiTreeNodeFlags_AllowOverlap;
+  widgets::NextGap(style::SectionGap());
+  bool reset = false;
   const bool shaping_changed = SectionChanged(*settings, SettingSection::RESULT) || SectionChanged(*settings, SettingSection::LIMITS);
   gui::SetNextItemOpen(settings->look.enabled, ImGuiCond_Once);
-  if (gui::CollapsingHeader(shaping_changed ? "Result shaping (changed)###shaping" : "Result shaping###shaping", HEADER_FLAGS)) {
-    if (section_reset("shaping", shaping_changed)) {
-      ResetSection(settings, SettingSection::RESULT);
-      ResetSection(settings, SettingSection::LIMITS);
-      changed = true;
-    }
-    changed |= draw_rows(SettingSection::RESULT);
-    if (settings->look.enabled) {
-      gui::SeparatorText("Limits and stability");
-    }
-    changed |= draw_rows(SettingSection::LIMITS);
+  const bool shaping = widgets::Disclosure(shaping_changed ? "Result shaping (changed)###shaping" : "Result shaping###shaping",
+                                           settings->look.enabled ? "On" : "Off", "shaping", shaping_changed && !state->defaults_view ? &reset : nullptr);
+  if (reset) {
+    ResetSection(settings, SettingSection::RESULT);
+    ResetSection(settings, SettingSection::LIMITS);
+    changed = true;
   }
+  if (shaping) widgets::Panel("##shaping_body", [&] {
+    rows({"ShapeResult"});
+    if (state->defaults_view ? DefaultSettings().look.enabled : settings->look.enabled) {
+      widgets::NextGap(style::BlockGap());
+      widgets::PairedGroups("##result_groups", [&] {
+        widgets::GroupHeading("Strength and colour");
+        rows({"EditStrength", "Brighten", "Darken", "ResultColor", "HueShift"});
+      }, [&] {
+        widgets::GroupHeading("Tonal range");
+        rows({"Shadows", "Midtones", "Highlights"});
+      });
+      widgets::NextGap(style::BlockGap());
+      widgets::PairedGroups("##limit_groups", [&] {
+        widgets::GroupHeading("Limits");
+        rows({"MaxBrighten", "MaxDarken", "MaxColorChange"});
+      }, [&] {
+        widgets::GroupHeading("Detail and stability");
+        rows({"LargeScaleTone", "FineDetail", "DetailRadius", "HaloSuppression", "Stabilize", "StabilizeMs", "StabilizeDetail"});
+      });
+    }
+  });
 
-  // ui-review.md §2 finding 5: Mask and UI correction, which handle the HUD, get their own section.
+  reset = false;
   const bool mask_changed = SectionChanged(*settings, SettingSection::MASK);
-  if (gui::CollapsingHeader(mask_changed ? "Mask and HUD (changed)###mask" : "Mask and HUD###mask", HEADER_FLAGS)) {
-    if (section_reset("mask", mask_changed)) {
-      ResetSection(settings, SettingSection::MASK);
-      changed = true;
-    }
-    changed |= draw_rows(SettingSection::MASK);
-  }
+  const bool mask = widgets::Disclosure(mask_changed ? "Mask and HUD (changed)###mask" : "Mask and HUD###mask",
+                                        nullptr, "mask", mask_changed && !state->defaults_view ? &reset : nullptr);
+  if (reset) { ResetSection(settings, SettingSection::MASK); changed = true; }
+  if (mask) widgets::Panel("##mask_body", [&] {
+    widgets::PairedGroups("##mask_groups", [&] { widgets::GroupHeading("Mask"); rows({"Mask"}); },
+                                         [&] { widgets::GroupHeading("HUD"); rows({"UICorrection"}); });
+  });
 
-  const bool fixes_changed = SectionChanged(*settings, SettingSection::FIXES_COLOR)
-                             || SectionChanged(*settings, SettingSection::FIXES_GUIDES);
-  if (gui::CollapsingHeader(fixes_changed ? "Fixes (changed)###fixes" : "Fixes###fixes", HEADER_FLAGS)) {
-    if (section_reset("fixes", fixes_changed)) {  // Plan 17: on the title's line, as Result shaping's and Mask and HUD's
-      ResetSection(settings, SettingSection::FIXES_COLOR);
-      ResetSection(settings, SettingSection::FIXES_GUIDES);
-      changed = true;
-    }
+  reset = false;
+  const bool fixes_changed = SectionChanged(*settings, SettingSection::FIXES_COLOR) || SectionChanged(*settings, SettingSection::FIXES_GUIDES);
+  const bool fixes = widgets::Disclosure(fixes_changed ? "Fixes (changed)###fixes" : "Fixes###fixes", "Colour · Exposure · Motion",
+                                         "fixes", fixes_changed && !state->defaults_view ? &reset : nullptr);
+  if (reset) {
+    ResetSection(settings, SettingSection::FIXES_COLOR);
+    ResetSection(settings, SettingSection::FIXES_GUIDES);
+    changed = true;
+  }
+  if (fixes) widgets::Panel("##fixes_body", [&] {
     gui::TextDisabled("Only change these if you know what you are doing.");
-    gui::SeparatorText("Colour");
-    changed |= draw_rows(SettingSection::FIXES_COLOR);
-    gui::SeparatorText("Motion and game state");
-    changed |= draw_rows(SettingSection::FIXES_GUIDES);
-  }
+    widgets::PairedGroups("##colour_groups", [&] {
+      widgets::GroupHeading("Colour");
+      rows({"Encoding", "DiffuseWhiteNits", "TransferStrength", "ColorStrength"});
+    }, [&] {
+      widgets::GroupHeading("Exposure");
+      rows({"InputExposure", "AutoExposureMode", "AutoExposureBlend", "ExposureAdapt", "AdaptBrighterStops", "AdaptDarkerStops"});
+    });
+    widgets::NextGap(style::BlockGap());
+    widgets::PairedGroups("##guide_groups", [&] {
+      widgets::GroupHeading("Colour conversion");
+      rows({"LinearUnitNits", "SourcePrimaries", "NeuralTransfer", "ChromaClamp", "NearBlackGuard"});
+    }, [&] {
+      widgets::GroupHeading("Motion and game state");
+      rows({"MotionScaleX", "MotionScaleY", "ChainedHistory", "StateRestore"});
+    });
+  });
 
-  if (gui::CollapsingHeader("Advanced")) {
-    changed |= draw_rows(SettingSection::ADVANCED);
-  }
-
-  if (gui::CollapsingHeader("Details")) DrawDetails(view, *settings, *state);
+  if (widgets::Disclosure("Advanced", "Routing · Runtime · Diagnostics")) widgets::Panel("##advanced_body", [&] {
+    widgets::PairedGroups("##advanced_groups", [&] {
+      widgets::GroupHeading("Routing");
+      rows({"PresentWithFrameGen", "BeforeFGMotion", "VulkanNr", "AllowCrossQueuePasses", "UseD3D9Ex"});
+    }, [&] {
+      widgets::GroupHeading("Memory and recovery");
+      rows({"VramCheck", "BudgetMarginMB", "GraceSeconds", "AutoResume", "AutoRetry"});
+    });
+    widgets::NextGap(style::BlockGap());
+    widgets::Panel("##runtime_group", [&] {
+      widgets::GroupHeading("Runtime and logging");
+      rows({"SnippetPath", "NgxHooks", "ForeignNr", "LogLevel", "ShowNvIndicator"});
+    });
+    if (settings->keep_faces) {
+      widgets::NextGap(style::BlockGap());
+      if (widgets::Disclosure("Face mask tuning", "Keep faces")) widgets::Panel("##face_controls", [&] {
+        rows({"ShowFaceMask", "FaceMaskThreshold", "FaceMaskFull", "FaceMaskStrength", "FaceMaskSoftness", "FaceEdgeFalloff",
+              "FaceLightingDensity", "FaceSpeckSize", "FaceFillSkin", "FaceFillRadius", "FaceFillTolerance"});
+      });
+    }
+  });
+  if (widgets::Disclosure("Details", "Recorded passes")) widgets::Panel("##details_body", [&] { DrawDetails(view, *settings, *state); });
+  widgets::NextGap(style::SectionGap());
 
   // G2: Restore all defaults, confirmed once before it takes effect.
   gui::Separator();
