@@ -257,17 +257,7 @@ void Helper::ApplySettings(uint64_t generation) {
 }
 
 void Helper::ReplayPoint(uint32_t point) {
-  switch (static_cast<addon::TriggerPoint>(point)) {
-    case addon::TriggerPoint::MARKER:
-      context_->OnTechnique(true);
-      break;
-    case addon::TriggerPoint::AFTER_EFFECTS:
-      context_->OnFinishEffects();
-      break;
-    case addon::TriggerPoint::NONE:
-    case addon::TriggerPoint::PRESENT:
-      break;
-  }
+  if (static_cast<addon::TriggerPoint>(point) == addon::TriggerPoint::MARKER) context_->OnTechnique(true);
 }
 
 void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {

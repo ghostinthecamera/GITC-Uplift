@@ -362,13 +362,13 @@ void OnRenderTechnique(api::effect_runtime* runtime, api::effect_technique techn
   UPLIFT_CATCH("render_technique", )
 }
 
-void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, api::resource_view rtv,
+void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, api::resource_view /*rtv*/,
                      api::resource_view /*rtv_srgb*/) {
   try {
     const std::unique_lock lock(g_state->mutex);
     DeviceEntry32* const entry = FindFrameEntry(g_state, runtime, cmd_list);
     if (entry == nullptr) return;
-    g_state->front->FinishEffects(entry->helper, runtime, rtv.handle, g_state->settings);
+    g_state->front->FinishEffects(entry->helper, runtime, g_state->settings);
   }
   UPLIFT_CATCH("finish_effects", )
 }
@@ -377,6 +377,8 @@ void OnReshadePresent(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState32& state = *g_state;
+    const auto found = state.devices.find(runtime->get_device());
+    if (found != state.devices.end() && found->second.runtime == runtime) found->second.helper.trigger.EndFrame();
     ui::ExpireKeyCapture(&state.overlay, std::chrono::steady_clock::now());
     if (state.overlay.key_captured_this_frame) {
       // The press that bound the hotkey is still in this frame's input: do not let it toggle Enable.
@@ -385,7 +387,6 @@ void OnReshadePresent(api::effect_runtime* runtime) {
     }
     const uint32_t key = state.settings.enable_key;
     if (key == 0u || state.overlay.capturing_key || !runtime->is_key_pressed(key)) return;
-    const auto found = state.devices.find(runtime->get_device());
     if (found == state.devices.end()) return;
     [[maybe_unused]] const auto& [device, entry] = *found;
     if (entry.runtime != runtime) return;  // toggle once per frame: the primary swap chain's runtime only

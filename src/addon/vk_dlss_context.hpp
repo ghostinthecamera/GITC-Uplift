@@ -94,7 +94,7 @@ struct VkLaunchpadMotion {
 // After DLSS and Before upscaling picks on a Vulkan device), on Present until the game's DLSS is seen.
 //
 // Plan 19: Present runs here too when the add-on chooses the native route (FrameConfig::vk_native_present): the swap-chain image, at the trigger point
-// FrameTrigger picks (the present event, ReShade's begin-effects event, the Uplift technique or finish-effects), in a command buffer of Uplift's own
+// FrameTrigger picks (the present event, ReShade's begin-effects event, or the Uplift technique), in a command buffer of Uplift's own
 // (vk::CommandRing) submitted to the effect queue, never in ReShade's immediate command list.
 class VkDlssContext {
  public:
@@ -120,7 +120,7 @@ class VkDlssContext {
   // Plan 19: the effect events' trigger points for native NR at Present (FrameTrigger's, as DeviceContext's).
   TriggerPoint OnBeginEffects(bool usable) { return trigger_.OnBeginEffects(usable); }
   TriggerPoint OnTechnique(bool is_marker) { return trigger_.OnTechnique(is_marker); }
-  TriggerPoint OnFinishEffects() { return trigger_.OnFinishEffects(); }
+  void EndFrame() { trigger_.EndFrame(); }
   // Plan 19: BeginFrame readied a native Present recording that RunPresent has not made yet.
   [[nodiscard]] bool FrameReady() const { return frame_ready_; }
   // Plan 19: native NR at Present at `point`, once per frame: the second-queue CPU wait (2 s; a timeout skips the frame), a free slot of Uplift's own

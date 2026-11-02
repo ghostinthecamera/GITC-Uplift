@@ -72,7 +72,7 @@ class Helper {
   void Frame(const ipc::Request& request, ipc::Reply* reply);
   void Run(const ipc::Request& request, ipc::Reply* reply, bool* deferred);
   // The FrameTrigger's two events the add-on reached, applied to this side's copy so the two never diverge (design §2.1):
-  // MARKER -> OnTechnique(true), AFTER_EFFECTS -> OnFinishEffects(); PRESENT and NONE change nothing.
+  // Replay a marker observed by the front, including recovery frames that already ran NR before effects.
   void ReplayPoint(uint32_t point);
   void ApplySettings(uint64_t generation);
   void FillStatus(ipc::Status* status) const;

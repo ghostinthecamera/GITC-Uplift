@@ -521,14 +521,18 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
     entry.nr_returned_logged = false;
     entry.ReleaseAll(hosts.Pointers());
   }
-  // The first event of the frame; at PRESENT NR runs now, otherwise at the marker or after the effects. Direct3D 9 keeps NR before effects in the present
+  // The first event of the frame; at PRESENT NR runs now, otherwise it waits for the marker. Direct3D 9 keeps NR before effects in the present
   // event (the helper replays this point; 1.1.6's begin-effects wait is not passed to it).
   RunClient(entry, device, frame.queue, entry.trigger.OnPresent(frame.marker.handle != 0u, /*effects_on=*/false), frame.back_buffer.handle, 0u, /*at_present=*/true,
             frame.outer_vulkan_host, frame.outer_vulkan_host ? &frame.outer_vulkan_image : nullptr);
 }
 
 void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, bool is_marker, uint64_t rtv, const ui::Settings& settings) {
+  const bool was_missing = device.trigger.MarkerMissed();
   const TriggerPoint point = device.trigger.OnTechnique(is_marker);
+  if (was_missing && !device.trigger.MarkerMissed()) {
+    device.unreported_point = TriggerPoint::MARKER;  // recovery was observed without a RUN; replay it before the next FRAME
+  }
   if (point == TriggerPoint::NONE) return;
   // Plan 6 (v2 design §3.20), Plan 7 (decision 3): at the Uplift technique, the UPLIFT_MV its pass just wrote while LaunchPad
   // runs, and only when MotionVectors can use it (a 32 MiB copy at 4K otherwise); FENCED only (design §2.8). Plan 10 (design §4.3): Direct3D 9
@@ -559,9 +563,7 @@ void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, 
   RunClient(device, runtime->get_device(), runtime->get_command_queue(), point, EventImage(device, runtime, rtv), launchpad.handle, /*at_present=*/false);
 }
 
-void HelperFront::FinishEffects(HelperDevice& device, api::effect_runtime* runtime, uint64_t rtv, const ui::Settings& settings) {
-  RunClient(device, runtime->get_device(), runtime->get_command_queue(), device.trigger.OnFinishEffects(), EventImage(device, runtime, rtv), 0u,
-            /*at_present=*/false);
+void HelperFront::FinishEffects(HelperDevice& device, api::effect_runtime* runtime, const ui::Settings& settings) {
   // Plan 5 (key decision 8): this frame's UPLIFT_MASK, copied now that the effects have run, into the shared mask the next
   // RUN hands to NR. Direct3D 9, and 10 and 11 with fences (the note is set in the present event otherwise).
   if (!device.SharesImages() || settings.mask != ui::MaskMode::AUTO) return;

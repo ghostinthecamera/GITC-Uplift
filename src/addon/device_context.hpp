@@ -261,7 +261,7 @@ class DeviceContext {
                           bool marker_expected, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
   TriggerPoint OnBeginEffects(bool usable) { return trigger_.OnBeginEffects(usable); }  // 1.1.6
   TriggerPoint OnTechnique(bool is_marker) { return trigger_.OnTechnique(is_marker); }
-  TriggerPoint OnFinishEffects() { return trigger_.OnFinishEffects(); }
+  void EndFrame() { trigger_.EndFrame(); }
   // Records Present-path NR for this frame. `entry_state`: the back buffer's state in the calling event.
   // `motion`: this frame's UPLIFT_MV, only from the Uplift technique's event; or, with `motion_is_dlss` (Plan 14: the Vulkan bridge's copy of DLSS's vectors,
   // made in the game's frame), those vectors, bound as DLSS's own copy for this present (no Launchpad then).

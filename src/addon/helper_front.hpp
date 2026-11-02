@@ -226,9 +226,8 @@ class HelperFront {
   // reshade_render_technique on the frame's own immediate list: NR at the Uplift technique, with LaunchPad's motion (Direct3D 9, and 10 and 11
   // with fences). `rtv` is the event's render target (bit 0 marks sRGB).
   void Technique(HelperDevice& device, reshade::api::effect_runtime* runtime, bool is_marker, uint64_t rtv, const ui::Settings& settings);
-  // reshade_finish_effects on the frame's own immediate list: NR when the technique never came, then UPLIFT_MASK (Direct3D 9, and 10 and 11 with
-  // fences).
-  void FinishEffects(HelperDevice& device, reshade::api::effect_runtime* runtime, uint64_t rtv, const ui::Settings& settings);
+  // Copy UPLIFT_MASK at finish-effects on the frame's own immediate list.
+  void FinishEffects(HelperDevice& device, reshade::api::effect_runtime* runtime, const ui::Settings& settings);
   // A D3D9 device's destroy_command_queue, raised before every Reset and ResetEx (helper design §2.7): everything the client made on
   // the device goes (a live D3DPOOL_DEFAULT object fails the game's Reset) and the helper is detached; its Session stays.
   void DestroyQueue(HelperDevice& device, reshade::api::device* owner);
@@ -258,9 +257,8 @@ class HelperFront {
   void Quit();
 
  private:
-  // NR at `point` for this frame: out through the device's client, RUN, back. `source`: a Direct3D 9 surface (the back buffer at PRESENT; the
-  // event's render target at the marker and after the effects) or an OpenGL image (FB0 at PRESENT; ReShade's intermediate, the event's rtv resource, at the
-  // marker and after the effects); `launchpad_motion`: this frame's UPLIFT_MV (a ReShade resource handle: an IDirect3DTexture9 on Direct3D 9). When no RUN
+  // NR at `point` for this frame: out through the device's client, RUN, back. `source` is the D3D9 back buffer or OpenGL FB0 at PRESENT,
+  // or ReShade's render target at the marker; `launchpad_motion`: this frame's UPLIFT_MV (a ReShade resource handle: an IDirect3DTexture9 on Direct3D 9). When no RUN
   // goes out the helper never sees a marker point, so the next FRAME reports it. Vulkan, OpenGL and Direct3D 12: `game_device` and `queue` (the effect
   // runtime's) make the client's host; `at_present`: the calling event is the present event (the back buffer is in the present state, and on OpenGL the
   // present queue's context is checked).

@@ -3220,7 +3220,7 @@ void OnRenderTechnique(api::effect_runtime* runtime, api::effect_technique techn
   UPLIFT_CATCH("render_technique", )
 }
 
-void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, api::resource_view rtv,
+void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, api::resource_view /*rtv*/,
                      api::resource_view /*rtv_srgb*/) {
   try {
     const std::unique_lock lock(g_state->mutex);
@@ -3238,17 +3238,8 @@ void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, 
     if (entry == nullptr && native == nullptr) return;
     if (entry != nullptr && entry->helper.HasClient() && native == nullptr) {
       // Plan 10: a Direct3D 9 device. T5: a Vulkan device on the helper route, unless its native context runs NR at a DLSS placement (the helper yields).
-      g_state->front->FinishEffects(entry->helper, runtime, rtv.handle, g_state->settings);
+      g_state->front->FinishEffects(entry->helper, runtime, g_state->settings);
       return;
-    }
-    if (entry != nullptr && NativePresent(*entry)) {
-      RunNative(*entry, runtime->get_device(), entry->vk_dlss->OnFinishEffects(), vk::Usage::RENDER_TARGET);  // Plan 19; the native mask copy follows
-    } else if (entry != nullptr && entry->context && Bridged(*entry)) {  // T5: a helper-route entry here has no context (its native one runs NR)
-      RunBridged(*entry, runtime->get_device(), entry->context->OnFinishEffects(), 0u, vk::Usage::RENDER_TARGET,
-                 (entry->opengl ? runtime->get_device()->get_resource_from_view(rtv) : api::resource{0u}));
-    } else if (entry != nullptr && entry->context) {
-      ReshadeFrameHost host(entry->queue, entry->back_buffer);
-      RunOrWarnOnce(g_state, *entry, &host, D3D12_RESOURCE_STATE_RENDER_TARGET, entry->context->OnFinishEffects());
     }
     if (const auto found = g_state->devices.find(runtime->get_device()); found != g_state->devices.end() && found->second.outer_owns_frame) return;
     // Plan 5 (key decision 8): this frame's UPLIFT_MASK, copied now that the effects have run, on this same list,
@@ -3361,6 +3352,13 @@ void OnReshadePresent(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState& state = *g_state;
+    const auto found = state.devices.find(runtime->get_device());
+    if (found != state.devices.end() && found->second.runtime == runtime && !found->second.outer_owns_frame) {
+      DeviceEntry& entry = found->second;
+      if (entry.helper.HasClient()) entry.helper.trigger.EndFrame();
+      else if (NativePresent(entry)) entry.vk_dlss->EndFrame();
+      else if (entry.context) entry.context->EndFrame();
+    }
     ui::ExpireKeyCapture(&state.overlay, std::chrono::steady_clock::now());
     if (state.overlay.key_captured_this_frame) {
       // The press that bound the hotkey is still in this frame's input: do not let it toggle Enable.
@@ -3369,7 +3367,6 @@ void OnReshadePresent(api::effect_runtime* runtime) {
     }
     const uint32_t key = state.settings.enable_key;
     if (key == 0u || state.overlay.capturing_key || !runtime->is_key_pressed(key)) return;
-    const auto found = state.devices.find(runtime->get_device());
     if (found == state.devices.end()) return;
     [[maybe_unused]] const auto& [device, entry] = *found;
     if (entry.runtime != runtime) return;  // toggle once per frame: the primary swap chain's runtime only
