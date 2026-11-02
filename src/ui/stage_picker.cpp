@@ -111,7 +111,8 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
   }
 
   const auto preferred = SourcePickOf(*settings, view.dlss_explicit);
-  const size_t selected = preferred == SourcePick::PRESENT ? (settings->fg_present == Settings::FgPresent::BEFORE ? 2u : 3u) : static_cast<size_t>(preferred);
+  const bool before_framegen = view.frame_generation_active && settings->fg_present == Settings::FgPresent::BEFORE;
+  const size_t selected = preferred == SourcePick::PRESENT ? (before_framegen ? 2u : 3u) : static_cast<size_t>(preferred);
   constexpr std::array<int, 4> preceding{0, 2, 3, 4};
   for (size_t i = 0; i < NR_STAGE_NAMES.size(); ++i) {
     const int prior = preceding[i];
@@ -162,7 +163,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     }
     bottom = std::max(bottom, stage_bottom);
     if (!clicked) continue;
-    if (i == 3 && settings->fg_present != Settings::FgPresent::AFTER) {
+    if (i == 3 && view.frame_generation_active && settings->fg_present != Settings::FgPresent::AFTER) {
       state->confirm_present_stage = true;
       state->enable_warning_key = "PresentWithFrameGen";
     } else {
