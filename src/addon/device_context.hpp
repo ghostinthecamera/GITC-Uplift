@@ -87,6 +87,8 @@ struct FrameConfig {
   // Plan 18 Task 12: DLSS was seen on this device and no DLSS feature of its API is live there now (addon::DlssReleased; set by the add-on only): the game
   // released it, or on Direct3D 11 shut NGX down. The context's DlssOffLatch decides from it when the game switched its DLSS off.
   bool dlss_released = false;
+  bool marker_rendered_early = false;
+  nr::Size early_motion_extent{};
   bool effects_on = false;  // 1.1.6: ReShade's effects are on, so NR before effects may wait for their begin-effects event (set by the add-on only)
   // 1.1.6: ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN is set: the game's camera images, DLSS's among them, are upside down against the back buffer
   // (Unity, for one), so DLSS's motion vectors are flipped for the Present path (set by the add-on only).

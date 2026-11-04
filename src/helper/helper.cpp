@@ -304,6 +304,7 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
           .uplift_mv_lumenite = (frame.uplift_mv_lumenite != 0u),  // 2026-10-08: the readouts name UPLIFT_MV's source
       },
       &coalescer_, now);
+  config.early_motion_extent = {frame.early_motion_width, frame.early_motion_height};
   if (frame.drain_now != 0u) {
     config.session.grace = std::chrono::milliseconds(0);  // transitions: NR's owner moved away from the helper: it drains at once, never after the grace
   }

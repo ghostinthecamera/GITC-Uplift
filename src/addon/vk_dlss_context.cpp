@@ -379,7 +379,7 @@ TriggerPoint VkDlssContext::BeginFrame(void* present_queue, const FrameConfig& c
   // Plan 19: as DeviceContext's Present path: a recording is readied only while NR runs and the frame can take it.
   frame_ready_ = (session_->State() == nr::SessionState::ACTIVE && ring_ != nullptr && present_problem_.empty() && present_encoding_.has_value()
                   && present.back_buffer.image != VK_NULL_HANDLE);
-  return trigger_.OnPresent(present.marker_expected, config.effects_on);
+  return trigger_.OnPresent(present.marker_expected, config.effects_on, config.marker_rendered_early);
 }
 
 void VkDlssContext::ResolvePresentFrame() {
@@ -563,7 +563,7 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
       .dlss_motion_gap_size = ((copies_meant && dlss_motion.image == VK_NULL_HANDLE) ? copy_size : nr::Size{}),
       .launchpad_motion = (launchpad_wanted ? color::VkSampledView{.view = launchpad.view, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
                                             : color::VkSampledView{}),
-      .launchpad_size = launchpad.size,
+      .launchpad_size = (point == TriggerPoint::EARLY_MARKER ? config_.early_motion_extent : launchpad.size),
       .launchpad_format = launchpad.format,
       .motion_scale_x = config_.motion_scale_x,
       .motion_scale_y = config_.motion_scale_y,

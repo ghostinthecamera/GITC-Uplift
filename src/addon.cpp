@@ -1298,6 +1298,19 @@ void OnInitEffectRuntime(api::effect_runtime* runtime) {
   UPLIFT_CATCH("init_effect_runtime", )
 }
 
+void OnEffectsReloaded(api::effect_runtime* runtime) {
+  try {
+    const std::unique_lock lock(g_state->mutex);
+    const auto found = g_state->devices.find(runtime->get_device());
+    if (found != g_state->devices.end() && found->second.runtime == runtime) {
+      found->second.motion_links.early = {};
+      found->second.motion_links.provider = {};
+      found->second.marker = {};
+    }
+  }
+  UPLIFT_CATCH("reloaded_effects", )
+}
+
 void OnDestroyEffectRuntime(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
@@ -1761,6 +1774,7 @@ addon::BeforeFgVk::Result RecordOuterVulkanBridge(DeviceEntry& entry, api::devic
       helper_frame.queue = game_queue;
       helper_frame.present_queue = game_queue;
       helper_frame.marker = {};
+      helper_frame.early_marker = {};
       helper_frame.back_buffer = {addon::ReshadeHandleOf(frame.image.image)};
       helper_frame.outer_vulkan_host = host;
       helper_frame.outer_vulkan_image = frame.image;
@@ -2106,6 +2120,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         entry.helper.uplift_mv_lumenite = entry.uplift_mv_lumenite;
       }
     }
+    const auto early_marker = entry.motion_links.early.Take(entry.runtime, entry.marker, entry.motion_links.provider);
     if (d3d9) {
       // Plan 10 (design §2.2): a Direct3D 9 device's NR runs in gitc-uplift-helper64.exe (next to this add-on), through the front both
       // add-ons share: its client, the helper's FRAME, and NR at the present point. No context and no bridge exist for it.
@@ -2117,6 +2132,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
                                              .runtime = entry.runtime,
                                              .back_buffer = entry.back_buffer,
                                              .marker = entry.marker,
+                                             .early_marker = early_marker,
                                              .settings = &state.settings,
                                              .overlay = &state.overlay,
                                              .nr_allowed = nr_allowed,
@@ -2352,6 +2368,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
                                                .vk_hook_error = vk_hook_error,
                                                .back_buffer = entry.back_buffer,
                                                .marker = entry.marker,
+                                               .early_marker = early_marker,
                                                .settings = &state.settings,
                                                .overlay = &state.overlay,
                                                .nr_allowed = (helper_allowed && in_process_allowed && in_process_off
@@ -2366,6 +2383,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
           if (state.settings.motion_vectors == ui::MotionVectorSource::DLSS) issue = "Before FG: DLSS motion is unavailable on the helper route";
           if (entry.outer_inner == swapchain && issue.empty()) {
             helper_frame.marker = {};
+            helper_frame.early_marker = {};
             if (!entry.before_fg_helper) entry.before_fg_note = "Before FG: waiting for the real frame through the Vulkan helper";
             entry.before_fg_helper = helper_frame;
             entry.before_fg_config.reset();
@@ -2576,6 +2594,8 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         // Split chain (Task 5): the native context runs passes at several stages while VulkanNr is Native and its DLSS stages may run; its Present then
         // needs the native route (decision Q6: a Present that fell back cannot run, and its passes join the DLSS stage).
         native_config.split_capable = addon::SplitCapable(true, false, state.settings.vulkan_nr == ui::VulkanNrMode::NATIVE && !vk_dlss_stages_off);
+        native_config.marker_rendered_early = early_marker.technique.handle != 0u;
+        native_config.early_motion_extent = early_marker.extent;
         native_config.effects_on = (entry.runtime != nullptr && entry.runtime->get_effects_state());  // 1.1.6: NR before effects at their begin event
         if (vk_dlss_stages_off) {
           // In-game round 2: the route is Direct3D 12 or Helper, so the native context runs no DLSS stage whatever is stored (Auto stays at Present here).
@@ -2673,7 +2693,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
               vk::RecordOpeningBarrier(host);
             }
           }
-          RunNative(entry, device, native_point, vk::Usage::PRESENT);
+          RunNative(entry, device, native_point, vk::Usage::PRESENT, native_point == addon::TriggerPoint::EARLY_MARKER ? early_marker.motion : api::resource_view{});
           return;
         }
         if (native.WantsNr() && !entry.context && !helper_runs) {
@@ -3004,6 +3024,8 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     // Plan 18 Task 12: the game released its DLSS on this device (or on Direct3D 11 shut NGX down): once that holds, its DLSS stages fall back to Present.
     // Fix round 1 (M-5): the registry is asked once the context saw DLSS.
     frame_config.dlss_released = addon::DlssReleased(state.bridge.Registry(), device, DlssApiOf(entry), entry.context->DlssSeen());
+    frame_config.marker_rendered_early = early_marker.technique.handle != 0u;
+    frame_config.early_motion_extent = early_marker.extent;
     frame_config.effects_on = (entry.runtime != nullptr && entry.runtime->get_effects_state());  // 1.1.6: NR before effects at their begin event
     frame_config.dlss_motion_upside_down = entry.depth_upside_down.value_or(false);                // 1.1.6: DLSS's vectors flipped at Present
     if (entry.vulkan && addon::VkHolderDrainsNow(entry.vk_owner, addon::VkNrHolder::BRIDGE)) {
@@ -3055,7 +3077,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         // Plan 12: FB0 at the present event is what NR runs on unless the Uplift technique is in the preset, where it is ReShade's single-sampled intermediate
         // (and MSAA is no problem: `at_present` decides). The GL names that waited for a valid host are deleted here, with the runtime's context current.
         addon::ReshadeGlHost host(entry.gl_bridge->Gl(), entry.queue, entry.present_queue);
-        frame = entry.gl_bridge->BeginFrame(host, addon::GlImageInfo(device, entry.back_buffer), entry.marker.handle == 0u, settings.enabled, running, now);
+        frame = entry.gl_bridge->BeginFrame(host, addon::GlImageInfo(device, entry.back_buffer), entry.marker.handle == 0u || frame_config.marker_rendered_early, settings.enabled, running, now);
         frame_queue = entry.gl_bridge->Queue();
       } else if (entry.d3d10_bridge) {
         frame = entry.d3d10_bridge->BeginFrame(reinterpret_cast<ID3D10Resource*>(entry.back_buffer.handle), settings.enabled, running, now);
@@ -3125,11 +3147,12 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         LogHeartbeat(entry, device, "NR stopped after", *figures);
       }
     }
+    const api::resource early_motion = (point == addon::TriggerPoint::EARLY_MARKER && early_marker.motion.handle ? device->get_resource_from_view(early_marker.motion) : api::resource{});
     if (Bridged(entry)) {
-      RunBridged(entry, device, point, 0u, vk::Usage::PRESENT, entry.back_buffer);
+      RunBridged(entry, device, point, early_motion.handle, vk::Usage::PRESENT, entry.back_buffer);
     } else if (!entry.outer_owns_frame) {
       ReshadeFrameHost host(queue, entry.back_buffer);
-      RunOrWarnOnce(&state, entry, &host, D3D12_RESOURCE_STATE_PRESENT, point);
+      RunOrWarnOnce(&state, entry, &host, D3D12_RESOURCE_STATE_PRESENT, point, reinterpret_cast<ID3D12Resource*>(early_motion.handle));
     }
 
     // v2 design §3.2's safety latch, persisted so the next start keeps the DLSS placements off, and
@@ -3196,6 +3219,10 @@ void OnRenderTechnique(api::effect_runtime* runtime, api::effect_technique techn
     const std::unique_lock lock(g_state->mutex);
     DeviceEntry* const entry = FindFrameEntry(g_state, runtime, cmd_list);
     if (entry == nullptr) return;
+    if (entry->motion_links.early.observing) {
+      entry->motion_links.early.Observe(runtime, technique, entry->marker, entry->motion_links.provider, rtv);
+      return;
+    }
     const bool is_marker = (technique.handle == entry->marker.handle);
     if (entry->helper.HasClient()) {
       g_state->front->Technique(entry->helper, runtime, is_marker, rtv.handle, g_state->settings);  // Plan 10: a Direct3D 9 device; T5: a helper-route Vulkan one
@@ -3377,6 +3404,7 @@ void OnReshadePresent(api::effect_runtime* runtime) {
     const auto found = state.devices.find(runtime->get_device());
     if (found != state.devices.end() && found->second.runtime == runtime && !found->second.outer_owns_frame) {
       DeviceEntry& entry = found->second;
+      entry.motion_links.early = {.observing = true};
       if (entry.helper.HasClient()) entry.helper.trigger.EndFrame();
       else if (NativePresent(entry)) entry.vk_dlss->EndFrame();
       else if (entry.context) entry.context->EndFrame();
@@ -4033,6 +4061,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   reshade::register_event<reshade::addon_event::init_swapchain>(BeforeFgInitChain);
   reshade::register_event<reshade::addon_event::destroy_swapchain>(BeforeFgDestroyChain);
   reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitEffectRuntime);
+  reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnEffectsReloaded);
   reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
   reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(OnSetCurrentPresetPath);
   reshade::register_event<reshade::addon_event::present>(OnPresent);

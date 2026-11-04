@@ -11,11 +11,12 @@ std::string_view TriggerPointName(TriggerPoint point) {
     case TriggerPoint::NONE:          return "none";
     case TriggerPoint::PRESENT:       return "before effects";
     case TriggerPoint::MARKER:        return "Uplift technique";
+    case TriggerPoint::EARLY_MARKER:  return "Present (Uplift technique rendered earlier)";
   }
   return "none";
 }
 
-TriggerPoint FrameTrigger::OnPresent(bool marker_expected, bool effects_on) {
+TriggerPoint FrameTrigger::OnPresent(bool marker_expected, bool effects_on, bool marker_rendered_early) {
   const bool was_waiting = std::exchange(waiting_, marker_expected);
   frame_open_ = true;
   const bool defer = std::exchange(begin_seen_, false) && effects_on;
@@ -23,6 +24,11 @@ TriggerPoint FrameTrigger::OnPresent(bool marker_expected, bool effects_on) {
   if (!marker_expected) {
     marker_missed_ = false;
     return BeforeEffects(defer);
+  }
+  if (marker_rendered_early) {
+    waiting_ = false;
+    marker_missed_ = false;
+    return TriggerPoint::EARLY_MARKER;
   }
   if (was_waiting && !marker_missed_) {
     marker_missed_ = true;

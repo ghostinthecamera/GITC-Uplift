@@ -149,6 +149,19 @@ void OnInitEffectRuntime(api::effect_runtime* runtime) {
   UPLIFT_CATCH("init_effect_runtime", )
 }
 
+void OnEffectsReloaded(api::effect_runtime* runtime) {
+  try {
+    const std::unique_lock lock(g_state->mutex);
+    const auto found = g_state->devices.find(runtime->get_device());
+    if (found != g_state->devices.end() && found->second.runtime == runtime) {
+      found->second.motion_links.early = {};
+      found->second.motion_links.provider = {};
+      found->second.marker = {};
+    }
+  }
+  UPLIFT_CATCH("reloaded_effects", )
+}
+
 void OnDestroyEffectRuntime(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
@@ -322,6 +335,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         entry.helper.uplift_mv_source = step.compiled;
       }
     }
+    const auto early_marker = entry.motion_links.early.Take(entry.runtime, entry.marker, entry.motion_links.provider);
     if (entry.helper.rejected) return;
 
     // NrClaim, as in 64-bit games: one device per process runs NR.
@@ -340,6 +354,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
                                            .vk_hook_error = vk_hook_error,
                                            .back_buffer = entry.back_buffer,
                                            .marker = entry.marker,
+                                           .early_marker = early_marker,
                                            .settings = &settings,
                                            .overlay = &state.overlay,
                                            .nr_allowed = nr_allowed,
@@ -357,6 +372,10 @@ void OnRenderTechnique(api::effect_runtime* runtime, api::effect_technique techn
     const std::unique_lock lock(g_state->mutex);
     DeviceEntry32* const entry = FindFrameEntry(g_state, runtime, cmd_list);
     if (entry == nullptr) return;
+    if (entry->motion_links.early.observing) {
+      entry->motion_links.early.Observe(runtime, technique, entry->marker, entry->motion_links.provider, rtv);
+      return;
+    }
     g_state->front->Technique(entry->helper, runtime, technique.handle == entry->marker.handle, rtv.handle, g_state->settings);
   }
   UPLIFT_CATCH("render_technique", )
@@ -378,7 +397,10 @@ void OnReshadePresent(api::effect_runtime* runtime) {
     const std::unique_lock lock(g_state->mutex);
     AddonState32& state = *g_state;
     const auto found = state.devices.find(runtime->get_device());
-    if (found != state.devices.end() && found->second.runtime == runtime) found->second.helper.trigger.EndFrame();
+    if (found != state.devices.end() && found->second.runtime == runtime) {
+      found->second.helper.trigger.EndFrame();
+      found->second.motion_links.early = {.observing = true};
+    }
     ui::ExpireKeyCapture(&state.overlay, std::chrono::steady_clock::now());
     if (state.overlay.key_captured_this_frame) {
       // The press that bound the hotkey is still in this frame's input: do not let it toggle Enable.
@@ -535,6 +557,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   reshade::register_event<reshade::addon_event::destroy_command_queue>(OnDestroyCommandQueue);
   reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
   reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitEffectRuntime);
+  reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnEffectsReloaded);
   reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
   reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(OnSetCurrentPresetPath);
   reshade::register_event<reshade::addon_event::present>(OnPresent);

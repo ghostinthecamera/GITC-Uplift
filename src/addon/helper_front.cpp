@@ -255,7 +255,7 @@ void HelperFront::RunClient(HelperDevice& device, api::device* game_device, api:
                              : "Direct3D 11"),
              client::BITNESS);
   }
-  if (!sent && point != TriggerPoint::PRESENT) {
+  if (!sent && point == TriggerPoint::MARKER) {
     device.unreported_point = point;  // PRESENT changes nothing on the helper's copy of the trigger
   }
 }
@@ -393,15 +393,18 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   Hosts hosts = HostsOf(entry, device, frame.queue, frame.present_queue, frame.outer_vulkan_host);
 
   // The FRAME (design §2.2): what crosses every present.
+  const bool early = frame.early_marker.technique.handle != 0u && frame.early_marker.technique == frame.marker;
   ipc::Frame wire = {
       .settings_generation = settings_generation_,
       .drag_bits = ipc::DragBits(frame.overlay->drag),
       .defaults_view = (frame.overlay->defaults_view ? 1u : 0u),
-      .marker_expected = (frame.marker.handle != 0u ? 1u : 0u),
+      .marker_expected = (!early && frame.marker.handle != 0u ? 1u : 0u),
       .nr_allowed = (frame.nr_allowed ? 1u : 0u),
       .unreported_point = static_cast<uint32_t>(entry.unreported_point),
       .retry_now = (entry.retry_now ? 1u : 0u),
   };
+  wire.early_motion_width = frame.early_marker.extent.width;
+  wire.early_motion_height = frame.early_marker.extent.height;
   wire.drain_now = (frame.drain_now ? 1u : 0u);
   wire.uplift_mv_lumenite = (entry.uplift_mv_lumenite ? 1u : 0u);  // 2026-10-08: the helper's readouts name UPLIFT_MV's source
   // Plan 5 (key decision 8): without a running UPLIFT_MASK there is no mask to bind. Shared on Direct3D 9 (both transports, Plan 10) and on
@@ -452,12 +455,12 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   } else if (entry.gl) {
     // FB0 describes the target at the present event (the Session's size and shared format); the technique's intermediate has FB0's size and format family
     // (design §3.2). MSAA is refused only when NR would run at PRESENT (no marker): `at_present`.
-    wire.target = entry.gl->Describe(*hosts.opengl, GlImageInfo(device, frame.back_buffer), /*at_present=*/frame.marker.handle == 0u, settings.enabled,
+    wire.target = entry.gl->Describe(*hosts.opengl, GlImageInfo(device, frame.back_buffer), /*at_present=*/(early || frame.marker.handle == 0u), settings.enabled,
                                      entry.running);
   } else if (entry.d3d12) {
     wire.target = entry.d3d12->Describe(*hosts.d3d12, AsNative<ID3D12Resource>(frame.back_buffer.handle)->GetDesc(), settings.enabled, entry.running);
   } else if (entry.d3d9) {
-    wire.target = entry.d3d9->Describe(AsNative<IDirect3DSurface9>(frame.back_buffer.handle), entry.running, /*at_present=*/frame.marker.handle == 0u);
+    wire.target = entry.d3d9->Describe(AsNative<IDirect3DSurface9>(frame.back_buffer.handle), entry.running, /*at_present=*/(early || frame.marker.handle == 0u));
   } else if (entry.d3d10) {
     wire.target = entry.d3d10->Describe(AsNative<ID3D10Resource>(frame.back_buffer.handle), settings.enabled, entry.running);
   } else {
@@ -523,7 +526,9 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   }
   // The first event of the frame; at PRESENT NR runs now, otherwise it waits for the marker. Direct3D 9 keeps NR before effects in the present
   // event (the helper replays this point; 1.1.6's begin-effects wait is not passed to it).
-  RunClient(entry, device, frame.queue, entry.trigger.OnPresent(frame.marker.handle != 0u, /*effects_on=*/false), frame.back_buffer.handle, 0u, /*at_present=*/true,
+  const TriggerPoint point = entry.trigger.OnPresent(frame.marker.handle != 0u, /*effects_on=*/false, early);
+  const api::resource motion = (early && entry.SharesImages() && frame.early_marker.motion.handle ? device->get_resource_from_view(frame.early_marker.motion) : api::resource{});
+  RunClient(entry, device, frame.queue, point, frame.back_buffer.handle, motion.handle, /*at_present=*/true,
             frame.outer_vulkan_host, frame.outer_vulkan_host ? &frame.outer_vulkan_image : nullptr);
 }
 

@@ -710,6 +710,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Pre-DLSS returns when the game's DLSS is not Ray Reconstruction.", "当游戏的 DLSS 不再使用光线重建时，将恢复 DLSS 前阶段。"},
     {"Present", "后处理"},
     {"Present\nfor display", "呈现\n到屏幕"},
+    {"Present (Uplift technique rendered earlier)", "呈现时（Uplift 技术已提前渲染）"},
     {"Present (Uplift's own command buffers)", "后处理（Uplift 自己的命令缓冲区）"},
     {"Present with frame generation", "启用帧生成时在后处理运行"},
     {"Present without DLSS", "后处理未使用 DLSS"},

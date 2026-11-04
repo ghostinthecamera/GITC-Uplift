@@ -4,6 +4,7 @@
 #include <optional>
 #include <string_view>
 
+#include "addon/early_marker.hpp"
 #include "addon/launchpad_link.hpp"
 #include "addon/reshade_api.hpp"
 #include "nr/log.hpp"
@@ -20,6 +21,8 @@ inline constexpr char LUMENITE_DEFINE[] = "UPLIFT_USE_LUMENITE";
 inline constexpr char LAUNCHPAD_TECHNIQUE_NAME[] = "MartysMods_Launchpad";
 
 struct MotionLinks {
+  EarlyMarker early;
+  reshade::api::effect_technique provider{};
   UpliftMvSource last_source = UpliftMvSource::NONE;
   LaunchPadLink launchpad;
   LaunchPadLink lumenite;
@@ -29,6 +32,8 @@ struct MotionLinks {
   void Reset() { *this = {}; }
   // A new preset: the links decide afresh, once; readiness holds.
   void ResetLinks() {
+    early = {};
+    provider = {};
     launchpad.Reset();
     lumenite.Reset();
   }
@@ -128,6 +133,9 @@ inline MotionLinkStep UpdateMotionLinks(MotionLinks* links, reshade::api::effect
     step.compiled = CompiledUpliftMv(launchpad_here, launchpad_now, lumenite_here, lumenite_now);
   }
   if (!marker || !ready || !UpliftMvValid(step.compiled, wanted.launchpad, wanted.lumenite)) step.compiled = UpliftMvSource::NONE;
+  links->provider = {};
+  if (step.compiled == UpliftMvSource::LAUNCHPAD) links->provider = launchpad_technique;
+  if (step.compiled == UpliftMvSource::LUMENITE) links->provider = lumenite_technique;
   if (step.compiled != links->last_source) {
     links->last_source = step.compiled;
     const char* source = step.compiled == UpliftMvSource::LAUNCHPAD ? "Launchpad" : step.compiled == UpliftMvSource::LUMENITE ? "Lumenite" : "Off";

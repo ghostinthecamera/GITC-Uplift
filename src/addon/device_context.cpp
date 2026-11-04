@@ -280,7 +280,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
     // A described target (the D3D11 bridge before its shared copy exists) has nothing to record on yet.
     frame_ready_ = (session_->State() == nr::SessionState::ACTIVE && target.resource != nullptr);
   }
-  return trigger_.OnPresent(marker_expected, config.effects_on);
+  return trigger_.OnPresent(marker_expected, config.effects_on, config.marker_rendered_early);
 }
 
 sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES entry_state, TriggerPoint point,
@@ -319,6 +319,9 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   frame_target_.dlss_motion = {.resource = (motion_is_dlss && config_.motion_vectors ? motion : nullptr),
                                 .rect = (motion_is_dlss ? dlss_motion_region : nr::Rect{})};
   frame_target_.launchpad_motion = {.resource = (!motion_is_dlss && config_.launchpad_motion ? motion : nullptr)};
+  if (point == TriggerPoint::EARLY_MARKER) {
+    frame_target_.launchpad_motion.rect = {.width = config_.early_motion_extent.width, .height = config_.early_motion_extent.height};
+  }
   frame_target_.motion_scale_x = config_.motion_scale_x;
   frame_target_.motion_scale_y = config_.motion_scale_y;
   // Plan 18: Direct3D 11's ring keeps DLSS's raw vectors, so their scale travels as values; Vulkan's copies are already scaled (1).

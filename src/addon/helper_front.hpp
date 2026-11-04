@@ -21,6 +21,7 @@
 
 #include "addon/bridge_strikes.hpp"
 #include "addon/frame_trigger.hpp"
+#include "addon/early_marker.hpp"
 #include "addon/launchpad_link.hpp"
 #include "addon/reshade_api.hpp"
 #include "client/d3d10_client.hpp"
@@ -189,6 +190,7 @@ struct HelperFrame {
   std::string vk_hook_error;  // why the vkCreateDevice hook is not installed (an unseen device's Details reason); empty when it is
   reshade::api::resource back_buffer = {0u};
   reshade::api::effect_technique marker = {0u};  // 0 when the Uplift technique is off
+  RenderedMarker early_marker{};
   const ui::Settings* settings = nullptr;
   const ui::OverlayState* overlay = nullptr;
   bool nr_allowed = true;          // the host's NrClaim
