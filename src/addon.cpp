@@ -366,6 +366,7 @@ struct AddonState {
   ui::OverlayState overlay;
   std::unordered_map<api::device*, DeviceEntry> devices;
   std::vector<api::effect_runtime*> runtimes;
+  std::once_flag before_fg_start;
   addon::BeforeFgVk before_fg_vk;
   addon::NrClaim claim;  // Plan 2 final review M8: at most one device loads NR
   // Plan 10 (batch 2 review, minor 3): a Direct3D 9 device's NR runs in the helper, not in this process, so it does not count against the one
@@ -1858,8 +1859,25 @@ void BeforeFgColor(IDXGISwapChain* chain, DXGI_COLOR_SPACE_TYPE space) noexcept 
   try { if (auto route = addon::BeforeFgDx12::Find(chain)) route->ColorSpace(space); } UPLIFT_CATCH("before_fg_color", )
 }
 
+void BeforeFgInitDevice(api::device* device) {
+  try {
+    const auto graphics = device->get_api();
+    if (graphics != api::device_api::d3d12 && graphics != api::device_api::vulkan) return;
+    // A bridged game can create Uplift's private D3D12 device while running NR.
+    if (t_holds_lock_for_nr || addon::streamline::Installed()) return;
+    std::call_once(g_state->before_fg_start, [] {
+      if (PinReshade(reshade::internal::get_reshade_module_handle()) && addon::streamline::Start(g_state->self_module, {BeforeFgCreated, BeforeFgDxgi, BeforeFgVk, BeforeFgResized, BeforeFgColor, BeforeFgVkCreated, BeforeFgVkImages, BeforeFgVkDestroyed, BeforeFgVkAcquired, BeforeFgVkUsage, BeforeFgRetry})) {
+        nr::Log(nr::LogLevel::INFO, "Before FG: observing Streamline and ReShade presentation");
+      } else {
+        nr::Log(nr::LogLevel::WARN, "Before FG unavailable: Streamline presentation hooks could not be initialized");
+      }
+    });
+  } UPLIFT_CATCH("before_fg_init_device", )
+}
+
 void BeforeFgDestroyChain(api::swapchain* chain) noexcept {
   try {
+    if (!addon::streamline::Installed()) return;
     const auto graphics = chain->get_device()->get_api();
     if (graphics != api::device_api::d3d12 && graphics != api::device_api::vulkan) return;
     const std::unique_lock lock(g_state->mutex);
@@ -3935,15 +3953,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
 
   const auto diagnostic = g_state->config.Get("DiagnosticBeforeFG");
   g_state->diagnostic_before_fg = diagnostic && ui::ParseBoolSetting(*diagnostic).value_or(false);
-  // Capture the game-facing chain at creation even if the user only selects Before FG later in this session.
-  if (PinReshade(reshade_module) && addon::streamline::Start(addon_module, {BeforeFgCreated, BeforeFgDxgi, BeforeFgVk, BeforeFgResized, BeforeFgColor, BeforeFgVkCreated, BeforeFgVkImages, BeforeFgVkDestroyed, BeforeFgVkAcquired, BeforeFgVkUsage, BeforeFgRetry})) {
-    reshade::register_event<reshade::addon_event::init_swapchain>(BeforeFgInitChain);
-    reshade::register_event<reshade::addon_event::destroy_swapchain>(BeforeFgDestroyChain);
-    nr::Log(nr::LogLevel::INFO, "Before FG: observing Streamline and ReShade presentation");
-  } else {
-    warnings.emplace_back("Before FG unavailable: Streamline presentation hooks could not be initialized");
-  }
-
   // Spec §10 and v2 design §3.1: the NGX hooks, unless NgxHooks = Off (Plan 2's add-on exactly).
   std::string hook_error;
   const bool hooks_started =
@@ -4013,10 +4022,12 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     PinReshade(reshade_module);
   }
 
+  reshade::register_event<reshade::addon_event::init_device>(BeforeFgInitDevice);
   reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
   reshade::register_event<reshade::addon_event::init_command_queue>(OnInitCommandQueue);
   reshade::register_event<reshade::addon_event::destroy_command_queue>(OnDestroyCommandQueue);
-  // No destroy_swapchain handler: see the comment on SwapchainSelector for why (resize safety).
+  reshade::register_event<reshade::addon_event::init_swapchain>(BeforeFgInitChain);
+  reshade::register_event<reshade::addon_event::destroy_swapchain>(BeforeFgDestroyChain);
   reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitEffectRuntime);
   reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
   reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(OnSetCurrentPresetPath);
