@@ -24,12 +24,13 @@ struct Observer {
   void (*vk_acquired)(VkDevice, VkSwapchainKHR, uint32_t) = nullptr;
   VkImageUsageFlags (*vk_usage)(VkDevice, const VkSwapchainCreateInfoKHR&) = nullptr;
   void (*dxgi_retry)(IDXGISwapChain*) = nullptr;
+  bool diagnostic_dxgi = false;
 };
 
 bool Start(HMODULE self, const Observer& observer);
 void Poll();
 void NoteReshadeSwapchain(void* chain);
-bool WatchGameFacing(IDXGISwapChain* chain);
+bool WatchGameFacing(IDXGISwapChain* chain, bool trace_method = false);
 bool InsideOuterPresent();
 bool Installed();
 enum class FgMode { UNKNOWN, OFF, ON, AUTO };

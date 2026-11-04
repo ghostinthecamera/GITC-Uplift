@@ -50,16 +50,19 @@ HRESULT BeforeFgDx12::QueryInterface(REFIID iid, void** out) {
   return S_OK;
 }
 
-void BeforeFgDx12::Attach(IDXGISwapChain* chain, IUnknown* queue, void* inner) {
+std::string_view BeforeFgDx12::Attach(IDXGISwapChain* chain, IUnknown* queue, void* inner) {
   auto native = Native<ID3D12CommandQueue>(queue);
-  if (!native || native->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT || !inner) return;
+  if (!native) return "cannot unwrap D3D12 creation queue";
+  if (native->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return "creation queue is not direct";
+  if (!inner) return "no ReShade swapchain observed during creation";
   ComPtr<BeforeFgDx12> route;
   route.Attach(new BeforeFgDx12());
   route->creation_queue_ = std::move(native);
   route->inner_.store(inner);
   route->identity_ = chain;
   route->queues_.push_back({route->creation_queue_});
-  chain->SetPrivateDataInterface(ROUTE_ID, route.Get());
+  if (FAILED(chain->SetPrivateDataInterface(ROUTE_ID, route.Get()))) return "could not store route on swapchain";
+  return {};
 }
 
 ComPtr<BeforeFgDx12> BeforeFgDx12::Find(IDXGISwapChain* chain) {

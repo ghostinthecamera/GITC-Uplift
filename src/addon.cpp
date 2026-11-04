@@ -1631,8 +1631,12 @@ bool LogPresentCount(uint64_t count) { return g_state->diagnostic_before_fg && (
 void BeforeFgCreated(IDXGISwapChain* chain, IUnknown* device, void* inner) noexcept {
   try {
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
-    if (device == nullptr || FAILED(device->QueryInterface(IID_PPV_ARGS(&queue)))) return;
-    addon::BeforeFgDx12::Attach(chain, device, inner);
+    if (device == nullptr || FAILED(device->QueryInterface(IID_PPV_ARGS(&queue)))) {
+      if (g_state->diagnostic_before_fg) nr::Log(nr::LogLevel::INFO, "Before FG DX12: returned swapchain has no D3D12 creation queue");
+      return;
+    }
+    const auto reason = addon::BeforeFgDx12::Attach(chain, device, inner);
+    if (g_state->diagnostic_before_fg && !reason.empty()) nr::Logf(nr::LogLevel::INFO, "Before FG DX12: route rejected for outer={} reason={}", static_cast<void*>(chain), reason);
     nr::Logf(nr::LogLevel::INFO, "Before FG trace: game-facing DX12 swapchain={} creation queue={} ReShade swapchain={}",
              static_cast<void*>(chain), static_cast<void*>(queue.Get()), inner);
   } UPLIFT_CATCH("before_fg_create", )
@@ -1866,7 +1870,7 @@ void BeforeFgInitDevice(api::device* device) {
     // A bridged game can create Uplift's private D3D12 device while running NR.
     if (t_holds_lock_for_nr || addon::streamline::Installed()) return;
     std::call_once(g_state->before_fg_start, [] {
-      if (PinReshade(reshade::internal::get_reshade_module_handle()) && addon::streamline::Start(g_state->self_module, {BeforeFgCreated, BeforeFgDxgi, BeforeFgVk, BeforeFgResized, BeforeFgColor, BeforeFgVkCreated, BeforeFgVkImages, BeforeFgVkDestroyed, BeforeFgVkAcquired, BeforeFgVkUsage, BeforeFgRetry})) {
+      if (PinReshade(reshade::internal::get_reshade_module_handle()) && addon::streamline::Start(g_state->self_module, {BeforeFgCreated, BeforeFgDxgi, BeforeFgVk, BeforeFgResized, BeforeFgColor, BeforeFgVkCreated, BeforeFgVkImages, BeforeFgVkDestroyed, BeforeFgVkAcquired, BeforeFgVkUsage, BeforeFgRetry, g_state->diagnostic_before_fg})) {
         nr::Log(nr::LogLevel::INFO, "Before FG: observing Streamline and ReShade presentation");
       } else {
         nr::Log(nr::LogLevel::WARN, "Before FG unavailable: Streamline presentation hooks could not be initialized");
@@ -2014,7 +2018,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         entry.early_confirmed = false;
         entry.early_dxgi = nullptr;
       }
-      if (!entry.early_confirmed && addon::streamline::WatchGameFacing(native)) {
+      if (!entry.early_confirmed && addon::streamline::WatchGameFacing(native, LogPresentCount(entry.activity.reshade))) {
         entry.early_dxgi = native;
         entry.early_thread = GetCurrentThreadId();
       }

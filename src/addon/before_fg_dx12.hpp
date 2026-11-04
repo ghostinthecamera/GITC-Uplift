@@ -14,7 +14,7 @@ namespace uplift::addon {
 // Attached to the game-facing swapchain through DXGI private data. It never retains a backbuffer or the swapchain itself.
 class BeforeFgDx12 final : public IUnknown {
  public:
-  static void Attach(IDXGISwapChain* chain, IUnknown* queue, void* inner);
+  static std::string_view Attach(IDXGISwapChain* chain, IUnknown* queue, void* inner);
   static Microsoft::WRL::ComPtr<BeforeFgDx12> Find(IDXGISwapChain* chain);
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override;
   ULONG STDMETHODCALLTYPE AddRef() override;

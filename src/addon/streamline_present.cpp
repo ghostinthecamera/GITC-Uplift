@@ -110,6 +110,29 @@ bool Attach(Hook<Fn>& hook, void* address, Fn detour, HMODULE feature_module = n
   return true;
 }
 
+template<class... Args>
+void TraceDxgi(std::format_string<Args...> format, Args&&... args) noexcept {
+  if (!observer.diagnostic_dxgi) return;
+  try { nr::Logf(nr::LogLevel::INFO, format, std::forward<Args>(args)...); } catch (...) {}
+}
+
+void TraceMethod(const char* method, void* address, void* target, bool attached) {
+  char path[MAX_PATH + 1]{};
+  const HMODULE module = address ? Owner(address) : nullptr;
+  if (module) GetModuleFileNameA(module, path, MAX_PATH);
+  const char* file = std::strrchr(path, '\\');
+  const char* result = attached ? "attached" : !address ? "no method" : !IsInterposer(module) ? "outside interposer"
+      : target && target != address ? "different target already hooked" : "hook installation failed";
+  TraceDxgi("Before FG DX12: {} method={} owner={} target={} result={}", method, address, file ? file + 1 : path, target, result);
+}
+
+template<class Fn>
+bool AttachDxgi(const char* method, Hook<Fn>& hook, void* address, Fn detour) {
+  const bool attached = Attach(hook, address, detour);
+  if (observer.diagnostic_dxgi) TraceMethod(method, address, hook.target.load(), attached);
+  return attached;
+}
+
 void** Vtable(void* object) { return *static_cast<void***>(object); }
 
 class PresentScope {
@@ -172,74 +195,83 @@ HRESULT STDMETHODCALLTYPE OnColor(IDXGISwapChain3* chain, DXGI_COLOR_SPACE_TYPE 
 void BindChain(IDXGISwapChain* chain, IUnknown* device, void* inner) {
   if (!chain) return;
   ComPtr<IDXGISwapChain1> chain1;
-  const bool regular = Attach(present, Vtable(chain)[8], &OnPresent);
-  if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain1)))) Attach(present1, Vtable(chain1.Get())[22], &OnPresent1);
+  const bool regular = AttachDxgi("Present", present, Vtable(chain)[8], &OnPresent);
+  if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain1)))) AttachDxgi("Present1", present1, Vtable(chain1.Get())[22], &OnPresent1);
   if (observer.dxgi_resize && observer.dxgi_color) {
     ComPtr<IDXGISwapChain3> chain3;
     if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain3)))) {
-      if (!Attach(resize, Vtable(chain)[13], &OnResize) || !Attach(color, Vtable(chain3.Get())[38], &OnColor)
-          || !Attach(resize1, Vtable(chain3.Get())[39], &OnResize1)) return;
+      if (!AttachDxgi("ResizeBuffers", resize, Vtable(chain)[13], &OnResize) || !AttachDxgi("SetColorSpace1", color, Vtable(chain3.Get())[38], &OnColor)
+          || !AttachDxgi("ResizeBuffers1", resize1, Vtable(chain3.Get())[39], &OnResize1)) return;
     }
   }
   if (regular) observer.dxgi_created(chain, device, inner);
 }
 
 template<class Chain, class Call>
-HRESULT Created(IUnknown* device, Chain** output, Call&& original) {
+HRESULT Created(const char* method, void* factory_object, IUnknown* device, Chain** output, Call&& original) {
+  TraceDxgi("Before FG DX12: enter {} factory={} device={}", method, factory_object, static_cast<void*>(device));
   void* inner = nullptr;
   void** parent = std::exchange(creating_chain, &inner);
   const HRESULT result = original();
   creating_chain = parent;
   if (parent && inner) *parent = inner;
+  TraceDxgi("Before FG DX12: return {} hr={:#x} outer={} ReShade={}", method, static_cast<unsigned>(result), SUCCEEDED(result) && output ? static_cast<void*>(*output) : nullptr, inner);
   if (SUCCEEDED(result) && output) BindChain(*output, device, inner);
   return result;
 }
 
 HRESULT STDMETHODCALLTYPE OnCreate(IDXGIFactory* self, IUnknown* device, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** output) {
-  return Created(device, output, [&] { return create.original.load(std::memory_order_acquire)(self, device, desc, output); });
+  return Created("CreateSwapChain", self, device, output, [&] { return create.original.load(std::memory_order_acquire)(self, device, desc, output); });
 }
 
 HRESULT STDMETHODCALLTYPE OnCreateHwnd(IDXGIFactory2* self, IUnknown* device, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1* desc,
                                        const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen, IDXGIOutput* restrict_output, IDXGISwapChain1** output) {
-  return Created(device, output, [&] { return create_hwnd.original.load(std::memory_order_acquire)(self, device, hwnd, desc, fullscreen, restrict_output, output); });
+  return Created("CreateSwapChainForHwnd", self, device, output, [&] { return create_hwnd.original.load(std::memory_order_acquire)(self, device, hwnd, desc, fullscreen, restrict_output, output); });
 }
 
 HRESULT STDMETHODCALLTYPE OnCreateComposition(IDXGIFactory2* self, IUnknown* device, const DXGI_SWAP_CHAIN_DESC1* desc, IDXGIOutput* restrict_output,
                                                IDXGISwapChain1** output) {
-  return Created(device, output, [&] { return create_composition.original.load(std::memory_order_acquire)(self, device, desc, restrict_output, output); });
+  return Created("CreateSwapChainForComposition", self, device, output, [&] { return create_composition.original.load(std::memory_order_acquire)(self, device, desc, restrict_output, output); });
 }
 
-void BindFactory(void* object) {
+void BindFactory(void* object, const char* source) {
+  TraceDxgi("Before FG DX12: inspect factory from {} object={}", source, object);
   if (!object) return;
   ComPtr<IDXGIFactory> base;
-  if (FAILED(static_cast<IUnknown*>(object)->QueryInterface(IID_PPV_ARGS(&base)))) return;
-  Attach(create, Vtable(base.Get())[10], &OnCreate);
+  const HRESULT hr = static_cast<IUnknown*>(object)->QueryInterface(IID_PPV_ARGS(&base));
+  if (FAILED(hr)) {
+    TraceDxgi("Before FG DX12: object={} has no IDXGIFactory hr={:#x}", object, static_cast<unsigned>(hr));
+    return;
+  }
+  AttachDxgi("CreateSwapChain", create, Vtable(base.Get())[10], &OnCreate);
   ComPtr<IDXGIFactory2> extended;
   if (SUCCEEDED(base.As(&extended))) {
-    Attach(create_hwnd, Vtable(extended.Get())[15], &OnCreateHwnd);
-    Attach(create_composition, Vtable(extended.Get())[24], &OnCreateComposition);
+    AttachDxgi("CreateSwapChainForHwnd", create_hwnd, Vtable(extended.Get())[15], &OnCreateHwnd);
+    AttachDxgi("CreateSwapChainForComposition", create_composition, Vtable(extended.Get())[24], &OnCreateComposition);
   }
 }
 
 int WINAPI OnUpgrade(void** object) {
+  TraceDxgi("Before FG DX12: enter slUpgradeInterface object={}", object ? *object : nullptr);
   const int result = upgrade.original.load(std::memory_order_acquire)(object);
-  if (result == 0 && object) BindFactory(*object);
+  TraceDxgi("Before FG DX12: return slUpgradeInterface result={} object={}", result, result == 0 && object ? *object : nullptr);
+  if (result == 0 && object) BindFactory(*object, "slUpgradeInterface");
   return result;
 }
 
 HRESULT WINAPI OnFactory(REFIID iid, void** output) {
   const HRESULT hr = factory.original.load(std::memory_order_acquire)(iid, output);
-  if (SUCCEEDED(hr) && output) BindFactory(*output);
+  if (SUCCEEDED(hr) && output) BindFactory(*output, "CreateDXGIFactory");
   return hr;
 }
 HRESULT WINAPI OnFactory1(REFIID iid, void** output) {
   const HRESULT hr = factory1.original.load(std::memory_order_acquire)(iid, output);
-  if (SUCCEEDED(hr) && output) BindFactory(*output);
+  if (SUCCEEDED(hr) && output) BindFactory(*output, "CreateDXGIFactory1");
   return hr;
 }
 HRESULT WINAPI OnFactory2(UINT flags, REFIID iid, void** output) {
   const HRESULT hr = factory2.original.load(std::memory_order_acquire)(flags, iid, output);
-  if (SUCCEEDED(hr) && output) BindFactory(*output);
+  if (SUCCEEDED(hr) && output) BindFactory(*output, "CreateDXGIFactory2");
   return hr;
 }
 
@@ -417,6 +449,7 @@ bool Start(HMODULE self, const Observer& callbacks) {
   if (!address || MH_CreateHook(address, reinterpret_cast<void*>(&OnGetProc), &trampoline) != MH_OK) return false;
   get_proc.original.store(reinterpret_cast<decltype(&GetProcAddress)>(trampoline), std::memory_order_release);
   observer = callbacks;
+  TraceDxgi("Before FG DX12: issue 12 diagnostic enabled");
   if (MH_EnableHook(address) != MH_OK) {
     MH_RemoveHook(address);
     return false;
@@ -435,23 +468,30 @@ void Poll() {
   HMODULE module = GetModuleHandleW(L"sl.interposer.dll");
   if (!module || bound.exchange(true)) return;
   interposer.store(module, std::memory_order_release);
+  TraceDxgi("Before FG DX12: binding Streamline interposer={}", static_cast<void*>(module));
   BindExports(module);
   // ReShade loads add-ons at device creation, after a statically linked application may already have obtained its factory.
   // A separate Streamline factory exposes the same provider methods without upgrading or replacing the application's object.
   if (factory1.original.load(std::memory_order_acquire)) {
     ComPtr<IDXGIFactory2> probe;
-    if (SUCCEEDED(factory1.original.load(std::memory_order_acquire)(IID_PPV_ARGS(&probe)))) BindFactory(probe.Get());
+    if (SUCCEEDED(factory1.original.load(std::memory_order_acquire)(IID_PPV_ARGS(&probe)))) BindFactory(probe.Get(), "Uplift probe");
   }
-  nr::Logf(nr::LogLevel::INFO, "Before FG hooks: upgrade={} DXGI factories={}/{}/{} creation={}/{}/{} Vulkan resolver={}/{} present={}",
+  nr::Logf(nr::LogLevel::INFO, "Before FG hooks: upgrade={} DXGI factories={}/{}/{} creation={}/{}/{} Vulkan resolver={}/{} vkQueuePresentKHR={}",
            upgrade.target != nullptr, factory.target != nullptr, factory1.target != nullptr, factory2.target != nullptr,
            create.target != nullptr, create_hwnd.target != nullptr, create_composition.target != nullptr,
            vk_instance_proc.target != nullptr, vk_device_proc.target != nullptr, vk_present.target != nullptr);
 }
 
-void NoteReshadeSwapchain(void* chain) { if (creating_chain) *creating_chain = chain; }
-bool WatchGameFacing(IDXGISwapChain* chain) {
-  if (!chain || !Installed() || inside_present || !IsInterposer(Owner(Vtable(chain)[8]))) return false;
-  if (!Attach(present, Vtable(chain)[8], &OnPresent)) return false;
+void NoteReshadeSwapchain(void* chain) {
+  if (creating_chain) *creating_chain = chain;
+  if (Installed()) TraceDxgi("Before FG trace: ReShade init swapchain={} inside provider creation={}", chain, creating_chain != nullptr);
+}
+bool WatchGameFacing(IDXGISwapChain* chain, bool trace_method) {
+  if (!chain || !Installed() || inside_present) return false;
+  void* method = Vtable(chain)[8];
+  const bool attached = IsInterposer(Owner(method)) && Attach(present, method, &OnPresent);
+  if (trace_method && observer.diagnostic_dxgi) TraceMethod("ReShade native Present", method, present.target.load(), attached);
+  if (!attached) return false;
   ComPtr<IDXGISwapChain1> chain1;
   if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain1)))) Attach(present1, Vtable(chain1.Get())[22], &OnPresent1);
   return true;
