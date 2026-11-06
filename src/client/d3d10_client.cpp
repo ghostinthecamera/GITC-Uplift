@@ -5,14 +5,13 @@
 
 #include "color/encoding.hpp"
 #include "ipc/control_block.hpp"
+#include "memory_units.hpp"
 #include "nr/log.hpp"
 
 namespace uplift::client {
 namespace {
 
 using Microsoft::WRL::ComPtr;
-
-constexpr double MIB = 1024.0 * 1024.0;
 
 }  // namespace
 
@@ -22,7 +21,7 @@ std::unique_ptr<D3D10Client> D3D10Client::Create(ID3D10Device* device, ComPtr<ID
   client->relay_ = bridge::KeyedRelay::Create(device, relay_created, error);
   if (!client->relay_) return nullptr;  // `error` says why
   // Fences on the relay (Windows 10 1703) were checked by KeyedRelay::Create; a relay that cannot open the helper's own falls back to KMT
-  // inside the D3D11 client, as Plan 9 does for a D3D11 game.
+  // inside D3D11Client, which owns the helper exchange.
   client->d3d11_ = D3D11Client::Create(client->relay_->Relay(), true, error, "Direct3D 10");
   if (!client->d3d11_) return nullptr;  // `error` says why
   nr::Log(nr::LogLevel::INFO, "Direct3D 10: frames cross through a Direct3D 11 relay device (keyed mutex)");
@@ -68,7 +67,7 @@ ipc::Target D3D10Client::Describe(ID3D10Resource* back_buffer, bool enabled, boo
     }
   }
   if (relay_->Dirty()) {
-    relay_->Flush();  // the relay has no Present: what it just released is destroyed only by a Flush (Plan 8's final review C-1)
+    relay_->Flush();  // the relay has no Present: what it just released is destroyed only by a Flush
   }
   // The D3D11 client describes the D3D10 image as it is (its multisampled, unsupported-format and shared-colour problems read the same);
   // it never sees the relay's keyed texture, which does not exist while NR is off. While NR is off its shared textures go.
@@ -115,7 +114,7 @@ bool D3D10Client::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, addon
   run_sent_ = false;
   SyncLatches(link);
   if (Stopped() || !color_.relay || back_buffer == nullptr) return false;
-  // Plan 7's decision 3 on D3D10: LaunchPad's UPLIFT_MV crosses like the colour, and is retired when a recording comes without one.
+  // LaunchPad's UPLIFT_MV crosses like the colour, and is retired when a recording comes without one.
   Keyed* motion_keyed = nullptr;
   const std::optional<D3D10_TEXTURE2D_DESC> motion_description = bridge::TextureDesc(motion);
   if (motion_description && motion_description->Format == DXGI_FORMAT_R16G16_FLOAT && motion_description->SampleDesc.Count == 1u) {
@@ -146,7 +145,7 @@ bool D3D10Client::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, addon
     return false;
   }
   game_->Flush();
-  // 2. The relay takes it (key 1), runs the D3D11 client (R17 across the IPC is its own), and gives back every key it took (1 -> 0)
+  // 2. The relay takes it (key 1), runs the D3D11 client (it owns wait/signal ordering across IPC), and gives back every key it took (1 -> 0)
   //    whatever the client did, then submits: D3D10's GPU never waits for an unsubmitted release either.
   std::optional<bridge::KeyedRelay::KeyGuard> color_key;
   std::optional<bridge::KeyedRelay::KeyGuard> motion_key;
@@ -204,7 +203,7 @@ MaskCopy D3D10Client::CopyMask(ID3D10Resource* mask, NrLink& link) {
     mask_failure_.reset();
   }
   SyncLatches(link);  // a key that did not come while the keyed mask was made
-  // The colour's hand-off (design §3.1).
+  // The colour's hand-off.
   if (!relay_->Hand(mask_, mask)) {
     SyncLatches(link);
     return {};
@@ -244,8 +243,8 @@ void D3D10Client::ReleaseAll() {
   color_failure_.reset();
   mask_failure_.reset();
   motion_failure_.reset();
-  // HelperFront::Present calls this every present while the helper is not running: an empty flush is a kernel call each time (batch 3 review,
-  // minor 4). The relay flushes what it released (Dirty) and what the D3D11 client released here (held).
+  // HelperFront::Present calls this while the helper is stopped. Flush only when the relay or D3D11 client released
+  // resources; an empty flush still enters the kernel.
   if (held || relay_->Dirty()) {
     relay_->Flush();
   }
@@ -254,7 +253,7 @@ void D3D10Client::ReleaseAll() {
 std::string D3D10Client::Line() const {
   const std::string_view transport = (d3d11_->Kind() == ipc::Transport::FENCED ? "shared textures and fences" : "shared texture, CPU-ordered");
   return std::format("Direct3D 10 ({}): NR runs in Uplift's 64-bit helper through a Direct3D 11 relay ({}, {:.1f} MiB)", BITNESS, transport,
-                     static_cast<double>(SharedBytes()) / MIB);
+                     static_cast<double>(SharedBytes()) / BYTES_PER_MIB);
 }
 
 }  // namespace uplift::client

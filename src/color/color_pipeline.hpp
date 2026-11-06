@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
@@ -16,11 +17,11 @@
 
 namespace uplift::color {
 
-// Plan 5: the `options` bits the encode and the decodes read (shaders/change_common.hlsli's OPTION_*).
+// The `options` bits the encode and the decodes read (shaders/change_common.hlsli's OPTION_*).
 namespace shader_options {
 inline constexpr uint32_t PRIMARIES_MASK = 3u;    // bits 0-1: the SourcePrimaries index (Primaries; 0 = automatic)
-inline constexpr uint32_t NEAR_BLACK_GUARD = 4u;  // F16: read by the change pass
-inline constexpr uint32_t CONSISTENT = 8u;        // F15: read by the compose
+inline constexpr uint32_t NEAR_BLACK_GUARD = 4u;  // read by the change pass
+inline constexpr uint32_t CONSISTENT = 8u;        // read by the compose
 inline constexpr uint32_t MASK = 16u;             // set by RecordDecode/RecordComputeDecode when a mask is given
 }  // namespace shader_options
 
@@ -37,7 +38,7 @@ struct EncodePass {
   float exposure_factor = 1.f;         // DLSS.Exposure.Scale ÷ DLSS.Pre.Exposure
   nr::Rect region;  // the part of `source` resampled to the image; all zero = width x height at (0, 0)
   nr::Size canvas;  // the model texture: the image plus mirrored padding; empty = the image
-  uint32_t options = 0u;  // Plan 5: shader_options (the primaries, the near-black guard)
+  uint32_t options = 0u;  // shader_options (the primaries, the near-black guard)
 };
 
 struct DecodePass {
@@ -56,13 +57,13 @@ struct DecodePass {
   ID3D12Resource* exposure = nullptr;
   float exposure_factor = 1.f;
   std::optional<Upsampling> upsampling;  // unset: direct change-field reads; set: resample from the work size
-  uint32_t options = 0u;                              // Plan 5: shader_options (the primaries, Consistent)
-  float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
-  ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
+  uint32_t options = 0u;                              // shader_options (the primaries, Consistent)
+  float chroma_clamp = 0.f;                           // stops; 0 = off
+  ID3D12Resource* mask = nullptr;                     // the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
 };
 
-// The After-DLSS decode (v2 design §3.4 step 5): compute, into a region of a UAV target.
+// The After-DLSS decode: compute, into a region of a UAV target.
 struct ComputeDecodePass {
   ID3D12Resource* source = nullptr;  // the source copy, NON_PIXEL_SHADER_RESOURCE
   DXGI_FORMAT source_view_format = DXGI_FORMAT_UNKNOWN;
@@ -82,23 +83,23 @@ struct ComputeDecodePass {
   uint32_t source_x = 0u;  // the region's top-left corner in `source`
   uint32_t source_y = 0u;
   std::optional<Upsampling> upsampling;  // unset: direct change-field reads; set: resample from the work size
-  uint32_t options = 0u;                              // Plan 5: shader_options (the primaries, Consistent)
-  float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
-  ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
+  uint32_t options = 0u;                              // shader_options (the primaries, Consistent)
+  float chroma_clamp = 0.f;                           // stops; 0 = off
+  ID3D12Resource* mask = nullptr;                     // the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
 };
 
-// v2 design §3.7: NR's change field at the work image size, from the model input recomputed exactly
+// NR's change field at the work image size, from the model input recomputed exactly
 // as `encode` computed it (a later pass may have overwritten A) and NR's output.
 struct ChangePass {
   EncodePass encode;                    // the encode that fed NR; its model and motion are not used
   ID3D12Resource* nr_output = nullptr;  // RGBA16F model domain, NON_PIXEL_SHADER_RESOURCE, the canvas size
   ID3D12Resource* change = nullptr;     // RGBA16F, UNORDERED_ACCESS, the image size
-  ID3D12Resource* basis = nullptr;  // Plan 5: RG16F, UNORDERED_ACCESS: NR's input chroma κ_M, for the look; null = none
+  ID3D12Resource* basis = nullptr;  // RG16F, UNORDERED_ACCESS: NR's input chroma κ_M, for the look; null = none
   ID3D12Resource* model_input = nullptr;  // preserved FP16 NR input when one pass ran; otherwise recompute from encode.source
 };
 
-// Amendment 7 and v2 design §3.9: the game's motion vectors into an Uplift RG16F texture, in its pixels.
+// The game's motion vectors into an Uplift RG16F texture, in its pixels.
 struct MotionPass {
   ID3D12Resource* source = nullptr;  // the game's motion vectors, NON_PIXEL_SHADER_RESOURCE
   DXGI_FORMAT source_view_format = DXGI_FORMAT_UNKNOWN;
@@ -110,10 +111,10 @@ struct MotionPass {
   float scale_y = 1.f;
   float offset_x = 0.f;  // added in destination pixels, before any vertical flip
   float offset_y = 0.f;
-  bool flip_y = false;               // 1.1.6: `source` is upside down against `target` (motion_cs.hlsl)
+  bool flip_y = false;               // `source` is upside down against `target` (motion_cs.hlsl)
 };
 
-// Plan 5 (v2 design §3.14): the exposure meter and governor, one thread group, before the encode.
+// The exposure meter and governor, one thread group, before the encode.
 struct MeterPass {
   ID3D12Resource* source = nullptr;  // read as the encode reads it
   DXGI_FORMAT source_view_format = DXGI_FORMAT_UNKNOWN;
@@ -127,15 +128,15 @@ struct MeterPass {
   float brighter_rate = 2.f;
   float darker_rate = 0.7f;
   float frame_seconds = 1.f / 60.f;
-  // Plan 17: Input exposure = Auto's check. The meter also writes the game's exposure (as the encode would read it) and its target to texel (1, 0).
+  // Input exposure = Auto's check. The meter also writes the game's exposure (as the encode would read it) and its target to texel (1, 0).
   bool probe = false;
   ID3D12Resource* game_exposure = nullptr;  // DLSS's ExposureTexture, NON_PIXEL_SHADER_RESOURCE, or null
   float game_exposure_factor = 1.f;
-  // 2026-10-09, Auto's Blend (with `probe`): the game's share of the state's multiplier, in stops (1 − AutoExposureBlend); 0 is the meter alone.
+  // Auto's Blend (with `probe`): the game's share of the state's multiplier, in stops (1 − AutoExposureBlend); 0 is the meter alone.
   float game_weight = 0.f;
 };
 
-// Plan 5 (v2 design §3.12): the Gaussian pyramid of C and the max pyramid of ℓ_M, levels 1..K, in two atlases.
+// The Gaussian pyramid of C and the max pyramid of ℓ_M, levels 1..K, in two atlases.
 struct PyramidPass {
   ID3D12Resource* change = nullptr;  // C, NON_PIXEL_SHADER_RESOURCE
   ID3D12Resource* gauss = nullptr;   // RGBA16F atlas, UNORDERED_ACCESS
@@ -151,7 +152,7 @@ struct StabilizeMotion {
   float scale_y = 1.f;
 };
 
-// Plan 5 (v2 design §3.12, amendment 4): RecordStabilize runs the scene cut and the two levels the low band reads;
+// RecordStabilize runs the scene cut and the two levels the low band reads;
 // RecordDetail runs the fine band (C minus the low band) at the work size.
 struct StabilizePass {
   ID3D12Resource* gauss = nullptr;     // NON_PIXEL_SHADER_RESOURCE
@@ -180,7 +181,7 @@ struct ShapePass {
   bool sdr = false;
 };
 
-// v2 design §3.10: a pass's own strengths between NR passes.
+// A pass's own strengths between NR passes.
 struct ResolveStrengthsPass {
   ID3D12Resource* given = nullptr;     // the pass's input, NON_PIXEL_SHADER_RESOURCE
   ID3D12Resource* returned = nullptr;  // its raw output, UNORDERED_ACCESS: rewritten
@@ -190,7 +191,7 @@ struct ResolveStrengthsPass {
   bool swapped = false;                // B -> A rather than A -> B: its own descriptor table
 };
 
-// Keep faces (2026-10-08): shaders/faces_cs.hlsl's passes, which recombine pass 1 and its twin, then keep only the broad part of each later pass's change
+// Keep faces: shaders/faces_cs.hlsl's passes, which recombine pass 1 and its twin, then keep only the broad part of each later pass's change
 // inside the face mask (the shader's header has the maths). Every resource RGBA16F at the canvas (the atlas: look::MakeAtlas of it).
 struct FacesPass {
   // Pass 1's raw output (the user's settings), or a later pass's: read by RecordFacesPyramid (NON_PIXEL_SHADER_RESOURCE), rewritten in place by
@@ -201,23 +202,23 @@ struct FacesPass {
   ID3D12Resource* reference = nullptr;
   ID3D12Resource* mask = nullptr;   // a later pass: pass 1's face mask (the twin's image), NON_PIXEL_SHADER_RESOURCE; null: pass 1
   ID3D12Resource* atlas = nullptr;  // UNORDERED_ACCESS for RecordFacesPyramid, NON_PIXEL_SHADER_RESOURCE for RecordFacesCombine
-  // Fix round 4: the despiked difference: UNORDERED_ACCESS for RecordFacesDespike, NON_PIXEL_SHADER_RESOURCE for RecordFacesCombine (with a
+  // The despiked difference: UNORDERED_ACCESS for RecordFacesDespike, NON_PIXEL_SHADER_RESOURCE for RecordFacesCombine (with a
   // parameters.speck_radius).
   ID3D12Resource* detail = nullptr;
-  // Round 5: the fill's atlas (pass 1 with parameters.fill): UNORDERED_ACCESS for RecordFacesPyramid, NON_PIXEL_SHADER_RESOURCE for RecordFacesCombine.
+  // The fill's atlas (pass 1 with parameters.fill): UNORDERED_ACCESS for RecordFacesPyramid, NON_PIXEL_SHADER_RESOURCE for RecordFacesCombine.
   ID3D12Resource* fill = nullptr;
   look::Atlas layout;
   look::FacesParameters parameters;
   bool swapped = false;  // a later pass from B into A: its own descriptor tables (RecordResolve's rule)
 };
 
-// The D3D12 side of spec §7: one root signature, the encode and compute-decode pipelines, one
+// Direct3D 12 colour recording: one root signature, the encode and compute-decode pipelines, one
 // decode graphics pipeline per render-target format (back buffers have no UAV), and a
 // shader-visible descriptor ring. The caller uses one slot per recording and reuses it only after
 // the GPU has finished that recording. Never blocks. Not thread-safe.
 class ColorPipeline {
  public:
-  // Fix round 2, Important 1: sized for Timeline's own AGED_SUBMISSION_TIME (250 ms) at up to 240 fps
+  // Sized for Timeline's own AGED_SUBMISSION_TIME (250 ms) at up to 240 fps
   // on a submit-only thread (a common engine shape, e.g. Unreal Engine 5's D3D12 RHI), so the ring
   // never starves NR into "descriptors busy" there: 128 slots of 21 tables of 7 descriptors (Keep faces' ten included), about 600 KB.
   static constexpr uint32_t RING_SLOTS = 128u;
@@ -236,7 +237,7 @@ class ColorPipeline {
   // False (logged, nothing recorded) when slot is out of range. Also used for the change field.
   bool RecordChange(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangePass& pass);
   bool RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const MotionPass& pass);
-  // Plan 5. Each: false (logged, nothing recorded) when slot is out of range.
+  // Each: false (logged, nothing recorded) when slot is out of range.
   bool RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, const MeterPass& pass);
   // One dispatch per level, with UAV barriers on both atlases between them.
   bool RecordPyramid(ID3D12GraphicsCommandList* list, uint32_t slot, const PyramidPass& pass);
@@ -250,16 +251,16 @@ class ColorPipeline {
   // of range. They need typed UAV loads (SupportsUavLoads).
   bool RecordFacesPyramid(ID3D12GraphicsCommandList* list, uint32_t slot, const FacesPass& pass);
   bool RecordFacesCombine(ID3D12GraphicsCommandList* list, uint32_t slot, const FacesPass& pass);
-  // Fix round 4: the pass's difference (`changed` and `reference` both NON_PIXEL_SHADER_RESOURCE) despiked into `detail` (UNORDERED_ACCESS).
+  // The pass's difference (`changed` and `reference` both NON_PIXEL_SHADER_RESOURCE) despiked into `detail` (UNORDERED_ACCESS).
   bool RecordFacesDespike(ID3D12GraphicsCommandList* list, uint32_t slot, const FacesPass& pass);
   bool RecordFacesShow(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D12Resource* target, ID3D12Resource* mask, nr::Size size);
-  // Plan 2 final review M5: whether RecordDecode can write `target_view_format`.
+  // Whether RecordDecode can write `target_view_format`.
   [[nodiscard]] bool HasDecodePipeline(DXGI_FORMAT target_view_format) const;
   // Whether the device can store to `format` through a typed UAV (cached per format).
   [[nodiscard]] bool SupportsTypedUavStore(DXGI_FORMAT format) const;
-  // Key decision 12: typed UAV loads of RGBA16F, R16F and RGBA32F, which the Plan 5 passes need.
+  // Typed UAV loads of RGBA16F, R16F and RGBA32F, which the look passes need.
   [[nodiscard]] bool SupportsUavLoads() const { return uav_loads_; }
-  // Keep faces fix round 1 (C3): its pipeline was built (Initialize does not fail without it).
+  // Whether the Keep faces pipeline was built; Initialize can succeed without it.
   [[nodiscard]] bool FacesReady() const { return faces_pipeline_ != nullptr; }
 
  private:
@@ -277,7 +278,7 @@ class ColorPipeline {
   void WriteTable(uint32_t base, std::initializer_list<View> shader_resources, std::initializer_list<View> unordered);
   [[nodiscard]] bool SlotInRange(uint32_t slot, const char* pass) const;
   // `constants` into the root constants, then `pipeline` over width x height in 8x8 groups.
-  void DispatchCompute(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pipeline, std::span<const uint32_t> constants,
+  void DispatchCompute(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pipeline, std::span<const std::byte> constants,
                        uint32_t base, uint32_t width, uint32_t height);
 
   Microsoft::WRL::ComPtr<ID3D12Device> device_;
@@ -285,7 +286,7 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12PipelineState> encode_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> compute_decode_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_pipeline_;
-  // Plan 5: the look, meter and resolve pipelines.
+  // The look, meter and resolve pipelines.
   Microsoft::WRL::ComPtr<ID3D12PipelineState> meter_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> pyramid_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> stabilize_pipeline_;
@@ -298,7 +299,7 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> shader_heap_;  // shader-visible CBV/SRV/UAV ring
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> target_heap_;  // one CPU RTV, rewritten per decode
   uint32_t descriptor_size_ = 0u;
-  bool uav_loads_ = false;  // key decision 12: TypedUAVLoadAdditionalFormats
+  bool uav_loads_ = false;  // TypedUAVLoadAdditionalFormats
 };
 
 }  // namespace uplift::color

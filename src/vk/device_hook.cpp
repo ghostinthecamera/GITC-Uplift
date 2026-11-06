@@ -24,6 +24,7 @@
 #include "vk/device_adjustment.hpp"
 #include "vk/loader.hpp"
 #include "vk/marker_ledger.hpp"
+#include "vk/ngx_device_extensions.hpp"
 #if defined(_WIN64)
 #include "nr/snippet.hpp"
 #endif
@@ -38,30 +39,30 @@ struct Entry {
 
 struct Config {
   bool adjust = true;
-  bool adjust_ngx = true;  // Plan 19 T1b: AdjustVulkanDevicesForNgx, and not turned off by the marker's first tier (64-bit only)
-  bool native_nr_chosen = true;  // T5: VulkanNr is Native as read at AddonInit; NGX's additions only then (64-bit only)
-  bool native_nr_latched = false;  // T6 fix round (M-2): VulkanNativeNr is 0 as read at AddonInit: no NGX additions either
+  bool adjust_ngx = true;  // AdjustVulkanDevicesForNgx, and not turned off by the marker's first tier (64-bit only)
+  bool native_nr_chosen = true;  // VulkanNr is Native as read at AddonInit; NGX's additions only then (64-bit only)
+  bool native_nr_latched = false;  // VulkanNativeNr is 0 as read at AddonInit: no NGX additions either
   bool reshade_adds_memory_win32 = false;
   bool turned_off_by_marker = false;
   bool ngx_turned_off_by_marker = false;
   std::filesystem::path pending_marker;
 };
 
-// Plan 19 T1b: the pending marker's two texts. One that names NGX's additions is the first tier: the next start drops only those.
+// The pending marker's two texts. One that names NGX's additions is the first tier: the next start drops only those.
 constexpr std::string_view MARKER_TEXT = "a Vulkan device was adjusted; waiting for its first frame";
 constexpr std::string_view MARKER_NGX_TEXT = "a Vulkan device was adjusted with NGX's additions; waiting for its first frame";
 
 struct State {
-  std::shared_mutex mutex;  // its own: never the add-on's (Plan 10 C-1)
+  std::shared_mutex mutex;  // its own: never the add-on's
   Config config;
   std::unordered_map<VkDevice, Entry> devices;
-  // The pending marker (design §2.3) is one file for every device of the process: who it waits on is this ledger's business (batch 2 review I-3).
+  // The pending marker is one file for every device of the process: who it waits on is this ledger's business.
   MarkerLedger ledger;
-  // Plan 13 (64-bit): each physical device's instance, from the enumerate detours (the latest call wins), and why those detours or the
+  // 64-bit: each physical device's instance, from the enumerate detours (the latest call wins), and why those detours or the
   // vkDestroyDevice one are not in (empty once all three are).
   std::unordered_map<VkPhysicalDevice, VkInstance> instances;
   std::string native_hooks_error = "the Vulkan device hook is not installed";
-  uint32_t instance_api_version = 0u;  // Plan 19: the latest create_device(vulkan)'s, as ReShade codes it; 0 = none seen
+  uint32_t instance_api_version = 0u;  // the latest create_device(vulkan)'s, as ReShade codes it; 0 = none seen
 };
 
 // Never freed: the detour can run until the process ends.
@@ -77,18 +78,14 @@ std::atomic<PFN_vkEnumeratePhysicalDevices> g_enumerate_original{nullptr};
 std::atomic<PFN_vkEnumeratePhysicalDeviceGroups> g_enumerate_groups_original{nullptr};
 std::atomic<PFN_vkDestroyDevice> g_destroy_original{nullptr};
 std::atomic<void (*)(VkDevice)> g_destroy_callback{nullptr};
-// Plan 13: NGX's four device extensions (the snippet's own requirement list, design §1.1); native NR needs them on the device (listed by the game, or
-// added by Uplift, Plan 19). The runtime also implements EXT buffer addresses; accept that extension in place of KHR.
-constexpr const char* NGX_EXTENSIONS[] = {"VK_NVX_binary_import", "VK_NVX_image_view_handle", "VK_KHR_buffer_device_address",
-                                          "VK_KHR_push_descriptor"};
 // What NGX needs that a request lacks, named ("" for nothing): its four extensions on `names` (VK_KHR_push_descriptor also when ReShade appends it),
 // bufferDeviceAddress, and timeline semaphores.
 std::string NgxLacks(std::span<const char* const> names, bool push_from_reshade, bool buffer_device_address, bool timeline) {
   std::string lacks;
   const bool ext_address = std::ranges::any_of(names, [](std::string_view name) { return name == VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME; });
-  for (const char* extension : NGX_EXTENSIONS) {
+  for (const char* extension : NGX_DEVICE_EXTENSIONS) {
     const bool listed = std::ranges::any_of(names, [extension](const char* name) { return std::string_view(name) == extension; })
-                        || (push_from_reshade && std::string_view(extension) == "VK_KHR_push_descriptor")
+                        || (push_from_reshade && std::string_view(extension) == VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)
                         || (ext_address && std::string_view(extension) == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
     if (!listed) {
       lacks += std::format("{}{}", (lacks.empty() ? "" : ", "), extension);
@@ -103,7 +100,7 @@ std::string NgxLacks(std::span<const char* const> names, bool push_from_reshade,
   return lacks;
 }
 
-// Plan 19 (a PS5 emulator crashed inside vkCreateDevice with NGX's additions): a request with Uplift's additions is logged before it goes to the
+// A crash inside vkCreateDevice can precede its result: a request with Uplift's additions is logged before it goes to the
 // driver and again when the driver returns. Log lines are flushed one by one, so a crash in the driver leaves the first without the second. The
 // feature chain is the final pNext chain's sTypes, by number; `api_version` is the instance's, as ReShade codes it (0: none seen). Never throw.
 void LogBeforeCreate(const VkDeviceCreateInfo& request, std::string_view additions, uint32_t api_version) noexcept {
@@ -129,7 +126,7 @@ void LogAfterCreate(VkResult result) noexcept {
 }
 #endif
 
-constexpr uint32_t RESHADE_VULKAN_1_4 = (1u << 12u) | (4u << 8u);  // Plan 19: ReShade's create_device coding of Vulkan 1.4
+constexpr uint32_t RESHADE_VULKAN_1_4 = (1u << 12u) | (4u << 8u);  // ReShade's create_device coding of Vulkan 1.4
 
 // The marker's path for NoteProcessExit, which cannot take the mutex (ExitProcess may have ended a thread that held it): a plain buffer, filled
 // by Configure before any device exists, whether the marker is on disk, and how many adjusted creations are between the marker's write and the
@@ -145,7 +142,7 @@ void DeleteMarker(const std::filesystem::path& marker) {
   g_marker_on_disk.store(false, std::memory_order_release);
 }
 
-// Plan 19: as ReShade picks its primary graphics queue's family (vulkan_hooks_device.cpp:138-152): the first family in the request with a queue
+// As ReShade picks its primary graphics queue's family (vulkan_hooks_device.cpp:138-152): the first family in the request with a queue
 // that supports graphics. UINT32_MAX when there is none or the loader cannot tell.
 uint32_t GraphicsFamily(VkPhysicalDevice physical, const VkDeviceCreateInfo& info) {
   const Loader* const loader = Loader::Get();
@@ -163,8 +160,8 @@ uint32_t GraphicsFamily(VkPhysicalDevice physical, const VkDeviceCreateInfo& inf
   return UINT32_MAX;
 }
 
-// Vulkan design §2.2. Runs on the game's thread inside its vkCreateDevice: it never throws, holds no lock across the original, and falls back to
-// the game's own request when the driver refuses the additions (R49).
+// Runs on the game's thread inside its vkCreateDevice: it never throws, holds no lock across the original, and falls back to
+// the game's own request when the driver refuses the additions.
 VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDeviceCreateInfo* info, const VkAllocationCallbacks* allocator,
                                        VkDevice* device) {
   const PFN_vkCreateDevice original = g_original.load(std::memory_order_acquire);
@@ -178,9 +175,9 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
   };
   VkDeviceCreateInfo adjusted = *info;  // the game's memory is never written
 #if defined(_WIN64)
-  VkPhysicalDeviceFeatures features = {};  // Plan 13: a copy of the game's features with shaderStorageImageExtendedFormats on, when added
-  // Plan 19 (native NR at Present): Uplift's own bufferDeviceAddress struct, and the request without NGX's additions, which a refusal tries first
-  // (R49), with what the device has then. `ngx_added`: Uplift added something for NGX. The lines are logged once the original returned.
+  VkPhysicalDeviceFeatures features = {};  // A copy of the game's features with shaderStorageImageExtendedFormats on, when added
+  // Native NR at Present uses an added bufferDeviceAddress struct. A refused request first retries without NGX additions, using the reduced device facts.
+  // ngx_added records whether Uplift added anything for NGX. Result lines are logged after the original call returns.
   VkPhysicalDeviceBufferDeviceAddressFeatures address = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
       .bufferDeviceAddress = VK_TRUE,
@@ -203,7 +200,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
   std::string added_text;
   MarkerLedger::Reservation reservation;  // this creation's share of the pending marker, taken before the original runs
   bool failed = false;                    // the adjustment threw: the game's own request goes through
-  // Batch 3 review, minor 6: Uplift turned shaderStorageImageExtendedFormats on (Plan 13). It changes the request, so a refusal retries without it, but
+  // Uplift turned shaderStorageImageExtendedFormats on. It changes the request, so a refusal retries without it, but
   // it is not `record.adjusted`: a feature bit the device already supports never counts toward the pending marker or its presents.
   bool features_added = false;
   try {
@@ -227,10 +224,10 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     }
     bool vulkan12_features = false;
     bool timeline_features = false;
-    // Plan 13: what native NR needs of the game's own request (bufferDeviceAddress, and the extended storage formats in either feature form).
+    // What native NR needs of the game's own request (bufferDeviceAddress, and the extended storage formats in either feature form).
     bool buffer_device_address = false;
     bool features2 = false;
-    bool buffer_device_address_features = false;  // Plan 19: the game passes a bufferDeviceAddress struct of its own (the core one or the EXT one)
+    bool buffer_device_address_features = false;  // the game passes a bufferDeviceAddress struct of its own (the core one or the EXT one)
     bool storage_extended_by_game = (info->pEnabledFeatures != nullptr && info->pEnabledFeatures->shaderStorageImageExtendedFormats == VK_TRUE);
     for (const auto* link = static_cast<const VkBaseInStructure*>(info->pNext); link != nullptr; link = link->pNext) {
       vulkan12_features = vulkan12_features || (link->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
@@ -257,8 +254,8 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
         default: break;
       }
     }
-    // Plan 19 (64-bit only: native NR): NGX's additions whenever the device is adjusted, unless AdjustVulkanDevicesForNgx is 0 (T1b: the marker's
-    // first tier sets it) or VulkanNr was not Native at AddonInit (T5: the other routes never need them, and a PS5 emulator crashed inside vkCreateDevice
+    // Native NR in the 64-bit add-on: NGX's additions whenever the device is adjusted, unless AdjustVulkanDevicesForNgx is 0 (the marker's
+    // first tier sets it) or VulkanNr was not Native at AddonInit (the other routes never need them, and a PS5 emulator crashed inside vkCreateDevice
     // with them). Whether the device supports bufferDeviceAddress, asked only when Uplift may chain the feature, and whether ReShade appends
     // VK_KHR_push_descriptor itself (an instance below 1.4; it does so without looking at the list).
 #if defined(_WIN64)
@@ -295,7 +292,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     names.assign(info->ppEnabledExtensionNames, info->ppEnabledExtensionNames + info->enabledExtensionCount);
     names.insert(names.end(), plan.added.begin(), plan.added.end());
 #if defined(_WIN64)
-    const size_t names_without_ngx = names.size();  // Plan 19: the request without NGX's additions lists this prefix
+    const size_t names_without_ngx = names.size();  // the request without NGX's additions lists this prefix
     names.insert(names.end(), plan.ngx_added.begin(), plan.ngx_added.end());
 #endif
     for (const char* name : plan.added) {
@@ -334,10 +331,10 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     };
 #if defined(_WIN64)
     const bool adjusted_without_ngx = record.adjusted;
-    record.adjusted = (adjusted_without_ngx || ngx_added);  // Plan 19: NGX's additions count toward the pending marker too
+    record.adjusted = (adjusted_without_ngx || ngx_added);  // NGX's additions count toward the pending marker too
 #endif
     if (!(plan.semaphore_win32 && plan.timeline)) {
-      const char* const missing = (!plan.semaphore_win32 ? "VK_KHR_external_semaphore_win32" : "timeline semaphores");
+      const char* const missing = (!plan.semaphore_win32 ? VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME : "timeline semaphores");
       const char* cause = "this driver does not offer it";
       if (!config.adjust) {
         cause = (config.turned_off_by_marker ? "Uplift turned its adjustment off: the last start with it did not reach its first frame (set AdjustVulkanDevices=1 under [Uplift] to try again)"
@@ -346,24 +343,22 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       record.not_adjusted = std::format("the game's device was created without {} because {}", missing, cause);
     }
 #if defined(_WIN64)
-    // Plan 13 (design §3.6): native NR's facts, from the request as it goes to the driver: NGX's extensions and bufferDeviceAddress (the game's own;
-    // only a DLSS game, which needs the same, has a DLSS placement; Plan 19: with Uplift's NGX additions, and VK_KHR_push_descriptor when ReShade
-    // appends it), and timeline semaphores.
+    // NGX readiness follows the request sent to the driver: extension names, buffer addresses and timeline semaphores, including Uplift/ReShade additions.
     const std::span<const char* const> game_names(info->ppEnabledExtensionNames, info->enabledExtensionCount);
     const bool address_enabled = (buffer_device_address || plan.chain_buffer_device_address || plan.chain_ext_buffer_device_address);
     std::string ngx_missing = NgxLacks(names, reshade_push, address_enabled, record.timeline);
     record.ngx_ready = ngx_missing.empty();
     record.ext_buffer_device_address = (game_ext_address && address_enabled);
     if (!record.ngx_ready && config.adjust && !config.adjust_ngx) {
-      // T1b: why Uplift added none of it (the native route's reason names it).
+      // Why Uplift added none of it (the native route's reason names it).
       ngx_missing += (config.ngx_turned_off_by_marker ? "; Uplift turned NGX's device additions off: the last start with them did not reach its first frame "
                                                         "(set AdjustVulkanDevicesForNgx=1 under [Uplift] to try again)"
                                                       : "; AdjustVulkanDevicesForNgx is 0 in ReShade.ini");
     } else if (!record.ngx_ready && config.adjust && !config.native_nr_chosen) {
-      // T5: the panel greys Native with this, and the choice returns after a restart with Native.
+      // The panel greys Native with this, and the choice returns after a restart with Native.
       ngx_missing += "; Vulkan NR at Present was not Native when the game started, so Uplift added none of them: Native needs a game restart";
     } else if (!record.ngx_ready && config.adjust && config.native_nr_latched) {
-      // T6 fix round (M-2): Uplift's own latch, which a restart alone does not lift.
+      // Uplift's own latch, which a restart alone does not lift.
       ngx_missing += "; native Vulkan NR was off when the game started (VulkanNativeNr = 0), so Uplift added none of them: press Clear latch, or set "
                      "VulkanNativeNr=1 under [Uplift], and restart the game";
     }
@@ -374,7 +369,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       ngx_line = "Vulkan: the game's device request has everything NGX needs";
     } else {
       std::string offered_text;
-      for (const char* extension : NGX_EXTENSIONS) {
+      for (const char* extension : NGX_DEVICE_EXTENSIONS) {
         const bool listed = std::ranges::any_of(game_names, [extension](const char* name) { return std::string_view(name) == extension; });
         if (!listed && std::ranges::find(offered, std::string_view(extension)) != offered.end()) {
           offered_text += std::format("{}{}", (offered_text.empty() ? "" : ", "), extension);
@@ -388,7 +383,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       const auto found = Shared().instances.find(physical);
       record.instance = (found == Shared().instances.end() ? VK_NULL_HANDLE : found->second);
     }
-    // Batch 2 review, minor 2: every native encode shader writes an RG16F storage image, an extended storage format. On a device that can run
+    // Every native encode shader writes an RG16F storage image, an extended storage format. On a device that can run
     // native NR the feature is turned on here, as the timeline feature is, unless the game passes VkPhysicalDeviceFeatures2 (whose node Uplift
     // cannot copy without rebuilding the game's chain): Vulkan's own SPIR-V rules make StorageImageExtendedFormats a 1.0 capability, so a
     // device whose physical device supports the formats still runs the shaders then.
@@ -407,7 +402,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       added_text += (added_text.empty() ? "" : ", ");
       added_text += "shaderStorageImageExtendedFormats";
     }
-    // Plan 19: the request without NGX's additions (R49's first retry), and what the device has then. The extended storage formats stay in it only
+    // The request without NGX's additions (the first retry), and what the device has then. The extended storage formats stay in it only
     // when that request alone is NGX-ready (they were added for native NR).
     if (ngx_added) {
       std::string lacks = NgxLacks(std::span<const char* const>(names.data(), names_without_ngx), reshade_push, buffer_device_address, record.timeline);
@@ -455,14 +450,14 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       }
     }
 #endif
-    // Final review, minor 1: only a device that can present counts toward the marker (ReShade itself skips a device without VK_KHR_swapchain).
+    // Only a device that can present counts toward the marker (ReShade itself skips a device without VK_KHR_swapchain).
     // A compute or UI device that a D3D game keeps alive, or a game that later crashes for another reason, must not turn the adjustment off.
     if (record.adjusted && plan.presents && !config.pending_marker.empty()) {
       // Before the original runs, so a crash inside it leaves the marker. Once an adjusted device has presented twice nothing is written: the
-      // adjustment is proven for this game, and a later device that never presents must not leave a marker behind (I-3).
+      // adjustment is proven for this game, and a later device that never presents must not leave a marker behind.
       const std::unique_lock lock(Shared().mutex);
 #if defined(_WIN64)
-      reservation = Shared().ledger.Reserve(ngx_added);  // T1b: the file says so once a device with NGX's additions waits on it
+      reservation = Shared().ledger.Reserve(ngx_added);  // the file says so once a device with NGX's additions waits on it
 #else
       reservation = Shared().ledger.Reserve();
 #endif
@@ -475,8 +470,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       }
     }
   } catch (...) {
-    // Plain flags only: nothing in a handler, or before the bookkeeping below, may allocate, so nothing escapes into the game's vkCreateDevice
-    // (batch 2 review, minor 8).
+    // Plain flags only: nothing in a handler, or before the bookkeeping below, may allocate, so nothing escapes into the game's vkCreateDevice.
     adjusted = *info;  // never fail the game's device because of Uplift
     failed = true;
     features_added = false;
@@ -498,7 +492,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
   bool adjusted_device = record.adjusted;
   bool refused = false;
 #if defined(_WIN64)
-  // Plan 19: a request with Uplift's additions goes to the driver between LogBeforeCreate's line and LogAfterCreate's (the game's own goes without).
+  // A request with Uplift's additions goes to the driver between LogBeforeCreate's line and LogAfterCreate's (the game's own goes without).
   const auto create = [&](const VkDeviceCreateInfo& request, const std::string& additions) {
     if (additions.empty()) return original(physical, &request, allocator, device);
     LogBeforeCreate(request, additions, api_version);
@@ -507,7 +501,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     return created;
   };
   VkResult result = create(adjusted, added_text);
-  // Plan 19 (R49): a refusal of the request with NGX's additions tries it without them first, then (below) the game's own request.
+  // A refusal of the request with NGX's additions tries it without them first, then (below) the game's own request.
   VkResult ngx_refusal = VK_SUCCESS;
   if (result < VK_SUCCESS && ngx_added) {
     ngx_refusal = result;
@@ -523,7 +517,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
   VkResult result = original(physical, &adjusted, allocator, device);
 #endif
   if (result < VK_SUCCESS && (adjusted_device || features_added)) {
-    result = original(physical, info, allocator, device);  // R49: the driver refused the additions; the game's own request
+    result = original(physical, info, allocator, device);  // the driver refused the additions; the game's own request
     adjusted_device = false;
     refused = true;
     record.adjusted = false;
@@ -531,7 +525,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     record.semaphore_win32 = false;
     record.timeline = false;
     record.ext_buffer_device_address = false;
-    record.ngx_ready = false;  // Plan 13: without the timeline feature it may have added, native NR is not known to work here
+    record.ngx_ready = false;  // without the timeline feature it may have added, native NR is not known to work here
     record.ngx_missing = "Uplift's device adjustment (the driver refused it)";
     record.storage_extended_enabled = false;
   }
@@ -551,7 +545,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
         const auto& queue_info = info->pQueueCreateInfos[i];
         record.queue_families.push_back({queue_info.queueFamilyIndex, queue_info.queueCount, queue_info.flags});
       }
-      record.graphics_family = GraphicsFamily(physical, *info);  // Plan 19: the game's queues, which no request of Uplift's changes
+      record.graphics_family = GraphicsFamily(physical, *info);  // the game's queues, which no request of Uplift's changes
     }
     {
       const std::unique_lock lock(Shared().mutex);
@@ -602,7 +596,7 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
 }
 
 #if defined(_WIN64)
-// Plan 13 (design §3.6): each physical device the game is handed, with its instance; the latest enumeration wins, so a probe instance's
+// Each physical device the game is handed, with its instance; the latest enumeration wins, so a probe instance's
 // stale entry is overwritten when the real instance enumerates. Never throws.
 void RecordInstance(VkInstance instance, std::span<const VkPhysicalDevice> physicals) noexcept {
   try {
@@ -611,11 +605,11 @@ void RecordInstance(VkInstance instance, std::span<const VkPhysicalDevice> physi
       Shared().instances.insert_or_assign(physical, instance);
     }
   } catch (...) {
-    // No-op: a device made from a physical device missing here reads "Uplift did not see this game's Vulkan instance" (R84).
+    // No-op: a device made from a physical device missing here reads "Uplift did not see this game's Vulkan instance".
   }
 }
 
-// The loader's exports, which vkGetInstanceProcAddr also returns (design §1.3): no lock across the original, nothing thrown.
+// The loader's exports, which vkGetInstanceProcAddr also returns: no lock across the original, nothing thrown.
 VkResult VKAPI_CALL EnumeratePhysicalDevicesDetour(VkInstance instance, uint32_t* count, VkPhysicalDevice* physicals) {
   const PFN_vkEnumeratePhysicalDevices original = g_enumerate_original.load(std::memory_order_acquire);
   if (original == nullptr) return VK_ERROR_INITIALIZATION_FAILED;
@@ -638,7 +632,7 @@ VkResult VKAPI_CALL EnumeratePhysicalDeviceGroupsDetour(VkInstance instance, uin
   return result;
 }
 
-// Design §3.6: the add-on's teardown runs first, while ReShade's layer still dispatches the device (its own vkDestroyDevice drops the device
+// The add-on's teardown runs first, while ReShade's layer still dispatches the device (its own vkDestroyDevice drops the device
 // from its map before raising destroy_device). The game has idled the device, as vkDestroyDevice requires. No hook lock is held here.
 void VKAPI_CALL DestroyDeviceDetour(VkDevice device, const VkAllocationCallbacks* allocator) {
   const PFN_vkDestroyDevice original = g_destroy_original.load(std::memory_order_acquire);
@@ -649,7 +643,7 @@ void VKAPI_CALL DestroyDeviceDetour(VkDevice device, const VkAllocationCallbacks
       }
       nr::Snippet::ForgetVulkanDevice(device);  // a new VkDevice at this address is a new device for the NGX core
     } catch (...) {
-      // No-op: the game's device goes whatever Uplift's teardown did; ReShade's destroy_device abandons what is left (R83).
+      // No-op: the game's device goes whatever Uplift's teardown did; ReShade's destroy_device abandons what is left.
     }
   }
   if (original != nullptr) {
@@ -667,7 +661,7 @@ std::optional<std::string> DeviceHook::Install() {
   if (g_installed.load(std::memory_order_acquire)) return std::nullopt;
   const Loader* const loader = Loader::Get();
   if (loader == nullptr) return "vulkan-1.dll is not loaded";
-  // Final review I-1: the loader is pinned before anything is patched. DXVK loads vulkan-1.dll with LoadLibrary for each of its instances and
+  // The loader is pinned before anything is patched. DXVK loads vulkan-1.dll with LoadLibrary for each of its instances and
   // frees it with the last one (a probe instance, an adapter check, a game that recreates its IDirect3D9), and the Khronos loader never pins
   // itself: the image, the detour in it and Loader's cached export pointers would go, and a later mapping of the DLL at another base would leave
   // those pointers dangling. Pinned, both last as long as the process.
@@ -677,7 +671,7 @@ std::optional<std::string> DeviceHook::Install() {
       == FALSE) {
     return std::format("could not pin vulkan-1.dll (error {})", GetLastError());
   }
-  // Key decision b: the detour lives in this module, and ReShade unloads its add-ons when the last instance or device goes.
+  // The detour lives in this module, and ReShade unloads its add-ons when the last instance or device goes.
   HMODULE self = nullptr;
   if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&CreateDeviceDetour), &self)
       == FALSE) {
@@ -698,7 +692,7 @@ std::optional<std::string> DeviceHook::Install() {
   }
   hooks::HoldMinHook();  // the hook and the pinned module live for the process: nothing may MH_Uninitialize now
 #if defined(_WIN64)
-  // Plan 13 (design §3.6): the instance for native NR's VULKAN_Init_Ext2, and its teardown before ReShade's own vkDestroyDevice. A failure
+  // The instance for native NR's VULKAN_Init_Ext2, and its teardown before ReShade's own vkDestroyDevice. A failure
   // leaves the Present path as it is and native NR unavailable, with the reason.
   std::string native_error;
   const auto hook_export = [&native_error](void* target, void* detour, const char* name, const auto& publish) {
@@ -795,7 +789,7 @@ bool DeviceHook::NotePresent(VkDevice device) {
   if (++entry.presents < 2u) return false;
   // ReShade raises `present` before it calls the game's Present, so the second event is the proof that the first real one returned. The
   // adjustment is then proven for this game: every device still counting is released at once and the marker goes, so no other device (one that
-  // never presents and is still alive when the game exits, say) can leave it behind, and none created later writes it (batch 2 review I-3).
+  // never presents and is still alive when the game exits, say) can leave it behind, and none created later writes it.
   if (state.ledger.Proven()) {
     DeleteMarker(state.config.pending_marker);
   }
@@ -808,7 +802,7 @@ void DeviceHook::NoteDestroyed(VkDevice device) {
   const auto found = state.devices.find(device);
   if (found == state.devices.end()) return;
   // Only a device that still counts takes its share of the marker away, and the marker goes with the last one: one device's end never deletes the
-  // marker another live, unproven adjusted device is waiting on (I-3).
+  // marker another live, unproven adjusted device is waiting on.
   if (state.ledger.Destroyed(device)) {
     DeleteMarker(state.config.pending_marker);
   }
@@ -833,7 +827,7 @@ DeviceHook::MarkerVerdict DeviceHook::CheckMarker(const std::filesystem::path& p
   static std::atomic<bool> checked{false};
   if (checked.exchange(true)) return MarkerVerdict::NONE;
   if (!addon::LatchMarkerExists(pending_marker)) return MarkerVerdict::NONE;
-  // T1b: the first tier names NGX's additions (an unreadable file reads as the second tier, today's).
+  // The first tier names NGX's additions (an unreadable file reads as the second tier, today's).
   std::string text;
   if (std::ifstream file(pending_marker, std::ios::binary); file) {
     text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());

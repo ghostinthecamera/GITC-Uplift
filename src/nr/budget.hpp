@@ -13,14 +13,14 @@ struct MemoryInfo {
   uint64_t usage = 0u;   // DXGI local-segment CurrentUsage (whole process)
 };
 
-// 2026-10-09 (owner): the `VramCheck` setting, stored as its index. A Budget input, applied at once.
+// The `VramCheck` setting, stored as its index. A Budget input, applied at once.
 enum class VramCheck : uint32_t {
   CAREFUL = 0u,  // NR stays inside the game's budget less the margin, and yields when the game needs the memory back
   RELAXED = 1u,  // the same rules against a budget BudgetConfig::relaxed_allowance_bytes larger: the game is trusted to shrink its cache
   OFF = 2u,      // never refuses, yields or holds a resume for video memory, like other DLSS-NR add-ons; allocation failures still fail
 };
 
-// Defaults measured on the RTX 4090 with DLSS-NR 310.8 (spikes E6/E10).
+// Defaults measured on the RTX 4090 with DLSS-NR 310.8 (tools/nrspike's e6 and e10).
 struct BudgetConfig {
   uint64_t feature_fixed_bytes = 163ull << 20u;       // per-feature intercept
   uint64_t bytes_per_megapixel = 101ull << 20u;       // 93.4 MiB/MP activations + 8 B/px capacity buffer
@@ -28,7 +28,7 @@ struct BudgetConfig {
   uint64_t max_bytes_per_megapixel = 240ull << 20u;
   uint64_t first_use_bytes = 165ull << 20u;           // one-time per device, never returned
   uint64_t stats_overcount_bytes = 147'719'680ull;    // weight heap the stats count per feature
-  uint64_t automatic_margin_bytes = 512ull << 20u;   // `BudgetMarginMB` 0, on every card (owner, 2026-10-09)
+  uint64_t automatic_margin_bytes = 512ull << 20u;   // `BudgetMarginMB` 0, on every card
   uint64_t relaxed_allowance_bytes = 1ull << 30u;    // VramCheck::RELAXED: how much larger the game's budget counts
   uint32_t yield_samples = 2u;
   std::chrono::seconds resume_hold{10};
@@ -52,21 +52,21 @@ class Budget {
 
   [[nodiscard]] uint64_t FeatureBytes(Size size) const;
   [[nodiscard]] uint64_t Margin() const;
-  // Spec §12 `BudgetMarginMB`: a fixed margin instead of the automatic 512 MiB; nullopt restores that.
+  // `BudgetMarginMB`: a fixed margin instead of the automatic 512 MiB; nullopt restores that.
   void SetMarginOverride(std::optional<uint64_t> margin_bytes) { margin_override_ = margin_bytes; }
   // Fit, Sample and ResumeReady read it at their next call: no reload, and a switch back to Careful yields by the usual streak.
   void SetVramCheck(VramCheck check) { vram_check_ = check; }
-  // v2 design §3.21: need = passes × FeatureBytes(work) + `surface_bytes` (every surface the caller
+  // need = passes × FeatureBytes(work) + `surface_bytes` (every surface the caller
   // holds for this chain, each at its own size) + the first-use cost while it is pending.
   // `held_bytes`: allocations that stay part of the plan and are already inside info.usage (live
   // features being kept, the caller's surfaces).
-  // Split chain (design 3.2): `reserve_bytes` stays free for other stage groups' passes not made yet (an earlier stage that has not run): part of the need,
+  // Split chain: `reserve_bytes` stays free for other stage groups' passes not made yet (an earlier stage that has not run): part of the need,
   // never given to these passes.
   [[nodiscard]] FitResult Fit(Size work, uint32_t requested_passes, uint64_t surface_bytes, const MemoryInfo& info,
                               uint64_t held_bytes, bool first_use_pending, uint64_t reserve_bytes = 0u) const;
   // `measured_feature_bytes`: the real (DXGI-equivalent) cost of one new
   // feature, e.g. its stats delta minus StatsOvercountBytes() plus the 8 B/px
-  // capacity buffer that create-time stats omit (spike E6).
+  // capacity buffer that create-time stats omit (tools/nrspike's e6).
   void Calibrate(Size size, uint64_t measured_feature_bytes);
   void ResetCalibration() { bytes_per_megapixel_ = config_.bytes_per_megapixel; }
   [[nodiscard]] uint64_t StatsOvercountBytes() const { return config_.stats_overcount_bytes; }

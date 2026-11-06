@@ -70,7 +70,7 @@ MemoryInfo RealHost::QueryMemory() {
     }
     return {UINT64_MAX, 0u};
   }
-  // Plan 9 (design §2.10): two processes share the adapter; NR fits, yields and resumes only while both have room.
+  // Two processes share the adapter; NR fits, yields and resumes only while both have room.
   if (game_memory_) {
     if (const std::optional<MemoryInfo> game = game_memory_(); game && game->budget != 0u) {
       const uint64_t helper_room = (info.Budget > info.CurrentUsage ? info.Budget - info.CurrentUsage : 0u);

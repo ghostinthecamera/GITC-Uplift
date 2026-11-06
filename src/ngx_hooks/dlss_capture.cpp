@@ -10,7 +10,7 @@ namespace uplift::ngx_hooks {
 
 namespace {
 
-// The capture of every API: the scalars and regions are read the same; `read` fetches the five resources, as the API's block holds them (Plan 18).
+// The capture of every API: the scalars and regions are read the same; `read` fetches the five resources, as the API's block holds them.
 DlssFrame CaptureWith(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record,
                       ID3D12Resource* (*read)(const NVSDK_NGX_Parameter&, const char*)) {
   const auto one_when_unset = [&parameters](const char* key) {
@@ -57,7 +57,7 @@ DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NG
 }
 
 DlssFrame CaptureD3D11DlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record) {
-  // Plan 18: the ID3D11Resource type first, so a block that also answers a Direct3D 12 read never hands a wrong pointer type back.
+  // The ID3D11Resource type first, so a block that also answers a Direct3D 12 read never hands a wrong pointer type back.
   return CaptureWith(parameters, handle, record,
                      [](const NVSDK_NGX_Parameter& block, const char* key) { return nr::AsResource(ReadD3D11Resource(block, key)); });
 }

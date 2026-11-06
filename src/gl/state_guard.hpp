@@ -4,7 +4,7 @@
 
 namespace uplift::gl {
 
-// Design §3.3 (R64), proven by Plan 12 Task 1's G-STATE: around every copy where one side is the default framebuffer, i.e. only at the present event, where
+// Around every copy where one side is the default framebuffer, i.e. only at the present event, where
 // changed GL state persists as the game's own (ReShade captures it there). ReShade's copy restores the READ and DRAW framebuffer bindings, the scissor test
 // and GL_FRAMEBUFFER_SRGB itself (opengl_impl_command_list.cpp:1649-1696) and leaves FB0's read and draw buffer at GL_BACK; it does not know
 // GL_RASTERIZER_DISCARD, which would swallow the blit.

@@ -5,6 +5,12 @@
 #include <cctype>
 #include <vector>
 
+#include "text/before_fg_messages.hpp"
+#include "text/helper_messages.hpp"
+#include "text/nr_messages.hpp"
+#include "text/timeout_messages.hpp"
+#include "ui/status_text.hpp"
+
 namespace uplift::ui {
 namespace {
 constexpr auto CHINESE = std::to_array<Translation>({
@@ -105,6 +111,48 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Balanced preset", "均衡预设"},
     {"Before\nFramegen", "帧生成前"},
     {"Before FG", "帧生成前"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::WAITING_DLSS_MOTION).line, "Before FG is waiting for the selected DLSS motion source"},
+    // TODO(zh-CN): translate
+    {BEFORE_FG_NO_STREAMLINE_REASON, "Before FG needs frame generation through Streamline, which this game has not loaded"},
+    // TODO(zh-CN): translate
+    {BEFORE_FG_API_REASON, "Before FG supports Streamline on Direct3D 12 and Vulkan"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::PARTIAL_PRESENT).line, "Before FG unavailable: Present1 updates only part of the image"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::HOOKS_UNAVAILABLE).line, "Before FG unavailable: Streamline presentation hooks could not be initialized"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::NO_STREAMLINE_PRESENT).line, "Before FG unavailable: no verified game-facing Streamline Present"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::NO_VK_PRESENT).line, "Before FG unavailable: no verified game-facing Vulkan Present"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::NONBLOCKING_PRESENT).line, "Before FG unavailable: nonblocking Present can retry the same image"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::MASK_UNAVAILABLE).line, "Before FG unavailable: the active ReShade mask cannot be associated with a real frame"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::VK_QUEUE_UNTRACKED).line, "Before FG unavailable: the game's Vulkan queue is untracked"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::BRIDGE_HANDOFF_UNAVAILABLE).line, "Before FG unavailable: the selected bridge has no verified real-frame handoff"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::HELPER_DLSS_MOTION).line, "Before FG: DLSS motion is unavailable on the helper route"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::DX12_RESHADE_PRESENT).line, "Before FG: ReShade on the game-facing DX12 swapchain"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::VK_RESHADE_PRESENT).line, "Before FG: ReShade on the game-facing Vulkan swapchain"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::VK_RELAY_FAILED).line, "Before FG: Vulkan relay submission failed"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::DX12_PRESENT).line, "Before FG: game-facing DX12 Present"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::VK_PRESENT).line, "Before FG: game-facing Vulkan Present"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::WAITING_VK_FRAME).line, "Before FG: waiting for the next real Vulkan frame"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::WAITING_DX12_FRAME).line, "Before FG: waiting for the next real frame"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::WAITING_HELPER_FRAME).line, "Before FG: waiting for the real frame through the Vulkan helper"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::DETAIL).line, "Before FG: {}"},
     {"Before Framegen", "帧生成前"},
     {"Before upscaling", "DLSS前"},
     {"Before upscaling (pre-SR)", "DLSS前"},
@@ -124,6 +172,10 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Budget: running {} of {} passes", "显存不足：当前运行 {}/{} 层"},
     {"Built-in", "内置设置"},
     {"Calls count successful command recordings; see ReShade.log for each feature and network change.", "计数表示成功记录的命令次数；各功能及网络的变更请查看 ReShade.log。"},
+    // TODO(zh-CN): translate
+    {uplift::text::REAL_BACKBUFFER_UNKNOWN_LINE, "Cannot identify the real backbuffer"},
+    // TODO(zh-CN): translate
+    {uplift::text::PRIMARY_VK_SWAPCHAIN_LINE, "Cannot isolate the primary Vulkan swapchain"},
     {"Careful", "保守"},
     {"Careful leaves the game its budget and pauses NR when the game needs the memory back. Relaxed lets NR go about 1 GB past the game's budget. Off never checks, like other DLSS-NR add-ons. Relaxed and Off can stutter in games that really use all their video memory.", "“保守”会为游戏保留其显存预算，并在游戏需要显存时暂停 NR。“宽松”允许 NR 超出游戏预算约 1 GB。“关闭”则不检查，与其他 DLSS-NR 插件相同。如果游戏确实占满显存，“宽松”和“关闭”可能导致卡顿。"},
     {"Chain: {}", "处理链：{}"},
@@ -149,6 +201,10 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Compare", "对比"},
     {"Consistent", "一致"},
     {"Copy nvngx_dlssnr.dll into the GITC-Uplift folder next to {}, or set Runtime path (Advanced).", "请将 nvngx_dlssnr.dll 复制到与 {} 同级的 GITC-Uplift 文件夹，或在“高级”中设置“运行时路径”。"},
+    // TODO(zh-CN): translate
+    {uplift::text::REAL_FRAME_COMMAND_LIST_LINE, "Could not create the real-frame command list"},
+    // TODO(zh-CN): translate
+    {uplift::text::REAL_BACKBUFFER_UNAVAILABLE_LINE, "Could not get the real backbuffer"},
     {"CreateComputePipelineState (decode) failed: {:#010x}", "CreateComputePipelineState（解码）调用失败：{:#010x}"},
     {"CreateComputePipelineState (encode) failed: {:#010x}", "CreateComputePipelineState（编码）调用失败：{:#010x}"},
     {"CreateComputePipelineState (motion) failed: {:#010x}", "CreateComputePipelineState（运动矢量）调用失败：{:#010x}"},
@@ -230,6 +286,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Diagnostic only. N > 0 removes Uplift's own private Direct3D 12 device (ID3D12Device5::RemoveDevice; never the game's device, so Direct3D 12 games are untouched) once NR has run N frames on it, and presses Retry now itself about a second after each stop that may still be retried. 0 (the default) is off.", "仅供诊断。N > 0 时，NR 在 Uplift 自有的独立 Direct3D 12 设备上运行 N 帧后，将移除此设备（ID3D12Device5::RemoveDevice；不会移除游戏设备，因此 Direct3D 12 游戏不受影响），并在每次可能重试的停止后约一秒自动点击“立即重试”。0（默认值）表示关闭。"},
     {"Diagnostic: remove Uplift's private device after this many frames", "诊断：运行指定帧数后移除 Uplift 独立设备"},
     {"Diffuse white (nits)", "漫反射白（尼特）"},
+    // TODO(zh-CN): translate
+    {DIFFUSE_WHITE_SRGB_REASON, "Diffuse white does not apply to an sRGB image (display-referred)"},
     {"Direct3D 10 ({}): NR runs in Uplift's 64-bit helper through a Direct3D 11 relay ({}, {:.1f} MiB)", "Direct3D 10（{} 位）：NR 通过 Direct3D 11 中继设备在 Uplift 的 64 位辅助进程中运行（{}，{:.1f} MiB）"},
     {"Direct3D 10: NR runs on a private Direct3D 12 device through a Direct3D 11 relay (shared {:.1f} MiB)", "Direct3D 10：NR 通过 Direct3D 11 中继在专用 Direct3D 12 设备上运行（共享资源 {:.1f} MiB）"},
     {"Direct3D 10: frames cross through a Direct3D 11 relay device (keyed mutex)", "Direct3D 10：帧通过 Direct3D 11 中继设备传递（键控互斥体）"},
@@ -263,6 +321,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Direct3D 9Ex: the game asks for exclusive fullscreen, which ReShade cannot create as a Direct3D 9Ex device; Uplift runs it as a window of the same size instead (borderless)", "Direct3D 9Ex：游戏请求独占全屏，但 ReShade 无法以 Direct3D 9Ex 设备实现独占全屏；Uplift 将以相同分辨率的无边框窗口运行"},
     {"Display", "显示"},
     {"Display output", "显示输出"},
+    // TODO(zh-CN): translate
+    {SRGB_FIX_REASON, "Does not apply to an sRGB image (display-referred)"},
     {"Each extra pass runs NR again on the previous pass's output, at the full cost of one more pass. Applies when the slider is released.", "每增加一层，NR 就会对上一层的输出再次处理，开销相当于多运行一层 NR。松开滑块后生效。"},
     {"Edge falloff (% of height)", "边缘衰减（画面高度百分比）"},
     {"Edge-aware", "边缘感知升采样"},
@@ -371,7 +431,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Intensity", "强度"},
     {"Inverted", "反向"},
     {"It did not answer a request for {} s", "辅助进程在 {} 秒内未响应请求"},
-    {"It did not start within 10 s", "辅助进程在 10 秒内未能启动"},
+    {uplift::text::START_TIMEOUT_LINE, "辅助进程在 {} 秒内未能启动"},
     {"It exited with code {:#010x}", "辅助进程已退出，退出代码为 {:#010x}"},
     {"Its Direct3D 12 device was removed (ReShade.log has the details)", "辅助进程的 Direct3D 12 设备已移除（详情见 ReShade.log）"},
     {"Keep current mode", "保留当前模式"},
@@ -399,6 +459,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"LaunchPad link: UPLIFT_USE_LAUNCHPAD = {}; ReShade recompiles Uplift.fx, and other add-ons that keep ReShade handles across a recompile may be affected", "LaunchPad 连接：UPLIFT_USE_LAUNCHPAD = {}；ReShade 将重新编译 Uplift.fx，其他跨重新编译仍持有 ReShade 句柄的插件可能受到影响"},
     {"Launchpad and Lumenite have not produced this real frame's vectors yet. Select motion for Before FG here. Ordinary Present keeps your original choice.", "Launchpad 和 Lumenite 尚未生成此真实帧的运动矢量。在此选择帧生成前使用的运动矢量。常规呈现阶段保留原来的选择。"},
     {"Launchpad feeds NR on the presented image only", "LaunchPad 仅能在后处理为 NR 提供运动矢量"},
+    // TODO(zh-CN): translate
+    {"Launchpad runs after frame generation", "Launchpad runs after frame generation"},
     {"Launchpad works on the presented image only", "LaunchPad 仅适用于最终呈现画面"},
     {"Launchpad's UPLIFT_MV", "LaunchPad 的 UPLIFT_MV"},
     {"Launchpad's motion vectors", "LaunchPad 提供的运动矢量"},
@@ -415,6 +477,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Limits and stability", "限幅与稳定"},
     {"Linear BT.709", "线性 BT.709"},
     {"Linear unit (nits)", "线性单位（尼特）"},
+    // TODO(zh-CN): translate
+    {LINEAR_UNIT_REASON, "Linear unit applies to linear BT.709 and scRGB images only"},
     {"LoadLibraryExW failed for NGX core {} ({})", "LoadLibraryExW 加载 NGX 核心失败：{}（错误码 {}）"},
     {"LoadLibraryW failed for {} ({})", "LoadLibraryW 加载失败：{}（错误码 {}）"},
     {"Local contrast NR adds. A change restarts NR's temporal history.", "控制 NR 添加的局部对比度。更改后会重置 NR 的时序历史。"},
@@ -431,6 +495,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Lower it if light glows past a character's outline; raise it if outlines show a dark rim.", "如果光晕越过角色轮廓，请调低；如果轮廓边缘出现暗边，请调高。"},
     {"Lumenite feeds NR on the presented image only", "Lumenite 仅能在后处理为 NR 提供运动矢量"},
     {"Lumenite link: UPLIFT_USE_LUMENITE = {}; ReShade recompiles Uplift.fx, and other add-ons that keep ReShade handles across a recompile may be affected", "Lumenite 连接：UPLIFT_USE_LUMENITE = {}；ReShade 将重新编译 Uplift.fx，其他跨重新编译仍持有 ReShade 句柄的插件可能受到影响"},
+    // TODO(zh-CN): translate
+    {"Lumenite runs after frame generation", "Lumenite runs after frame generation"},
     {"Lumenite works on the presented image only", "Lumenite 仅适用于最终呈现画面"},
     {"Lumenite's vectors are not available on this Direct3D 10 device (no fences)", "此 Direct3D 10 设备不支持 Lumenite 运动矢量（缺少栅栏）"},
     {"Lumenite's vectors are not available on this Direct3D 11 device (no fences)", "此 Direct3D 11 设备不支持 Lumenite 运动矢量（缺少栅栏）"},
@@ -520,7 +586,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"NR after DLSS on Uplift's private Direct3D 12 device", "NR 在 DLSS后通过 Uplift 的专用 Direct3D 12 设备运行"},
     {"NR after DLSS on Vulkan could not start: {}", "Vulkan 下无法在 DLSS后启动 NR：{}"},
     {"NR after DLSS on Vulkan needs {}", "Vulkan 下在 DLSS后运行 NR 需要：{}"},
-    {"NR after DLSS: descriptors busy for over 1 s in a row; the descriptor ring may be too small for this thread's submission timing", "DLSS后的 NR：描述符连续 1 秒处于占用状态；描述符环可能无法满足此线程的提交时序"},
+    {uplift::text::DESCRIPTORS_BUSY_LINE, "DLSS后的 NR：描述符连续 {} 秒处于占用状态；描述符环可能无法满足此线程的提交时序"},
     {"NR at Present does not run natively on this device now", "当前设备无法在后处理原生运行 NR"},
     {"NR before upscaling", "DLSS前的 NR"},
     {"NR before upscaling on Uplift's private Direct3D 12 device", "NR 在 DLSS前通过 Uplift 的专用 Direct3D 12 设备运行"},
@@ -591,6 +657,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"NR skipped: {}", "NR 已跳过：{}"},
     {"NR stage", "NR 阶段"},
     {"NR starts again once the release finishes.", "释放完成后，NR 将重新启动。"},
+    // TODO(zh-CN): translate
+    {"NR starts disabled: Enabled was 1 in ReShade.ini and StartEnabled is off", "NR starts disabled: Enabled was 1 in ReShade.ini and StartEnabled is off"},
     {"NR stopped", "NR 已停止"},
     {"NR stopped after", "NR 已停止"},
     {"NR stopped on this device ({} of {} this session): Retry now in Uplift's panel starts it again on a new private Direct3D 12 device", "此设备上的 NR 已停止（本次运行期间 {}/{} 次）。点击 Uplift 面板中的“立即重试”，即可在新的专用 Direct3D 12 设备上重新启动。"},
@@ -637,8 +705,14 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Neural rendering is switched off.", "神经渲染当前处于关闭状态。"},
     {"Neural transfer", "神经渲染传递方式"},
     {"Nits per 1.0 of a linear or scRGB image; 0 is automatic (100 for linear BT.709, 80 for scRGB). The reset arrow returns to automatic.", "线性或 scRGB 图像每单位值（1.0）对应的亮度（尼特）；设为 0 时自动选择（线性 BT.709 为 100，scRGB 为 80）。点击重置箭头可恢复自动。"},
+    // TODO(zh-CN): translate
+    {uplift::text::REAL_FRAME_ACQUISITION_LINE, "No matching real-frame image acquisition"},
     {"No motion vectors, anywhere.", "不使用任何运动矢量。"},
     {"No pass recorded.", "尚无已记录的运行层。"},
+    // TODO(zh-CN): translate
+    {uplift::text::REAL_BACKBUFFER_QUEUE_LINE, "No queue for the real backbuffer"},
+    // TODO(zh-CN): translate
+    {uplift::text::VERIFIED_VK_SWAPCHAIN_LINE, "No verified game-facing Vulkan swapchain"},
     {"None", "无"},
     {"Normal", "正向"},
     {"Not enough memory for the {} block ({} MiB, CreateFileMapping {:#010x})", "{} 数据块的内存不足（{} MiB，CreateFileMapping 错误 {:#010x}）"},
@@ -679,6 +753,12 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"OpenGL: NR runs on a private Direct3D 12 device (shared textures and fences, {:.1f} MiB)", "OpenGL：NR 在专用 Direct3D 12 设备上运行（共享纹理和围栏，{:.1f} MiB）"},
     {"OpenGL: NR runs on a private Direct3D 12 device (shared textures, CPU-ordered, {:.1f} MiB): {}", "OpenGL：NR 在专用 Direct3D 12 设备上运行（共享纹理、CPU 排序，{:.1f} MiB）：{}"},
     {"Other network", "其他网络"},
+    // TODO(zh-CN): translate
+    {uplift::text::OUTER_VK_IMAGE_USAGE_LINE, "Outer Vulkan image lacks copy-source or copy-destination usage"},
+    // TODO(zh-CN): translate
+    {uplift::text::OUTER_IMAGE_DEVICE_LINE, "Outer image belongs to a different device"},
+    // TODO(zh-CN): translate
+    {uplift::text::OUTER_QUEUE_DEVICE_LINE, "Outer queue belongs to a different device"},
     {"Output", "输出"},
     {"Overrides the quality mode the game creates DLSS-SR with. Applies when the game next creates its DLSS feature; a restart or a resolution change may be needed.", "覆盖游戏创建 DLSS-SR 时使用的质量模式。游戏下次创建 DLSS 功能时生效；可能需要重启游戏或更改分辨率。"},
     {"Own look", "独立外观"},
@@ -732,7 +812,15 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"ReShade Presents", "ReShade 呈现次数"},
     {"ReShade appends VK_KHR_push_descriptor itself", "ReShade 会自行追加 VK_KHR_push_descriptor"},
     {"ReShade gave no immediate command list for this queue; NR is skipped until it does", "ReShade 未为此队列提供即时命令列表；在提供前将跳过 NR"},
+    // TODO(zh-CN): translate
+    {uplift::text::BeforeFgNoteInfo(uplift::text::BeforeFgNote::MOTION_SELECTION_REQUIRED).line, "ReShade motion runs after frame generation: choose DLSS motion or Off in Advanced"},
     {"ReShade's version could not be read: DLSS placement needs ReShade 6.1 or newer", "无法读取 ReShade 版本：DLSS 阶段需要 ReShade 6.1 或更高版本"},
+    // TODO(zh-CN): translate
+    {uplift::text::REAL_FRAME_VK_RECORDING_LINE, "Real-frame Vulkan recording is busy or unavailable"},
+    // TODO(zh-CN): translate
+    {uplift::text::REAL_FRAME_SUBMISSION_LINE, "Real-frame command submission failed"},
+    // TODO(zh-CN): translate
+    {uplift::text::REAL_FRAME_RECORDING_BUSY_LINE, "Real-frame recording still in use"},
     {"Recorded passes", "已记录的处理层"},
     {"Reduces the dark rings NR leaves next to bright objects. Even darkening across a surface, and shadows beside dark objects, are left alone.", "减少 NR 在明亮物体周围留下的暗环；不会影响表面上均匀的暗部变化，也不会影响暗物体旁的阴影。"},
     {"Relaxed", "宽松"},
@@ -821,6 +909,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Static", "静态"},
     {"Stored and forwarded; NR 310.8 never reads it.", "此值会被保存并传递，但 NR 310.8 不会读取。"},
     {"Stored and forwarded; no effect in NR 310.8.", "此值会被保存并传递，但在 NR 310.8 中无效。"},
+    // TODO(zh-CN): translate
+    {uplift::text::GAME_COMPLETION_SIGNAL_LINE, "Streamline Present has no game-rendered completion signal"},
     {"Strength and colour", "强度和颜色"},
     {"Structure", "结构"},
     {"Structure on skin for this pass; -1 follows its Structure. A change restarts its history.", "控制此层的皮肤区域结构强度；-1 表示跟随此层的“结构”设置。更改后会重置此层的时序历史。"},
@@ -847,6 +937,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"The OpenGL bridge stopped: {}", "OpenGL 中继已停止：{}"},
     {"The OpenGL bridge stopped: {}. Restart the game to use NR again", "OpenGL 中继已停止：{}。请重启游戏以再次使用 NR"},
     {"The OpenGL context could not import the helper's shared fences (glImportSemaphoreWin32HandleEXT set GL error {:#06x}); frames cross through CPU-ordered shared textures instead", "OpenGL 上下文无法导入辅助进程共享的栅栏（glImportSemaphoreWin32HandleEXT 返回 GL 错误 {:#06x}）；帧将改为通过 CPU 排序的共享纹理传递"},
+    // TODO(zh-CN): translate
+    {uplift::text::VK_BRIDGE_NOT_READY_LINE, "The Vulkan bridge is not ready"},
     {"The Vulkan bridge stopped: NR at Present runs in Uplift's helper process", "NR 在 Uplift 辅助进程的后处理运行"},
     {"The Vulkan bridge stopped: NR at Present runs natively on the game's device", "NR 在游戏设备的后处理运行"},
     {"The Vulkan bridge stopped: the game's Vulkan device was destroyed", "游戏的 Vulkan 设备已销毁"},
@@ -855,7 +947,11 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"The Vulkan colour pipeline for DLSS's output format (VkFormat {}) could not be built", "无法为 DLSS 输出格式（VkFormat {}）构建 Vulkan 色彩管线"},
     {"The Vulkan colour pipelines for Before upscaling could not be built", "无法构建 DLSS前阶段的 Vulkan 色彩处理管线"},
     {"The Vulkan colour pipelines for NR at Present could not be built", "无法构建 NR 在后处理所需的 Vulkan 色彩管线"},
+    // TODO(zh-CN): translate
+    {uplift::text::VK_COPYBACK_RECORDING_LINE, "The Vulkan copy-back submission did not finish recording"},
     {"The Vulkan device could not import the helper's shared fences ({} returned VkResult {}); frames cross through CPU-ordered shared textures instead", "Vulkan 设备无法导入辅助进程共享的栅栏（{} 返回 VkResult {}）；帧将改为通过 CPU 排序的共享纹理传递"},
+    // TODO(zh-CN): translate
+    {uplift::text::VK_DEVICE_UNOBSERVED_LINE, "The Vulkan device was not observed at creation"},
     {"The Vulkan swap chain cannot take NR's result: the game asks for exclusive fullscreen, and Uplift does not add copy access to such a swap chain (ReShade 6.8 would rebuild its creation request and lose part of it). Use borderless or windowed mode for NR", "Vulkan 交换链无法接收 NR 结果：游戏请求独占全屏，Uplift 不会为此类交换链添加复制权限（ReShade 6.8 会重建交换链请求并丢失部分设置）。如需使用 NR，请切换至无边框窗口或窗口模式"},
     {"The Vulkan swap chain cannot take NR's result: this ReShade did not let Uplift add copy access (it needs the create_swapchain add-on event; ReShade 6.8 is tested). Update ReShade's Vulkan layer with its installer and restart the game", "Vulkan 交换链无法接收 NR 结果：当前 ReShade 未向 Uplift 提供添加复制权限所需的 create_swapchain 加载项事件（已针对 ReShade 6.8 进行测试）。请使用 ReShade 安装程序更新 Vulkan 层，然后重启游戏"},
     {"The back buffer", "后备缓冲区"},
@@ -889,6 +985,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"The helper rendering device stopped.", "辅助进程的渲染设备已停止。"},
     {"The helper reported a failure", "辅助进程报告运行失败"},
     {"The image's colour primaries, converted to BT.709 for NR and back. Auto is BT.709, and BT.2020 for HDR10.", "输入图像的色彩原色会先转换为 BT.709 供 NR 处理，再转换回原格式。“自动”会对普通画面使用 BT.709，对 HDR10 使用 BT.2020。"},
+    // TODO(zh-CN): translate
+    {uplift::text::OUTER_VK_QUEUE_FAMILY_LINE, "The outer Vulkan queue uses an unsupported queue family"},
     {"The previous 9Ex startup ended before the first frame.", "上次启用 9Ex 的启动在第一帧前中断。"},
     {"The previous startup ended before the adjusted device presented a frame.", "上次启动在调整后的设备呈现第一帧前中断。"},
     {"The previous startup with these extensions ended before the first frame.", "上次启用这些扩展的启动在第一帧前中断。"},
@@ -949,6 +1047,12 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Unsupported DLSS output format on Vulkan (VkFormat {})", "Vulkan 下不支持此 DLSS 输出格式（VkFormat {}）"},
     {"Unsupported back-buffer format (D3DFMT {})", "不支持此后备缓冲区格式（D3DFMT {}）"},
     {"Unsupported back-buffer format (DXGI_FORMAT {})", "不支持此后备缓冲区格式（DXGI_FORMAT {}）"},
+    // TODO(zh-CN): translate
+    {uplift::text::DEVICE_GROUP_PRESENT_LINE, "Unsupported device-group presentation"},
+    // TODO(zh-CN): translate
+    {uplift::text::OUTER_VK_IMAGE_LINE, "Unsupported outer Vulkan image or color space"},
+    // TODO(zh-CN): translate
+    {uplift::text::OUTER_COLOR_SPACE_LINE, "Unsupported outer swapchain color space"},
     {"Uplift DLSS motion for Present", "Uplift DLSS后处理运动矢量副本"},
     {"Uplift could not start on this Direct3D {} device: {}", "Uplift 无法在此 Direct3D {} 设备上启动：{}"},
     {"Uplift could not start on this OpenGL context: {}", "Uplift 无法在此 OpenGL 上下文中启动：{}"},
@@ -957,7 +1061,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Uplift could not start on this {} device: {}", "Uplift 无法在此 {} 设备上启动：{}"},
     {"Uplift did not see this device being created", "Uplift 未能捕获此设备的创建过程"},
     {"Uplift is not running on this device", "Uplift 未在此设备上运行"},
-    {"Uplift needs an NVIDIA GPU; this game renders on another adapter", "Uplift 需要 NVIDIA GPU；此游戏正在另一块显卡上渲染"},
+    {uplift::text::NVIDIA_GPU_REQUIRED_LINE, "Uplift 需要 NVIDIA GPU；此游戏正在另一块显卡上渲染"},
     {"Uplift supports 32-bit Direct3D 9, 10, 11 and 12, Vulkan and OpenGL games only", "Uplift 仅支持 32 位 Direct3D 9、10、11、12、Vulkan 和 OpenGL 游戏"},
     {"Uplift supports Direct3D 9, 10, 11 and 12, Vulkan and OpenGL games only", "Uplift 仅支持 Direct3D 9、10、11、12、Vulkan 和 OpenGL 游戏"},
     {"Uplift technique", "Uplift 技术"},
@@ -967,7 +1071,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Uplift {} registered (ReShade API {}, Dear ImGui {}, ReShade {})", "Uplift {} 已注册（ReShade API {}、Dear ImGui {}、ReShade {}）"},
     {"Uplift's 64-bit helper could not be tied to the game (AssignProcessToJobObject {:#010x})", "无法将 Uplift 的 64 位辅助进程关联到游戏（AssignProcessToJobObject 错误码 {:#010x}）"},
     {"Uplift's 64-bit helper could not start ({} {:#010x})", "无法启动 Uplift 的 64 位辅助进程（{}，错误码 {:#010x}）"},
-    {"Uplift's 64-bit helper did not answer within 2 s; frames go without NR until it does", "Uplift 的 64 位辅助进程在 2 秒内未响应；在其恢复响应前，后续帧将不运行 NR"},
+    {uplift::text::RUN_REPLY_TIMEOUT_LINE, "Uplift 的 64 位辅助进程在 {} 秒内未响应；在其恢复响应前，后续帧将不运行 NR"},
     {"Uplift's 64-bit helper stopped", "Uplift 的 64 位辅助进程已停止"},
     {"Uplift's Vulkan hooks ({})", "Uplift 的 Vulkan 钩子（{}）"},
     {"Uplift's adjustment failed", "Uplift 设备调整失败"},
@@ -1008,6 +1112,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Vulkan device adjustments", "Vulkan 设备调整"},
     {"Vulkan device lost soon after NR ran inside the game's frame: the DLSS placements stay off from the next start (Clear latch to try again)", "Vulkan 设备已丢失：NR 在游戏帧内运行后不久发生设备丢失；从下次启动起，“DLSS前”和“DLSS后”阶段将保持关闭（点击“清除锁定”可再次尝试）"},
     {"Vulkan device lost: NR stays off on this device", "Vulkan 设备已丢失：此设备上的 NR 将保持关闭"},
+    {uplift::text::VK_RECORDING_FUNCTIONS_LINE, uplift::text::VK_RECORDING_FUNCTIONS_LINE},  // TODO(zh-CN): translate
     {"Vulkan to Direct3D 12 bridge", "Vulkan 到 Direct3D 12 桥接"},
     {"Vulkan: DLSS's motion vectors can reach the Present path on this device", "Vulkan：此设备上的 DLSS 运动矢量可传递至后处理路径"},
     {"Vulkan: DLSS's motion vectors copied for Present ({}x{})", "Vulkan：已为后处理复制 DLSS 运动矢量（{}x{}）"},
@@ -1034,14 +1139,14 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Vulkan: NR's last frames did not finish within {} ms of the game's NGX shutdown; NR's runtime stays loaded until the game exits", "Vulkan：游戏关闭 NGX 后的 {} 毫秒内，NR 的最后几帧仍未完成；NR 运行时将保留至游戏退出"},
     {"Vulkan: NR's passes move between its stages ({}): it reloads from off", "Vulkan：NR 的处理层将在不同阶段间切换（{}）；将从关闭状态重新加载"},
     {"Vulkan: Present motion: {} evaluates for {} presents; {} copies, skipped {} (input) {} (ring slot) {} (slot's last use); presents bound {} own, {} older, {} none; GPU lag at the evaluates {}..{} frames; latest jitter correction {} x {} px", "Vulkan：后处理运动矢量：{} 次评估对应 {} 次呈现；复制 {} 次，跳过 {} 次（输入无效）、{} 次（环形槽位繁忙）、{} 次（槽位仍在使用）；呈现帧绑定：当前帧 {} 个、较旧帧 {} 个、缺失 {} 个；评估间 GPU 延迟 {}–{} 帧；最近一次抖动校正量 {} x {} 像素"},
-    {"Vulkan: Uplift's command buffers did not finish within 2 s of leaving Present; NR stays off on this device until the game exits", "Vulkan：离开后处理 2 秒后，Uplift 的命令缓冲区仍未完成；此设备上的 NR 将保持关闭直至游戏退出"},
+    {uplift::text::VK_RING_DRAIN_TIMEOUT_LINE, "Vulkan：离开后处理 {} 秒后，Uplift 的命令缓冲区仍未完成；此设备上的 NR 将保持关闭直至游戏退出"},
     {"Vulkan: Uplift's command buffers had not finished when the game's device went; NR's runtime stays loaded until the game exits", "游戏设备释放时，Uplift 的命令缓冲区仍未完成；NR 运行时将保留至游戏退出"},
     {"Vulkan: Uplift's copies that ReShade's queue may still use ({:.1f} MiB) stay until the game's device goes", "Vulkan：ReShade 队列可能仍在使用 Uplift 的副本（{:.1f} MiB）；这些副本将保留至游戏设备释放"},
-    {"Vulkan: Uplift's helper process has not released NR 5 s after NR moved away from it; NR stays off on this device until it does", "Vulkan：NR 切离辅助进程 5 秒后，该进程仍未释放 NR；在其释放前，此设备上的 NR 将保持关闭。"},
+    {uplift::text::NR_DRAIN_TIMEOUT_LINE, "Vulkan：NR 切离辅助进程 {} 秒后，该进程仍未释放 NR；在其释放前，此设备上的 NR 将保持关闭。"},
     {"Vulkan: Uplift's helper process released NR {} ms after NR moved away from it", "Vulkan：NR 切离 Uplift 辅助进程 {} 毫秒后，该进程已释放 NR"},
     {"Vulkan: a frame went without NR at Present: Uplift's command buffers were all still on the GPU (counted in Details)", "Vulkan：本帧未运行后处理的 NR：Uplift 的命令缓冲区仍在 GPU 上执行（计数见“详细信息”）"},
-    {"Vulkan: a recording was never submitted; its token was dropped after 2 s", "Vulkan：命令记录从未提交，其令牌已在 2 秒后丢弃"},
-    {"Vulkan: a recording was submitted after its token was dropped as stale (more than 2 s and 8 frames after it was made)", "Vulkan：令牌过期被丢弃后，对应的命令记录仍被提交（距离创建已超过 2 秒且 8 帧）"},
+    {uplift::text::VK_STALE_TOKEN_DROPPED_LINE, "Vulkan：命令记录从未提交，其令牌已在 {} 秒后丢弃"},
+    {uplift::text::VK_LATE_SUBMISSION_LINE, "Vulkan：令牌过期被丢弃后，对应的命令记录仍被提交（距离创建已超过 {} 秒且 {} 帧）"},
     {"Vulkan: added {} to the game's device", "Vulkan：已向游戏设备添加{}"},
     {"Vulkan: creating the game's device with Uplift's additions: {}; feature chain: {}; apiVersion {}", "Vulkan：正在为游戏创建设备并添加 Uplift 扩展：{}；功能链：{}；API 版本 {}"},
     {"Vulkan: device created without Uplift's adjustment ({})", "Vulkan：设备未应用 Uplift 调整（{}）"},
@@ -1068,7 +1173,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Vulkan: the game's DLSS-stage NR runs on ReShade's effect queue again: passes stored at Present run there again", "Vulkan：游戏 DLSS 阶段的 NR 已重新在 ReShade 效果队列运行；设为后处理的层将恢复在该队列运行"},
     {"Vulkan: the game's device already has the sharing extensions", "Vulkan：游戏设备已包含共享扩展"},
     {"Vulkan: the game's device request has everything NGX needs", "Vulkan：游戏的设备请求已包含 NGX 所需的全部功能"},
-    {"Vulkan: the game's device was lost within 10 s of native NR at Present: native NR is off from now on (VulkanNativeNr = 0)", "Vulkan：后处理的原生 NR 运行后 10 秒内游戏设备丢失；现已关闭原生 NR（VulkanNativeNr = 0）"},
+    {uplift::text::VK_PRESENT_DEVICE_LOST_LINE, "Vulkan：后处理的原生 NR 运行后 {} 秒内游戏设备丢失；现已关闭原生 NR（VulkanNativeNr = 0）"},
     {"Vulkan: the game's device went before Uplift could release NR on it; NR's runtime stays loaded until the game exits", "Uplift 尚未能从游戏设备释放 NR，游戏设备便已释放；NR 运行时将保留至游戏退出"},
     {"Vulkan: the helper route is gone; NR at Present starts {}", "Vulkan：辅助进程路径已退出；后处理的 NR 将通过{}启动"},
     {"Vulkan: the helper's NR waits for NR in the game's process to unload first (the claims allowed it early)", "Vulkan：辅助进程中的 NR 正在等待游戏进程中的 NR 卸载（资源占用标记过早允许了启动）"},
@@ -1080,6 +1185,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Waiting for DLSS: releasing NR memory", "等待 DLSS：正在释放 NR 显存"},
     {"Waiting for DLSS: the game has not run DLSS yet", "等待 DLSS：游戏尚未运行 DLSS"},
     {"Waiting for a frame", "等待画面"},
+    // TODO(zh-CN): translate
+    {uplift::text::WAIT_SUCCESSFUL_PRESENT_LINE, "Waiting for a successful Present after a failed or occluded frame"},
     {"Waiting for a usable frame", "等待可处理的画面"},
     {"Waiting for the game's DLSS", "等待游戏启动 DLSS"},
     {"Waiting for the game's first frame", "等待游戏的第一帧画面"},
@@ -1286,7 +1393,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"no pipeline for the target format", "目标格式没有可用的处理管线"},
     {"no placement", "未设置处理阶段"},
     {"no readable motion vectors", "未检测到可读取的运动矢量"},
-    {"no request for 30 s; the helper exits", "30 秒内未收到请求；辅助进程即将退出"},
+    {uplift::text::IDLE_EXIT_LINE, "{} 秒内未收到请求；辅助进程即将退出"},
     {"no texture", "无"},
     {"no transport was asked for", "未请求传输方式"},
     {"nobody", "无"},
@@ -1299,7 +1406,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"not hooked", "未挂接"},
     {"not loaded as nvngx_dlss.dll", "未作为 nvngx_dlss.dll 加载"},
     {"not placed after DLSS", "未设为在 DLSS后运行"},
-    {"not yet at its wait after 500 ms", "等待 500 毫秒后仍未到达等待点"},
+    {uplift::text::GAME_QUEUE_NOT_WAITING_LINE, "等待 {} 毫秒后仍未到达等待点"},
     {"nvngx_dlssnr.dll is already mapped in this game by another component, or stayed mapped after Uplift unloaded it", "nvngx_dlssnr.dll 已由此游戏中的其他组件加载，或在 Uplift 卸载后仍留在内存中"},
     {"nvngx_dlssnr.dll not found next to gitc-uplift.addon64 or the game; copy it there or set Runtime path", "在 gitc-uplift.addon64 或游戏文件旁均未找到 nvngx_dlssnr.dll；请将其复制到其中一处，或设置“运行时路径”。"},
     {"nvngx_dlssnr.dll not found next to {} or the game; copy it there or set Runtime path", "在插件目录（{}）或游戏目录中找不到 nvngx_dlssnr.dll；请将其复制到其中一个目录，或设置“运行库路径”"},
@@ -1364,7 +1471,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"the Vulkan timeline semaphore wait failed", "Vulkan 时间线信号量等待失败"},
     {"the back buffer cannot reach NR", "后备缓冲区的画面无法传递给 NR"},
     {"the bridge could not share DLSS's image", "中继无法共享 DLSS 图像"},
-    {"the cross-API fences made no progress for 2 s while NR's work was outstanding", "NR 仍有未完成的处理任务，但跨 API 栅栏连续 2 秒没有进展"},
+    {uplift::text::BRIDGE_STALLED_LINE, "NR 仍有未完成的处理任务，但跨 API 栅栏连续 {} 秒没有进展"},
     {"the device factory could not make an independent device ({:#010x}), and D3D12CreateDevice failed with {:#010x}", "设备工厂无法创建独立设备（{:#010x}），且 D3D12CreateDevice 失败（{:#010x}）"},
     {"the device factory could not take the process's global D3D12 state ({:#010x}): a debug layer turned on for the game does not reach Uplift's private device", "设备工厂无法继承进程的全局 D3D12 状态（{:#010x}）；在游戏中启用的调试层不会应用于 Uplift 的专用设备"},
     {"the device lacks VK_KHR_external_memory_win32", "设备缺少 VK_KHR_external_memory_win32 扩展"},
@@ -1400,15 +1507,16 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"the game's device was created without {} because {}", "游戏设备创建时未启用 {}，原因：{}"},
     {"the game's own feature struct has bufferDeviceAddress off, and Uplift never writes the game's memory", "游戏自己的功能结构体未启用 bufferDeviceAddress；Uplift 不会修改游戏的内存"},
     {"the game's present queue", "游戏的呈现队列"},
-    {"the game's present queue did not finish within 2 s", "游戏的呈现队列在 2 秒内未完成"},
-    {"the game's present queue did not finish within 2 s three times in a row", "游戏的呈现队列连续 3 次未能在 2 秒内完成"},
+    {uplift::text::PRESENT_QUEUE_TIMEOUT_LINE, "游戏的呈现队列在 {} 秒内未完成"},
+    // TODO(zh-CN): translate
+    {uplift::text::PRESENT_QUEUE_STOPPED_LINE, "the game's present queue did not finish within {} s {} times in a row"},
     {"the game's present queue is still busy", "游戏的呈现队列仍在执行命令"},
     {"the game's queue", "游戏的 Vulkan 队列"},
     {"the game's side of a keyed-mutex hand-off timed out", "游戏端的键控互斥体交接等待超时"},
     {"the game's vectors", "游戏提供的运动矢量"},
     {"the helper did not exit after QUIT; it was ended", "辅助进程收到 QUIT 后仍未退出；已强制结束"},
     {"the helper did not say how large the texture's allocation is", "辅助进程未提供纹理分配大小"},
-    {"the helper process was ended but had not exited after 1 s", "结束辅助进程后等待 1 秒，它仍未退出"},
+    {uplift::text::EXIT_TIMEOUT_LINE, "结束辅助进程后等待 {} 秒，它仍未退出"},
     {"the helper refused", "辅助进程拒绝了请求"},
     {"the helper threw while handling a request", "辅助进程处理请求时发生异常"},
     {"the helper threw while handling the request", "辅助进程处理请求时发生异常"},
@@ -1498,7 +1606,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"{} could not be shared with Uplift's helper (DXGI_FORMAT {}, {})", "{}无法与 Uplift 辅助进程共享（DXGI_FORMAT {}，{}）"},
     {"{} could not be shared with the private Direct3D 12 device (DXGI_FORMAT {}, HRESULT {:#010x})", "无法向专用 Direct3D 12 设备共享 {}（DXGI_FORMAT {}，HRESULT {:#010x}）"},
     {"{} could not be shared with the private Direct3D 12 device ({}); NR runs without {} motion", "无法向专用 Direct3D 12 设备共享 {}（{}）；NR 将不使用 {} 提供的运动矢量"},
-    {"{} did not finish within 2 s, {} times in a row", "{}连续 {} 次未能在 2 秒内完成"},
+    // TODO(zh-CN): translate
+    {uplift::text::CONSECUTIVE_TIMEOUTS_LINE, "{} did not finish within {} s, {} times in a row"},
     {"{} exports no D3D12, D3D11 or Vulkan feature entry points; not hooked", "{} 未导出 D3D12、D3D11 或 Vulkan 功能入口点；不会挂接"},
     {"{} failed: VkResult {}", "{}调用失败：VkResult {}"},
     {"{} forwards to an NGX core that is hooked already", "{} 转发至已挂接的 NGX 核心"},
@@ -1533,6 +1642,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"{}x{} ({}, the render size)", "{}x{}（{}，渲染分辨率）"},
     {"{}x{} of the {}x{} render ({}, {})", "{}x{} / {}x{} 渲染画面（{}，{}）"},
 });
+static_assert(std::ranges::is_sorted(CHINESE, {}, &Translation::english));
 
 struct Pattern {
   std::vector<std::string_view> literals;

@@ -5,6 +5,7 @@
 #include <chrono>
 
 #include "gl/format.hpp"
+#include "gl/functions.hpp"
 
 namespace uplift::gl {
 namespace {
@@ -22,7 +23,7 @@ ImportResult Interop::ImportTexture(HANDLE nt_handle, uint64_t bytes, DXGI_FORMA
     out.step = "the format";
     return out;
   }
-  for (int drained = 0; drained < 16 && gl_.GetError() != GL_NO_ERROR; ++drained) {
+  for (uint32_t drained = 0u; drained < ERROR_DRAIN_LIMIT && gl_.GetError() != GL_NO_ERROR; ++drained) {
     // Clears errors an earlier step left, so the ones below are this import's.
   }
   SharedTexture texture = {.size = size, .format = shared_format};
@@ -35,7 +36,7 @@ ImportResult Interop::ImportTexture(HANDLE nt_handle, uint64_t bytes, DXGI_FORMA
     if (texture.memory != 0u) {
       gl_.DeleteMemoryObjectsEXT(1, &texture.memory);
     }
-    for (int drained = 0; drained < 16 && gl_.GetError() != GL_NO_ERROR; ++drained) {
+    for (uint32_t drained = 0u; drained < ERROR_DRAIN_LIMIT && gl_.GetError() != GL_NO_ERROR; ++drained) {
       // Whatever the failed import left is not the game's.
     }
     out.error = error;
@@ -55,7 +56,7 @@ ImportResult Interop::ImportTexture(HANDLE nt_handle, uint64_t bytes, DXGI_FORMA
 }
 
 GLenum Interop::ImportSemaphore(HANDLE nt_handle, GLuint* semaphore) {
-  for (int drained = 0; drained < 16 && gl_.GetError() != GL_NO_ERROR; ++drained) {
+  for (uint32_t drained = 0u; drained < ERROR_DRAIN_LIMIT && gl_.GetError() != GL_NO_ERROR; ++drained) {
     // As ImportTexture.
   }
   gl_.GenSemaphoresEXT(1, semaphore);
@@ -63,7 +64,7 @@ GLenum Interop::ImportSemaphore(HANDLE nt_handle, GLuint* semaphore) {
   const GLenum error = gl_.GetError();
   if (error != GL_NO_ERROR) {
     DeleteSemaphore(semaphore);
-    for (int drained = 0; drained < 16 && gl_.GetError() != GL_NO_ERROR; ++drained) {
+    for (uint32_t drained = 0u; drained < ERROR_DRAIN_LIMIT && gl_.GetError() != GL_NO_ERROR; ++drained) {
       // The failed import's own errors.
     }
   }

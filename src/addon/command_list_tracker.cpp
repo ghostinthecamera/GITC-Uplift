@@ -21,7 +21,7 @@ constexpr GUID LIST_STATE_GUID = {0x6c1a4f2e, 0x93b1, 0x4d8e, {0xa5, 0x0c, 0x71,
 std::atomic<bool> g_tracking{false};
 std::atomic<uint64_t> g_epoch{0u};
 
-// Plan 13: every Vulkan list's state, by handle. Never freed: the events and the NGX detour can run until the process ends.
+// Every Vulkan list's state, by handle. Never freed: the events and the NGX detour can run until the process ends.
 struct VkLists {
   std::shared_mutex mutex;
   std::unordered_map<VkCommandBuffer, std::unique_ptr<VkListState>> states;
@@ -39,7 +39,7 @@ ID3D12GraphicsCommandList* NativeOf(api::command_list* list) {
   return reinterpret_cast<ID3D12GraphicsCommandList*>(list->get_native());
 }
 
-// The tracking handlers (v2 design §3.2): one relaxed load while tracking is off, no lock ever.
+// The tracking handlers: one relaxed load while tracking is off, no lock ever.
 void OnBindPipeline(api::command_list* cmd_list, api::pipeline_stage stages, api::pipeline pipeline) {
   if (!g_tracking.load(std::memory_order_relaxed)) return;
   if ((static_cast<uint32_t>(stages) & state::PIPELINE_STAGE_COMPUTE) == 0u) return;
@@ -110,8 +110,7 @@ void OnExecuteSecondaryCommandList(api::command_list* cmd_list, api::command_lis
   UPLIFT_CATCH("execute_secondary_command_list", )
 }
 
-// v2 design §3.2's replay: steps 1-4 through ReShade's API (step 1's count of 0 re-issues ReShade's
-// cached heaps and the root signature), step 5 natively.
+// Replay heaps, root signature, pipeline, tables and constants through ReShade; restore root descriptors natively.
 class ReshadeReplayTarget final : public state::ReplayTarget {
  public:
   explicit ReshadeReplayTarget(api::command_list* list) : list_(list), native_(NativeOf(list)) {}

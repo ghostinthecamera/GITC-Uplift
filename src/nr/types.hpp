@@ -22,9 +22,9 @@ struct Size {
   friend constexpr bool operator==(Size, Size) = default;
 };
 
-// The NR floor (spec §6.2): no NR network runs on a frame whose shorter side is below 360 or whose
-// longer side is below 640. A 64x64 frame hung the GPU in Plan 2; 1.1.5's probes (RTX 4090, NR 310.8, 1000 frames of
-// two chained passes with motion vectors each) ran clean at 640x360, 640x480 and 854x480. It was 1280x720 until then.
+// The NR floor: no NR network runs on a frame whose shorter side is below UPLIFT_NR_MIN_SHORT_SIDE or whose longer side is below
+// UPLIFT_NR_MIN_LONG_SIDE. A 64x64 frame hung the GPU; 1.1.5's probes (RTX 4090, NR 310.8, 1000 frames of two chained passes with motion
+// vectors each) ran clean at 640x360, 640x480 and 854x480. The floor was 1280x720 until then.
 // Set at build time (CMake: UPLIFT_NR_MIN_SHORT_SIDE, UPLIFT_NR_MIN_LONG_SIDE); the defaults below are for a translation unit built without them.
 #ifndef UPLIFT_NR_MIN_SHORT_SIDE
 #define UPLIFT_NR_MIN_SHORT_SIDE 360
@@ -69,6 +69,7 @@ struct Controls {
   float skin_structure = 1.f;  // -1 = same as local_structure
   uint32_t style = 0u;         // 0..2 = Model A/B/C
   uint32_t mask_blend_mode = 0u;
+  friend bool operator==(const Controls&, const Controls&) = default;
 };
 
 }  // namespace uplift::nr

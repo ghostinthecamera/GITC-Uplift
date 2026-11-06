@@ -1,4 +1,4 @@
-// Example NR mask for Uplift (v2 design §3.13). Uplift reads a texture named UPLIFT_MASK from any effect: its red
+// Example NR mask for Uplift. Uplift reads a texture named UPLIFT_MASK from any effect: its red
 // channel limits NR per pixel (0 keeps the game's image, 1 is full NR, 0.5 half of NR's change). This example masks
 // NR off left of a split line; replace UpliftMaskPS with any mask you need. Uplift uses the previous frame's mask.
 

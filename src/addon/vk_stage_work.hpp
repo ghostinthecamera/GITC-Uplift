@@ -7,8 +7,8 @@
 
 namespace uplift::addon {
 
-// Split chain (Task 5; fix round 2, I3): the native Vulkan context's rule that NR never runs on two queues at once, without any GPU wait (fix round 1, I1, as
-// Direct3D 12's Timeline::StageQueueOtherThan and StageWorkDone). It keeps a split's DLSS-stage recordings (their tokens) with the queue each one's command
+// Native Vulkan NR never runs on two queues at once; completion checks enforce this without a GPU wait, as in Direct3D 12's Timeline
+// stage checks. It keeps a split's DLSS-stage recordings (their tokens) with the queue each one's command
 // buffer went to (null: not submitted yet), and every queue they went to. A queue other than the effect queue, where a later Present group records, keeps
 // Present off for later groups (OtherQueue: the caller's chain moves their passes to the DLSS stage); otherwise a later Present group runs only once every
 // earlier DLSS-stage recording off the effect queue has completed (Done), else it skips that frame. Queues are opaque identities (ReShade's command queues:

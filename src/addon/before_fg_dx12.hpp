@@ -25,7 +25,7 @@ class BeforeFgDx12 final : public IUnknown {
   void Retry() { retry_.store(true); }
   void* Inner() const { return inner_.load(); }
   struct Result { uint32_t passes = 0; std::string_view reason; };
-  Result Record(IDXGISwapChain* chain, ID3D12Device* device, DeviceContext& context, const FrameConfig& config,
+  Result Record(IDXGISwapChain* chain, ID3D12Device* device, DeviceContext& context, const FrameSettings& settings, const FrameFacts& facts,
                 std::chrono::steady_clock::time_point now);
  private:
   struct Queue { Microsoft::WRL::ComPtr<ID3D12CommandQueue> native; std::unique_ptr<bridge::D3D12Side> ring; };

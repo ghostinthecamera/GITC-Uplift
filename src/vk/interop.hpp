@@ -33,24 +33,24 @@ struct ImportResult {
 
 enum class WaitSlot : size_t {
   CPU_ORDER,      // the CPU-ordered path's wait for the copy into the shared texture
-  PRESENT_QUEUE,  // design §3.4 case 2: the game presents from a queue other than ReShade's
+  PRESENT_QUEUE,  // the game presents from a queue other than ReShade's
 };
 inline constexpr size_t WAIT_SLOTS = 2u;
 
 enum class WaitResult {
   DONE,
-  TIMEOUT,  // the cap ran out: skip this frame (Plan 9 M-2). A single one never latches; the bridge stops after a few in a row (batch 2 review, minor 4)
+  TIMEOUT,  // the cap ran out: skip this frame. A single one never latches; the bridge stops after a few in a row
   BUSY,     // an earlier wait on this slot is still in flight and nothing was submitted or waited for: skip this frame, never latch
   FAILED,   // the submission or the wait failed; DeviceLost() says whether the device is gone
 };
 
-// Plan 11 (Vulkan design §3.1, §4, §6): one game device's imports and the objects that go with them. ReShade-free; every Vulkan call it makes
+// One game device's imports and the objects that go with them. ReShade-free; every Vulkan call it makes
 // is one ReShade's layer either does not intercept (memory, semaphores, fences) or one that is safe while the device exists (vkCreateImage,
 // vkDestroyImage). Nothing in it waits on the GPU except FlushAndWait, which is capped.
 //
-// Frees: Vulkan has no deferred destruction (key decision f). Retire keeps an image until a VkFence submitted after its last use has signalled;
-// FreeFinished frees what has. FreeAll and FreeNow are for destroy_device, where ReShade has already dropped the device from its dispatch map
-// (R62): an image goes only through GameHost::DestroyImage, everything else through functions the layer does not intercept.
+// Frees: Vulkan has no deferred destruction. Retire keeps an image until a VkFence submitted after its last use has signalled;
+// FreeFinished frees what has. FreeAll and FreeNow are for destroy_device, where ReShade has already dropped the device from its dispatch map:
+// an image goes only through GameHost::DestroyImage, everything else through functions the layer does not intercept.
 // Not thread-safe: the caller's lock.
 class Interop {
  public:
@@ -63,7 +63,7 @@ class Interop {
   [[nodiscard]] const Device& Functions() const { return device_; }
 
   // `nt_handle`: a Direct3D 12 texture's NT handle (the caller closes it). Dedicated import, usage TRANSFER_SRC | TRANSFER_DST, memory type as
-  // key decision e. On failure nothing is left behind and `result`, `step` say what failed.
+  // On failure nothing is left behind and `result`, `step` say what failed.
   ImportResult ImportImage(HANDLE nt_handle, DXGI_FORMAT format, nr::Size size);
   // A Direct3D 12 fence's NT handle into a new timeline semaphore (the caller closes the handle). On failure nothing is left behind.
   VkResult ImportTimeline(HANDLE nt_handle, VkSemaphore* semaphore, const char** step);
@@ -75,7 +75,7 @@ class Interop {
   void RetireSemaphore(VkSemaphore* semaphore, GameHost& host);
   // Frees the retired images and semaphores whose fence has signalled; true when any went. An image whose fence could not be submitted gets another try.
   bool FreeFinished(GameHost& host);
-  // Plan 17: nothing is retired and no capped wait is still in flight (a timed-out one's fence unsignalled): FreeAll then frees nothing the GPU may use.
+  // Nothing is retired and no capped wait is still in flight (a timed-out one's fence unsignalled): FreeAll then frees nothing the GPU may use.
   [[nodiscard]] bool Idle();
   // destroy_device: `host` needs only the device. The retired images go, the wait fences too.
   void FreeAll(GameHost& host);

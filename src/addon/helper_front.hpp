@@ -1,8 +1,8 @@
 #pragma once
 
-// Plan 10 (design §2.2). The add-on side of NR in Uplift's 64-bit helper: the D3D9, D3D10 and D3D11 clients, the helper's lifetime (RemoteNr),
+// The add-on side of NR in Uplift's 64-bit helper: the D3D9, D3D10 and D3D11 clients, the helper's lifetime (RemoteNr),
 // the 9Ex toggle, the overlay's lines and the status card. Moved out of addon32.cpp unchanged: gitc-uplift.addon32 hosts it for every device,
-// gitc-uplift.addon64 for its Direct3D 9 devices (T5: and its Vulkan devices whose NR at Present takes the helper route). Each host keeps the ReShade registration, the settings and the panel state, the NrClaim, the
+// gitc-uplift.addon64 for its Direct3D 9 devices (and its Vulkan devices whose NR at Present takes the helper route). Each host keeps the ReShade registration, the settings and the panel state, the NrClaim, the
 // swap-chain selector, the runtime, back-buffer and marker lookup, the LaunchPad link and the API check, and calls the front from its
 // handlers. Not thread-safe: the host's lock.
 
@@ -38,7 +38,7 @@
 
 namespace uplift::addon {
 
-// Final review I-1: ReShade keeps an effect's resources once one of its techniques has created them, even after every technique using them
+// ReShade keeps an effect's resources once one of its techniques has created them, even after every technique using them
 // is disabled, so a found UPLIFT_MASK variable does not mean an effect still writes it. True only while at least one technique of the
 // effect that declares `variable` is enabled.
 inline bool MaskEffectRunning(reshade::api::effect_runtime* runtime, reshade::api::effect_texture_variable variable) {
@@ -51,7 +51,7 @@ inline bool MaskEffectRunning(reshade::api::effect_runtime* runtime, reshade::ap
   return running;
 }
 
-// Plans 11 and 12: the game-side hosts the clients that record or free through ReShade's API use (a Vulkan device's, an OpenGL context's, a Direct3D 12 device's).
+// The game-side hosts the clients that record or free through ReShade's API use (a Vulkan device's, an OpenGL context's, a Direct3D 12 device's).
 // At most one is set, the one of the device being handled; null for every other API, whose clients free their objects by reference counting.
 struct ClientHosts {
   vk::GameHost* vulkan = nullptr;
@@ -65,10 +65,10 @@ struct HelperDevice {
   std::unique_ptr<client::D3D9Client> d3d9;    // a Direct3D 9 device's client; made at the first present with NR on
   std::unique_ptr<client::D3D10Client> d3d10;  // a Direct3D 10 device's client (32-bit games): the relay and a D3D11 client on it
   std::unique_ptr<client::D3D11Client> d3d11;  // a Direct3D 11 device's client
-  std::unique_ptr<client::VkClient> vulkan;    // Plan 11: a Vulkan device's client (DXVK in a 32-bit game)
-  std::unique_ptr<client::GlClient> gl;        // Plan 12: an OpenGL context's client (a 32-bit game)
-  std::unique_ptr<client::D3D12Client> d3d12;  // Plan 12: a 32-bit Direct3D 12 device's client (dgVoodoo2's D3D12 output)
-  reshade::api::command_queue* present_queue = nullptr;  // Vulkan and OpenGL: the present event's queue; the host's `queue` is the effect runtime's (design §3.1)
+  std::unique_ptr<client::VkClient> vulkan;    // A Vulkan device's client (DXVK in a 32-bit game)
+  std::unique_ptr<client::GlClient> gl;        // an OpenGL context's client (a 32-bit game)
+  std::unique_ptr<client::D3D12Client> d3d12;  // A 32-bit Direct3D 12 device's client (dgVoodoo2's D3D12 output)
+  reshade::api::command_queue* present_queue = nullptr;  // Vulkan and OpenGL: the present event's queue; the host's `queue` is the effect runtime's
   bool vk_second_queue_logged = false;
   std::string message;                         // why this device has no client
   bool rejected = false;                       // not NVIDIA, or the client could not start: decided once
@@ -76,12 +76,12 @@ struct HelperDevice {
   std::filesystem::path snippet;                       // resolved once at the client's creation; empty when not found
   std::string snippet_problem;                         // no runtime found: no helper starts, and the card says so
   uint64_t back_buffer = 0u;                           // the last present's back buffer (a ReShade handle), for the Direct3D 10 and 11 clients' RUN
-  FrameTrigger trigger;                                // authoritative: the helper replays the point this reached (design §2.1)
+  FrameTrigger trigger;                                // authoritative: the helper replays the point this reached
   TriggerPoint unreported_point = TriggerPoint::NONE;  // reached without a RUN; the next FRAME tells the helper
   bool frame_ready = false;                            // this present's FRAME reply said the helper is ready for a RUN
   bool running = false;                                // the last FRAME reply said NR's state is not OFF
   bool retry_now = false;                              // Retry now, for the next FRAME
-  // Plan 17: the 2-strike rule for the helper's stops (its own device removed, a hang, an exit), as for a bridge's private device: Retry now restarts it once.
+  // The 2-strike rule for the helper's stops (its own device removed, a hang, an exit), as for a bridge's private device: Retry now restarts it once.
   BridgeStrikes strikes;
   bool claimed_elsewhere = false;
   uint64_t before_fg_passes = 0u;
@@ -91,16 +91,16 @@ struct HelperDevice {
   bool ex_checked = false;
   uint32_t ex_presents = 0u;  // present events of a 9Ex device, counted up to 2: the second proves the first real Present returned
   bool d3d9_ex = false;       // a Direct3D 9Ex device (KMT)
-  std::string mask_note;      // Plan 5: the overlay's "NR mask" line
-  // Plan 14: Launchpad's technique and the Uplift technique are both enabled (Setup's Launchpad option); the host sets it at each present.
+  std::string mask_note;      // the overlay's "NR mask" line
+  // Launchpad's technique and the Uplift technique are both enabled (Setup's Launchpad option); the host sets it at each present.
   bool launchpad_ready = false;
-  bool lumenite_ready = false;      // 2026-10-08: the same for Lumenite's Kernel (Setup's Lumenite option)
-  bool uplift_mv_lumenite = false;  // 2026-10-08: Uplift.fx writes Lumenite's vectors into UPLIFT_MV; the FRAME tells the helper, for its readouts
+  bool lumenite_ready = false;      // the same for Lumenite's Kernel (Setup's Lumenite option)
+  bool uplift_mv_lumenite = false;  // Uplift.fx writes Lumenite's vectors into UPLIFT_MV; the FRAME tells the helper, for its readouts
   UpliftMvSource uplift_mv_source = UpliftMvSource::NONE;  // 1.2.1: the source Uplift.fx is compiled with; Technique takes UPLIFT_MV only while it is on
-  // T5: why a 64-bit Vulkan device's NR at Present runs in the helper (addon::VkRouteChoice's reason; gitc-uplift.addon64 sets it at each present). The
+  // Why a 64-bit Vulkan device's NR at Present runs in the helper (addon::VkRouteChoice's reason; gitc-uplift.addon64 sets it at each present). The
   // Details line and the footer name the route with it. Empty in gitc-uplift.addon32 and for every other API.
   std::string route_reason;
-  // The game's DXGI local budget and usage (design §2.10), measured at most once a second and sent with the next FRAME.
+  // The game's DXGI local budget and usage, sampled at MEMORY_PERIOD intervals and sent with the next FRAME.
   Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
   std::chrono::steady_clock::time_point last_memory_query;
   uint64_t memory_budget = 0u;
@@ -126,8 +126,8 @@ struct HelperDevice {
     return d3d11->Kind();
   }
   [[nodiscard]] bool Fenced() const { return HasClient() && Kind() == ipc::Transport::FENCED; }
-  // A client that shares UPLIFT_MASK and LaunchPad's motion with the helper: Direct3D 9 on both its transports (Plan 10), Vulkan and OpenGL on both
-  // (Plans 11 and 12), Direct3D 10, 11 and 12 with fences (a Direct3D 11 device on the CPU-ordered fallback has neither; Direct3D 12 has no fallback).
+  // A client that shares UPLIFT_MASK and LaunchPad's motion with the helper: Direct3D 9 on both its transports, Vulkan and OpenGL on both
+  // Direct3D 10, 11 and 12 with fences (a Direct3D 11 device on the CPU-ordered fallback has neither; Direct3D 12 has no fallback).
   [[nodiscard]] bool SharesImages() const { return d3d9 != nullptr || vulkan != nullptr || gl != nullptr || Fenced(); }
   // `hosts`: the Vulkan, OpenGL or Direct3D 12 client's host (empty for the other APIs, which free their objects by reference counting).
   void ReleaseMask(const ClientHosts& hosts = {}) {  // the client's shared mask
@@ -145,7 +145,7 @@ struct HelperDevice {
       d3d11->ReleaseMask();
     }
   }
-  // Plan 17: Retry now restarts the helper after it stopped: the client's latch from that stop goes too.
+  // Retry now restarts the helper after it stopped: the client's latch from that stop goes too.
   void ClearClientLatch() {
     if (d3d10) {
       d3d10->ClearLatch();
@@ -182,8 +182,8 @@ struct HelperFrame {
   reshade::api::device* device = nullptr;
   reshade::api::swapchain* swapchain = nullptr;
   reshade::api::effect_runtime* runtime = nullptr;  // may be null
-  // Vulkan and OpenGL (Plans 11 and 12, design §3.1): the effect runtime's queue, whose immediate list Uplift records into, and the queue the present event
-  // came from (on OpenGL the runtime's context must be the one that presents). Direct3D 12 (Plan 12): `queue` is the present event's, which is the runtime's.
+  // Vulkan and OpenGL: the effect runtime's queue, whose immediate list Uplift records into, and the queue the present event
+  // came from (on OpenGL the runtime's context must be the one that presents). Direct3D 12: `queue` is the present event's, which is the runtime's.
   // Null for every other API, and for a Vulkan or OpenGL device whose runtime is not up yet (nothing runs then).
   reshade::api::command_queue* queue = nullptr;
   reshade::api::command_queue* present_queue = nullptr;
@@ -211,12 +211,11 @@ class HelperFront {
   HelperFront(const HelperFront&) = delete;
   HelperFront& operator=(const HelperFront&) = delete;
 
-  // AddonInit (design §2.9): the pending 9Ex marker. When the last start asked for 9Ex and never got a 9Ex device to present or to destroy,
+  // AddonInit: the pending 9Ex marker. When the last start asked for 9Ex and never got a 9Ex device to present or to destroy,
   // the toggle is turned off (in `settings`, saved through `config`) and the marker deleted, once; the warning to log is returned.
   std::optional<std::string> CheckExMarker(ui::Settings* settings, ui::ConfigStore* config);
-  // The settings changed (SaveAndApply, the Enabled poll) and once at AddonInit: re-serialises the text the helper reads and bumps its
-  // generation, which also restarts the helper's retry backoff (Plan 6, D11).
-  void SettingsChanged(const ui::Settings& settings);
+  // Publishes the helper's execution settings. The x64 Vulkan helper runs only at Present, so its copy uses the effective source while the host retains the stored preference.
+  void SettingsChanged(ui::Settings settings);
   // Every present of a D3D9 device, BEFORE the host's swap-chain selector (any swap chain counts): the 9Ex check, and the pending marker's
   // deletion at a 9Ex device's second present event.
   void NotePresent(HelperDevice& device, reshade::api::device* owner, const ui::Settings& settings);
@@ -230,7 +229,7 @@ class HelperFront {
   void Technique(HelperDevice& device, reshade::api::effect_runtime* runtime, bool is_marker, uint64_t rtv, const ui::Settings& settings);
   // Copy UPLIFT_MASK at finish-effects on the frame's own immediate list.
   void FinishEffects(HelperDevice& device, reshade::api::effect_runtime* runtime, const ui::Settings& settings);
-  // A D3D9 device's destroy_command_queue, raised before every Reset and ResetEx (helper design §2.7): everything the client made on
+  // A D3D9 device's destroy_command_queue, raised before every Reset and ResetEx: everything the client made on
   // the device goes (a live D3DPOOL_DEFAULT object fails the game's Reset) and the helper is detached; its Session stays.
   void DestroyQueue(HelperDevice& device, reshade::api::device* owner);
   // Every destroy_device of a device this front hosts: the 9Ex marker's deletion for any 9Ex device (one created and destroyed without a
@@ -238,19 +237,19 @@ class HelperFront {
   // Returns the Direct3D 10 client, moved out of `device`: the relay is ReShade's proxy, so the host destroys it only after it has released
   // its lock (null for any other device).
   [[nodiscard]] std::unique_ptr<client::D3D10Client> DestroyDevice(HelperDevice* device, reshade::api::device* owner);
-  // For the host's NrClaim: `owner`'s NR may be loaded in the helper (helper hand-over round: until a FRAME sent without nr_allowed is answered with the
+  // For the host's NrClaim: `owner`'s NR may be loaded in the helper (until a FRAME sent without nr_allowed is answered with the
   // Session OFF, or the helper is gone; never cleared by a stale, missing or pending status).
   [[nodiscard]] bool NrLoaded(reshade::api::device* owner) const;
   // Transitions' stress hook: the helper's last status said NR applied on `owner`'s latest recording.
   [[nodiscard]] bool NrApplied(reshade::api::device* owner) const;
   // The panel's view for `game_device` (of `device_api`), after the host's API check: the 9Ex readout, the motion line, the lines and the
-  // status card, then Setup and the working card's rows (ui::FinishSetup, with `state` and `now`: Plan 14, from the helper's status in protocol 6).
+  // status card, then Setup and the working card's rows (ui::FinishSetup, with `state` and `now`: from the helper's status).
   // `device` is the host's entry, or null before the game's first frame. The host has set `view->dlss_unavailable`.
   void Overlay(reshade::api::device* game_device, const HelperDevice* device, reshade::api::device_api device_api,
                const ui::Settings& settings, ui::OverlayView* view, ui::OverlayState* state, std::chrono::steady_clock::time_point now) const;
   // The card's Retry now: a stopped helper starts afresh; otherwise the next FRAME carries it.
   void RetryNow(HelperDevice* device);
-  // T5: `owner`, a 64-bit Vulkan device, no longer runs NR in the helper (its route changed and the helper's NR is off; the host released its client):
+  // `owner`, a 64-bit Vulkan device, no longer runs NR in the helper (its route changed and the helper's NR is off; the host released its client):
   // the helper is detached when it serves `owner`, and the next device to need it attaches afresh.
   void Detach(reshade::api::device* owner);
   // ReShade's create_device event (id 96): asks for a Direct3D 9Ex device when the toggle is on, and writes the pending marker.
@@ -271,7 +270,7 @@ class HelperFront {
   std::filesystem::path addon_directory_;
   std::filesystem::path game_directory_;
   std::filesystem::path ngx_data_directory_;  // the helper's NGX app data, as in 64-bit games
-  std::filesystem::path ex_marker_path_;      // Design §2.9: written when Uplift asks for 9Ex, deleted once a 9Ex device's first Present returned
+  std::filesystem::path ex_marker_path_;      // written when Uplift asks for 9Ex, deleted once a 9Ex device's first Present returned
   // One helper per process, made at the first present that needs it, for the device that owns the claim. It outlives a D3D9 Reset
   // (destroy_command_queue only detaches), and Quit ends it.
   std::unique_ptr<client::RemoteNr> remote_;

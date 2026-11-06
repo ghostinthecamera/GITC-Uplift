@@ -4,7 +4,7 @@
 
 namespace uplift::hooks {
 
-// Plan 11 (key decision c): MinHook is initialised once per process and shared by the NGX hooks (x64) and the Vulkan device hook (both
+// MinHook is initialised once per process and shared by the NGX hooks (x64) and the Vulkan device hook (both
 // halves). MinHook keeps the state itself; these three only make "already initialised" a success and keep MH_Uninitialize away from a
 // hook that lives for the process.
 

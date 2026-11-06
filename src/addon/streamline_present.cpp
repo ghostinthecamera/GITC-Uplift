@@ -16,6 +16,7 @@
 namespace uplift::addon::streamline {
 namespace {
 
+
 using Microsoft::WRL::ComPtr;
 using Upgrade = int(WINAPI*)(void**);
 using Factory = HRESULT(WINAPI*)(REFIID, void**);
@@ -37,6 +38,12 @@ template<class Fn>
 struct Hook {
   std::atomic<Fn> original{nullptr};
   std::atomic<void*> target{nullptr};
+  std::atomic_flag warned_enable_failure{};
+
+  // A detour needs original during enable. Optional probes may use it only after target is published.
+  Fn InstalledOriginal() const {
+    return target.load(std::memory_order_acquire) ? original.load(std::memory_order_acquire) : Fn{};
+  }
 };
 
 // Stable prefix of sl::DLSSGOptions from the public Streamline v2 ABI.
@@ -89,6 +96,23 @@ bool IsInterposer(HMODULE module) {
   return _wcsicmp(name ? name + 1 : path, L"sl.interposer.dll") == 0;
 }
 
+template<class Fn>
+bool InstallDetour(Hook<Fn>& hook, void* address, Fn detour) {
+  void* trampoline = nullptr;
+  if (MH_CreateHook(address, reinterpret_cast<void*>(detour), &trampoline) != MH_OK) return false;
+  hook.original.store(reinterpret_cast<Fn>(trampoline), std::memory_order_release);
+  if (const auto status = MH_EnableHook(address); status != MH_OK) {
+    hook.original.store(Fn{}, std::memory_order_release);
+    MH_RemoveHook(address);
+    if (!hook.warned_enable_failure.test_and_set(std::memory_order_relaxed)) {
+      try { nr::Logf(nr::LogLevel::WARN, "Before FG: could not enable the hook at {} ({})", address, MH_StatusToString(status)); } catch (...) {}
+    }
+    return false;
+  }
+  hook.target = address;
+  return true;
+}
+
 // A forwarded export or a shared native DXGI/vulkan-loader method is never an outer Streamline call.
 template<class Fn>
 bool Attach(Hook<Fn>& hook, void* address, Fn detour, HMODULE feature_module = nullptr) {
@@ -99,15 +123,7 @@ bool Attach(Hook<Fn>& hook, void* address, Fn detour, HMODULE feature_module = n
   if (hook.target) return hook.target == address;
   HMODULE pin{};
   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(address), &pin)) return false;
-  void* trampoline = nullptr;
-  if (MH_CreateHook(address, reinterpret_cast<void*>(detour), &trampoline) != MH_OK) return false;
-  hook.original.store(reinterpret_cast<Fn>(trampoline), std::memory_order_release);
-  if (MH_EnableHook(address) != MH_OK) {
-    MH_RemoveHook(address);
-    return false;
-  }
-  hook.target = address;
-  return true;
+  return InstallDetour(hook, address, detour);
 }
 
 template<class... Args>
@@ -275,10 +291,16 @@ HRESULT WINAPI OnFactory2(UINT flags, REFIID iid, void** output) {
   return hr;
 }
 
+struct ReleaseVkTick {
+  VkForward& forwarded;
+  ~ReleaseVkTick() { forwarded.ReleaseNativeTick(); }
+};
+
 VKAPI_ATTR VkResult VKAPI_CALL OnVkPresent(VkQueue queue, const VkPresentInfoKHR* info) {
   const PresentScope scope;
   if (scope.Nested() || !info) return vk_present.original.load(std::memory_order_acquire)(queue, info);
   VkForward forwarded{.info = *info};
+  const ReleaseVkTick release_tick{forwarded};
   observer.vk_present(queue, info, &forwarded);
   if (forwarded.failure != VK_SUCCESS) {
     if (info->pResults) std::fill_n(info->pResults, info->swapchainCount, forwarded.failure);
@@ -317,7 +339,7 @@ VKAPI_ATTR VkResult VKAPI_CALL OnVkCreate(VkDevice device, const VkSwapchainCrea
   if (parent && inner) *parent = inner;
   if (result == VK_SUCCESS && !parent) {
     if (observer.vk_created) observer.vk_created(device, *chain, adjusted, inner);
-    if (const auto resolve = vk_device_proc.original.load(std::memory_order_acquire)) {
+    if (const auto resolve = vk_device_proc.InstalledOriginal()) {
       Attach(vk_images, reinterpret_cast<void*>(resolve(device, "vkGetSwapchainImagesKHR")), &OnVkImages);
       Attach(vk_acquire, reinterpret_cast<void*>(resolve(device, "vkAcquireNextImageKHR")), &OnVkAcquire);
       Attach(vk_acquire2, reinterpret_cast<void*>(resolve(device, "vkAcquireNextImage2KHR")), &OnVkAcquire2);
@@ -379,7 +401,7 @@ void BindExports(HMODULE module) {
   // Streamline v2 returns a Result from slUpgradeInterface. Do not attach this ABI to v1.
   if (resolve("slGetNativeInterface") && resolve("slGetFeatureFunction")) Attach(upgrade, resolve("slUpgradeInterface"), &OnUpgrade);
   Attach(get_feature, resolve("slGetFeatureFunction"), &OnGetFeature);
-  if (get_feature.original.load(std::memory_order_acquire)) {
+  if (get_feature.InstalledOriginal()) {
     void* function = nullptr;
     OnGetFeature(1000u, "slDLSSGSetOptions", function);
   }
@@ -445,16 +467,9 @@ bool Start(HMODULE self, const Observer& callbacks) {
   HMODULE pin{};
   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(self), &pin)) return false;
   void* address = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcAddress"));
-  void* trampoline = nullptr;
-  if (!address || MH_CreateHook(address, reinterpret_cast<void*>(&OnGetProc), &trampoline) != MH_OK) return false;
-  get_proc.original.store(reinterpret_cast<decltype(&GetProcAddress)>(trampoline), std::memory_order_release);
+  if (!address || !InstallDetour(get_proc, address, &OnGetProc)) return false;
   observer = callbacks;
-  TraceDxgi("Before FG DX12: issue 12 diagnostic enabled");
-  if (MH_EnableHook(address) != MH_OK) {
-    MH_RemoveHook(address);
-    return false;
-  }
-  get_proc.target = address;
+  TraceDxgi("Before FG DX12: diagnostic enabled");
   hooks::HoldMinHook();
   enabled.store(true, std::memory_order_release);
   Poll();
@@ -472,9 +487,9 @@ void Poll() {
   BindExports(module);
   // ReShade loads add-ons at device creation, after a statically linked application may already have obtained its factory.
   // A separate Streamline factory exposes the same provider methods without upgrading or replacing the application's object.
-  if (factory1.original.load(std::memory_order_acquire)) {
+  if (const auto create_factory = factory1.InstalledOriginal()) {
     ComPtr<IDXGIFactory2> probe;
-    if (SUCCEEDED(factory1.original.load(std::memory_order_acquire)(IID_PPV_ARGS(&probe)))) BindFactory(probe.Get(), "Uplift probe");
+    if (SUCCEEDED(create_factory(IID_PPV_ARGS(&probe)))) BindFactory(probe.Get(), "Uplift probe");
   }
   nr::Logf(nr::LogLevel::INFO, "Before FG hooks: upgrade={} DXGI factories={}/{}/{} creation={}/{}/{} Vulkan resolver={}/{} vkQueuePresentKHR={}",
            upgrade.target != nullptr, factory.target != nullptr, factory1.target != nullptr, factory2.target != nullptr,
@@ -498,6 +513,7 @@ bool WatchGameFacing(IDXGISwapChain* chain, bool trace_method) {
 }
 bool InsideOuterPresent() { return inside_present; }
 bool Installed() { return enabled.load(std::memory_order_acquire); }
+bool StreamlineLoaded() { return interposer.load(std::memory_order_acquire) != nullptr; }
 FgMode Mode() { return mode.load(std::memory_order_acquire); }
 
 }  // namespace uplift::addon::streamline

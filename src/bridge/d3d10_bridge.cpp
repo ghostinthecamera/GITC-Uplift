@@ -4,14 +4,13 @@
 #include <utility>
 
 #include "color/encoding.hpp"
+#include "memory_units.hpp"
 #include "nr/log.hpp"
 
 namespace uplift::bridge {
 namespace {
 
 using Microsoft::WRL::ComPtr;
-
-constexpr double MIB = 1024.0 * 1024.0;
 
 }  // namespace
 
@@ -31,7 +30,7 @@ void D3D10Bridge::SyncLatches() {
   if (relay_->Stopped() && !bridge_->Stopped()) {
     std::string reason = KeyedRelay::Sentence(relay_->Reason());
     nr::Log(nr::LogLevel::ERR, reason);
-    bridge_->Stop(std::move(reason));  // key decision c: the D3D11 bridge's latch is the one, its fences signalled
+    bridge_->Stop(std::move(reason));  // the D3D11 bridge's latch is the one, its fences signalled
   } else if (bridge_->Stopped() && !relay_->Stopped()) {
     relay_->Stop("the Direct3D 11 bridge stopped");
   }
@@ -50,7 +49,7 @@ BridgeFrame D3D10Bridge::BeginFrame(ID3D10Resource* back_buffer, bool enabled, b
     motion_failure_.reset();
     bridge_problem_.reset();
   }
-  // Key decision f: the keyed textures live only while NR runs on a usable image and no bridge stopped. D3D12 never
+  // The keyed textures live only while NR runs on a usable image and no bridge stopped. D3D12 never
   // touches them, so they go at once; the relay's releases are destroyed by the flush at the end of this call.
   const auto retire_keyed = [this] {
     relay_->Drop(&color_);
@@ -65,7 +64,7 @@ BridgeFrame D3D10Bridge::BeginFrame(ID3D10Resource* back_buffer, bool enabled, b
   if (!description) {
     problem = "The back buffer is not a 2D texture";
   } else if (description->SampleDesc.Count != 1u) {
-    problem = "Multisampled back buffers are not supported on Direct3D 10";  // design R26
+    problem = "Multisampled back buffers are not supported on Direct3D 10";
   } else if (!format) {
     problem = std::format("Unsupported back-buffer format (DXGI_FORMAT {})", static_cast<int>(description->Format));
   }
@@ -80,16 +79,16 @@ BridgeFrame D3D10Bridge::BeginFrame(ID3D10Resource* back_buffer, bool enabled, b
       if (relay_->CreateKeyed(size, back_buffer_format, format->bytes_per_pixel, &color_, &result)) {
         color_failure_.reset();
       } else {
-        color_failure_ = ShareFailure{.size = size, .format = back_buffer_format, .result = result};
+        color_failure_ = ShareFailure{.size = size, .format = back_buffer_format, .cause = {.result = result}};
       }
     }
   }
   SyncLatches();  // a key that did not come while the keyed colour was made stops the D3D11 bridge before it is used below
-  // Reported while NR is off too, so the Session does not load for a back buffer the relay cannot share, nor (I-1) for
+  // Reported while NR is off too, so the Session does not load for a back buffer the relay cannot share, nor for
   // one the D3D11 bridge could not share with the private device: it describes a back buffer only while NR runs.
   if (problem.empty() && color_failure_ && color_failure_->Matches(size, back_buffer_format)) {
     problem = std::format("The back buffer could not be shared with the Direct3D 11 relay (DXGI_FORMAT {}, HRESULT {:#010x})",
-                          static_cast<int>(back_buffer_format), static_cast<uint32_t>(color_failure_->result));
+                          static_cast<int>(back_buffer_format), static_cast<uint32_t>(color_failure_->cause.result));
   } else if (problem.empty() && bridge_problem_ && bridge_problem_->size == size && bridge_problem_->format == back_buffer_format) {
     problem = bridge_problem_->text;
   }
@@ -115,7 +114,7 @@ BridgeFrame D3D10Bridge::BeginFrame(ID3D10Resource* back_buffer, bool enabled, b
     // Stopped inside this very call (the watchdog): the keyed textures go with the latch, as the shared ones.
     retire_keyed();
   }
-  // Final review C-1: D3D11 destroys a released object only at its context's next Flush, and the relay has no Present. With
+  // D3D11 destroys a released object only at its context's next Flush, and the relay has no Present. With
   // NR off, or after a latch, no Run or copy comes to flush it, so the keyed textures and the relay's opened references
   // to the shared colour, motion and mask (the D3D11 bridge's releases) would stay in VRAM. Only while something is pending.
   const bool released = bridge_->TakeReleased();
@@ -129,7 +128,7 @@ BridgeFrame D3D10Bridge::BeginFrame(ID3D10Resource* back_buffer, bool enabled, b
 
 bool D3D10Bridge::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, const Recorder& record) {
   if (!shared_ready_ || Stopped() || !color_.relay || back_buffer == nullptr) return false;
-  // Plan 7's decision 3 on D3D10: LaunchPad's UPLIFT_MV crosses like the colour, and is retired when a recording comes
+  // LaunchPad's UPLIFT_MV crosses like the colour, and is retired when a recording comes
   // without one (LaunchPad off, or NR at the present or after the effects).
   Keyed* motion_keyed = nullptr;
   const std::optional<D3D10_TEXTURE2D_DESC> motion_description = TextureDesc(motion);
@@ -145,7 +144,7 @@ bool D3D10Bridge::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, const
         motion_failure_.reset();
       } else {
         // Logged once: not retried for this size.
-        motion_failure_ = ShareFailure{.size = size, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
+        motion_failure_ = ShareFailure{.size = size, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = {.result = result}};
         nr::Logf(nr::LogLevel::WARN,
                  "UPLIFT_MV could not be shared with the Direct3D 11 relay (HRESULT {:#010x}); NR runs without LaunchPad's motion",
                  static_cast<uint32_t>(result));
@@ -157,7 +156,7 @@ bool D3D10Bridge::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, const
   }
   SyncLatches();  // a key that did not come while the keyed motion was made
   // 1. The game's side hands the frame over (key 0 -> 1), then submits: the relay's GPU never waits for a release that
-  //    was not submitted (design §2 rule 3).
+  //    was not submitted.
   if (!relay_->Hand(color_, back_buffer) || (motion_keyed != nullptr && !relay_->Hand(*motion_keyed, motion))) {
     SyncLatches();
     return false;
@@ -202,13 +201,13 @@ MaskCopy D3D10Bridge::CopyMask(ID3D10Resource* mask) {
     relay_->Drop(&mask_);
   }
   if (!mask_.relay) {
-    // Which step failed decides the mask note's wording (final review Minor 2).
-    if (mask_failure_ && mask_failure_->Matches(size, format->view_format)) return {.relay_failed = !mask_failure_->bridge};
+    // Which step failed decides the mask note's wording.
+    if (mask_failure_ && mask_failure_->Matches(size, format->view_format)) return {.relay_failed = !mask_failure_->cause.bridge};
     HRESULT result = S_OK;
     // In the typed view format: a D3D10 copy stays inside one typeless group, as on D3D11.
     if (!relay_->CreateKeyed(size, format->view_format, format->bytes_per_pixel, &mask_, &result)) {
       // Logged once: not retried for this size and format.
-      mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .result = result};
+      mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .cause = {.result = result}};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with the Direct3D 11 relay (DXGI_FORMAT {}, HRESULT {:#010x})",
                static_cast<int>(format->view_format), static_cast<uint32_t>(result));
       return {.relay_failed = true};
@@ -216,7 +215,7 @@ MaskCopy D3D10Bridge::CopyMask(ID3D10Resource* mask) {
     mask_failure_.reset();
   }
   SyncLatches();  // a key that did not come while the keyed mask was made
-  // The colour's hand-off (design §2 rule 7).
+  // The colour's hand-off.
   if (!relay_->Hand(mask_, mask)) {
     SyncLatches();
     return {};
@@ -233,7 +232,7 @@ MaskCopy D3D10Bridge::CopyMask(ID3D10Resource* mask) {
   if (!copied.size && !copied.unsupported) {
     // The D3D11 bridge could not share it with the private device (RGBA32F, for one): not handed over again for this
     // size and format until a re-enable, instead of two full-frame copies a frame for nothing.
-    mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .result = E_FAIL, .bridge = true};
+    mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .cause = {.result = E_FAIL, .bridge = true}};
     relay_->Drop(&mask_);
   }
   FlushRelay();
@@ -246,7 +245,7 @@ void D3D10Bridge::ReleaseMask() {
 }
 
 void D3D10Bridge::Stop(std::string reason) {
-  relay_->Stop(reason);  // the relay's latch follows the D3D11 bridge's, which is the one that signals the fences (key decision c)
+  relay_->Stop(reason);  // the relay's latch follows the D3D11 bridge's, which is the one that signals the fences
   bridge_->Stop(std::move(reason));
 }
 
@@ -257,7 +256,7 @@ uint64_t D3D10Bridge::SharedBytes() const {
 std::string D3D10Bridge::StatusLine() const {
   std::string line =
       std::format("Direct3D 10: NR runs on a private Direct3D 12 device through a Direct3D 11 relay (shared {:.1f} MiB)",
-                  static_cast<double>(SharedBytes()) / MIB);
+                  static_cast<double>(SharedBytes()) / BYTES_PER_MIB);
   if (bridge_->BusySkips() > 0u) {
     line += std::format(", {} frame(s) without NR while the bridge was busy", bridge_->BusySkips());
   }

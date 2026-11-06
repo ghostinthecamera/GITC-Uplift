@@ -11,13 +11,16 @@
 #include "color/encoding.hpp"
 #include "ipc/control_block.hpp"
 #include "nr/log.hpp"
+#include "text/effect_names.hpp"
+#include "text/helper_messages.hpp"
+#include "text/nr_messages.hpp"
 
 namespace uplift::client {
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr DWORD DESTROY_WAIT_MS = 2000u;  // the design's R29 cap on the waits that can stall the game thread
+constexpr DWORD DESTROY_WAIT_MS = 2000u;  // the cap on the waits that can stall the game thread
 
 std::string ShareFailureText(const char* what, DXGI_FORMAT format, HRESULT result) {
   return std::format("{} could not be shared with Uplift's helper (DXGI_FORMAT {}, HRESULT {:#010x})", what, static_cast<int>(format),
@@ -41,7 +44,7 @@ std::unique_ptr<D3D12Client> D3D12Client::Create(ID3D12Device* device, std::stri
   }
   // WARP and other vendors are refused, as on every other API; cross-adapter sharing is out of scope.
   if (adapter_description.VendorId != addon::NVIDIA_VENDOR_ID) {
-    return fail("Uplift needs an NVIDIA GPU; this game renders on another adapter");
+    return fail(uplift::text::NVIDIA_GPU_REQUIRED_LINE);
   }
   std::unique_ptr<D3D12Client> client(new D3D12Client());
   client->device_ = device;
@@ -241,7 +244,7 @@ ipc::Target D3D12Client::Describe(D3D12Host& host, const D3D12_RESOURCE_DESC& ba
     problem = std::format("Unsupported back-buffer format (DXGI_FORMAT {})", static_cast<int>(format));
   }
   if (!running || !problem.empty()) {
-    RetireShared(host, {&color_, &mask_, &motion_});  // NR is off, or this image cannot go: the shared surfaces go with it (Plan 7's final review C-1)
+    RetireShared(host, {&color_, &mask_, &motion_});  // NR is off, or this image cannot go: the shared surfaces go with it
   }
   if (problem.empty() && color_failure_ && color_failure_->Matches(size, format)) {
     problem = ShareFailureText("The back buffer", format, color_failure_->result);
@@ -315,13 +318,13 @@ void D3D12Client::Apply(const ipc::Reply& reply, NrLink& link, D3D12Host& host) 
     } else {
       // The texture is the one the last SHARE_MASK asked for (this reply landed late), not the back buffer's size and format.
       mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .result = result};
-      nr::Log(nr::LogLevel::WARN, ShareFailureText("UPLIFT_MASK", mask_ask_.format, result));
+      nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MASK_TEXTURE, mask_ask_.format, result));
     }
   }
   if (motion != nullptr && latch_.empty()) {
     if (!Open(host, motion, &motion_, &result)) {
       motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
-      nr::Log(nr::LogLevel::WARN, ShareFailureText("UPLIFT_MV", DXGI_FORMAT_R16G16_FLOAT, result));
+      nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MOTION_TEXTURE, DXGI_FORMAT_R16G16_FLOAT, result));
     }
   }
   for (const HANDLE handle : {to12, to11, color, mask, motion}) {
@@ -372,7 +375,7 @@ bool D3D12Client::RunFenced(D3D12Host& host, ID3D12Resource* back_buffer, D3D12U
     }
     pending_out_ = 0u;
   }
-  // Plan 7 decision 3: LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
+  // LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
   ID3D12Resource* shared_motion_source = nullptr;
   const D3D12_RESOURCE_DESC motion_description = (motion != nullptr ? motion->GetDesc() : D3D12_RESOURCE_DESC{});
   if (motion != nullptr && motion_description.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && motion_description.Format == DXGI_FORMAT_R16G16_FLOAT
@@ -397,7 +400,7 @@ bool D3D12Client::RunFenced(D3D12Host& host, ID3D12Resource* back_buffer, D3D12U
         if (opened) {
           motion_failure_.reset();
         } else {
-          // Logged once: not retried for this size (Plan 7's final review Minor 3).
+          // Logged once: not retried for this size.
           motion_failure_ = ShareFailure{.size = motion_size, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
           nr::Logf(nr::LogLevel::WARN, "UPLIFT_MV could not be shared with Uplift's helper (HRESULT {:#010x}); NR runs without LaunchPad's motion",
                    static_cast<uint32_t>(result));
@@ -455,7 +458,7 @@ bool D3D12Client::RunFenced(D3D12Host& host, ID3D12Resource* back_buffer, D3D12U
       return reply.submitted != 0u;
     }
     bool SignalD3D12(uint64_t /*value*/) override { return reply.signalled != 0u; }
-    // R17: only after the reply said the signal was submitted (RunBridgedFrame calls this after SignalD3D12 returned true). command_queue::wait does not flush,
+    // Only after the reply said the signal was submitted (RunBridgedFrame calls this after SignalD3D12 returned true). command_queue::wait does not flush,
     // and nothing is recorded between the signal above and this wait; what the copy out records after it runs after the wait, whenever ReShade flushes.
     bool WaitD3D11(uint64_t value) override {
       client_.waited11_ = value;  // for Stop, whether or not the queue took it
@@ -485,13 +488,13 @@ bool D3D12Client::RunFenced(D3D12Host& host, ID3D12Resource* back_buffer, D3D12U
   const bridge::BridgedFrame frame = bridge::RunBridgedFrame(steps, in, out);
   run_sent_ = steps.sent;
   if (steps.timed_out) {
-    // No reply in 2 s (or the helper is gone, which the launcher shows next frame). Nothing was queued on this side's GPU after the copy in, and no wait ever
+    // No reply within RUN_REPLY_CAP (or the helper is gone, which the launcher shows next frame). Nothing was queued on this side's GPU after the copy in, and no wait ever
     // will be for `out`; the helper's list may still run, so until to11 shows its signal (or a late reply says there is none) nothing touches the shared
     // textures. A RUN the link refused never reached the helper.
     if (steps.sent) {
       pending_out_ = out;
       in_flight_ = true;
-      nr::Log(nr::LogLevel::WARN, "Uplift's 64-bit helper did not answer within 2 s; frames go without NR until it does");
+      nr::Logf(nr::LogLevel::WARN, uplift::text::RUN_REPLY_TIMEOUT_LINE, std::chrono::duration<double>(RUN_REPLY_CAP).count());
     }
     return false;
   }
@@ -540,7 +543,7 @@ MaskCopy D3D12Client::CopyMask(D3D12Host& host, ID3D12Resource* mask, NrLink& li
       CloseHandle(handle);
     }
     if (!opened) {
-      // Logged once: not retried for this size and format (final review Minor 3).
+      // Logged once: not retried for this size and format.
       mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .result = result};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, HRESULT {:#010x})", static_cast<int>(format->view_format),
                static_cast<uint32_t>(result));

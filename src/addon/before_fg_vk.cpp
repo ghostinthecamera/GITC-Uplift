@@ -1,5 +1,6 @@
 #include "addon/before_fg_vk.hpp"
 #include <algorithm>
+#include "text/before_fg_messages.hpp"
 #include "vk/loader.hpp"
 #include "nr/log.hpp"
 
@@ -74,26 +75,26 @@ void BeforeFgVk::DestroyDevice(VkDevice device) {
   });
 }
 BeforeFgVk::Frame BeforeFgVk::Prepare(VkQueue queue, const VkPresentInfoKHR& app, color::Encoding encoding) {
-  if (app.swapchainCount != 1u || !app.pSwapchains || !app.pImageIndices) return {.reason = "Cannot isolate the primary Vulkan swapchain"};
-  if (!app.waitSemaphoreCount || !app.pWaitSemaphores) return {.reason = "Streamline Present has no game-rendered completion signal"};
+  if (app.swapchainCount != 1u || !app.pSwapchains || !app.pImageIndices) return {.reason = uplift::text::PRIMARY_VK_SWAPCHAIN_LINE};
+  if (!app.waitSemaphoreCount || !app.pWaitSemaphores) return {.reason = uplift::text::GAME_COMPLETION_SIGNAL_LINE};
   const auto it = chains_.find(app.pSwapchains[0]);
-  if (it == chains_.end()) return {.reason = "No verified game-facing Vulkan swapchain"};
+  if (it == chains_.end()) return {.reason = uplift::text::VERIFIED_VK_SWAPCHAIN_LINE};
   auto& chain = it->second;
   if (!chain.simple || (chain.space == color::ColorSpace::UNKNOWN && encoding == color::Encoding::AUTO) || chain.format == DXGI_FORMAT_UNKNOWN)
-    return {.reason = "Unsupported outer Vulkan image or color space"};
+    return {.reason = uplift::text::OUTER_VK_IMAGE_LINE};
   constexpr VkImageUsageFlags required = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-  if ((chain.usage & required) != required) return {.reason = "Outer Vulkan image lacks copy-source or copy-destination usage"};
+  if ((chain.usage & required) != required) return {.reason = uplift::text::OUTER_VK_IMAGE_USAGE_LINE};
   const uint32_t index = app.pImageIndices[0];
-  if (index >= chain.images.size() || !chain.images[index].acquired) return {.reason = "No matching real-frame image acquisition"};
+  if (index >= chain.images.size() || !chain.images[index].acquired) return {.reason = uplift::text::REAL_FRAME_ACQUISITION_LINE};
   for (auto* ext = static_cast<const VkBaseInStructure*>(app.pNext); ext; ext = ext->pNext) {
     if (ext->sType != VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR) continue;
     const auto* group = reinterpret_cast<const VkDeviceGroupPresentInfoKHR*>(ext);
     if (group->mode != VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR || !group->pDeviceMasks || group->pDeviceMasks[0] != 1u)
-      return {.reason = "Unsupported device-group presentation"};
+      return {.reason = uplift::text::DEVICE_GROUP_PRESENT_LINE};
   }
   if (chain.verified_queue != queue) {
     const auto record = vk::DeviceHook::Find(chain.binding.device);
-    if (!record) return {.reason = "The Vulkan device was not observed at creation"};
+    if (!record) return {.reason = uplift::text::VK_DEVICE_UNOBSERVED_LINE};
     const auto get_queue = Function<PFN_vkGetDeviceQueue>(chain.binding.device, "vkGetDeviceQueue");
     bool compatible = false;
     if (get_queue) {
@@ -106,7 +107,7 @@ BeforeFgVk::Frame BeforeFgVk::Prepare(VkQueue queue, const VkPresentInfoKHR& app
         }
       }
     }
-    if (!compatible) return {.reason = "The outer Vulkan queue uses an unsupported queue family"};
+    if (!compatible) return {.reason = uplift::text::OUTER_VK_QUEUE_FAMILY_LINE};
     chain.verified_queue = queue;
     chain.family = record->graphics_family;
   }
@@ -117,26 +118,41 @@ BeforeFgVk::Frame BeforeFgVk::Prepare(VkQueue queue, const VkPresentInfoKHR& app
           .space = chain.space, .family = chain.family};
 }
 
-vk::PresentRelayHost* BeforeFgVk::BridgeHost(VkQueue queue, const Frame& frame) {
+BeforeFgVk::HostResult BeforeFgVk::BridgeHost(VkQueue queue, const Frame& frame) {
   auto& owner = hosts_[queue];
-  if (owner.host) return owner.device == frame.binding.device ? owner.host.get() : nullptr;
+  if (owner.host) {
+    if (owner.device != frame.binding.device) return {.reason = text::REAL_FRAME_VK_RECORDING_LINE};
+    return {.host = owner.host.get()};
+  }
+  if (owner.device != frame.binding.device) owner = {.device = frame.binding.device};
   const auto functions = vk::NrFunctions::Open(frame.binding.device, false);
-  if (!functions) return nullptr;
-  std::string error;
-  owner.host = vk::PresentRelayHost::Create(*functions, frame.binding.device, queue, frame.family, &error);
-  owner.device = frame.binding.device;
-  return owner.host.get();
+  if (functions) {
+    owner.host = vk::PresentRelayHost::Create(*functions, frame.binding.device, queue, frame.family, &owner.creation_error);
+  } else {
+    owner.creation_error = text::VK_RECORDING_FUNCTIONS_LINE;
+  }
+  if (!owner.host) {
+    if (!owner.warned) {
+      owner.warned = true;
+      nr::Logf(nr::LogLevel::WARN, "Before FG: Vulkan recording host could not be created on queue {} (device {}): {}; later presents will retry",
+               static_cast<void*>(queue), static_cast<void*>(frame.binding.device), owner.creation_error);
+    }
+    return {.reason = owner.creation_error};
+  }
+  owner.creation_error.clear();
+  owner.warned = false;
+  return {.host = owner.host.get()};
 }
 
 BeforeFgVk::Result BeforeFgVk::Record(VkQueue queue, void* queue_identity, const VkPresentInfoKHR& app,
-                                      VkDlssContext& context, const FrameConfig& config, bool holds_nr, std::chrono::steady_clock::time_point now) {
-  const Frame frame = Prepare(queue, app, config.encoding);
+                                      VkDlssContext& context, const FrameSettings& settings, const FrameFacts& facts, bool holds_nr, bool& outer_ticked, std::chrono::steady_clock::time_point now) {
+  const Frame frame = Prepare(queue, app, settings.encoding);
   if (!frame.reason.empty()) return {.reason = frame.reason};
   const VkPresentFrame target{.back_buffer = frame.image, .color_space = frame.space};
-  const auto trigger = context.BeginFrame(queue_identity, config, config.nr_allowed, holds_nr, now, target);
+  const auto trigger = context.BeginOuterFrame(outer_ticked, queue_identity, settings, facts, facts.nr_allowed, holds_nr, now, target);
   if (trigger == TriggerPoint::NONE || context.NrState() != nr::SessionState::ACTIVE) return {};
   const VkPresentQueues queues = {.queue = queue, .flush_effects = [] {}, .waits = {app.pWaitSemaphores, app.waitSemaphoreCount}};
   const auto result = context.RunPresent(trigger, vk::Usage::PRESENT, queues, {}, now);
-  return {.passes = result.nr_applied ? result.passes_run : 0u, .reason = result.reason};
+  return {.passes = result.nr_applied ? result.passes_run : 0u, .reason = nr::SkipReasonText(result.reason)};
 }
 }  // namespace uplift::addon

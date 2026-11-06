@@ -1,8 +1,21 @@
 #include "bridge/bridge_sequence.hpp"
 
+#include <format>
 #include <limits>
+#include <string>
+
+#include "text/nr_messages.hpp"
 
 namespace uplift::bridge {
+namespace {
+
+std::string_view WatchdogTimeoutText() {
+  // Check returns a view that must outlive the call and any watchdog reset.
+  static const std::string text = std::format(uplift::text::BRIDGE_STALLED_LINE, std::chrono::duration<double>(BridgeWatchdog::LIMIT).count());
+  return text;
+}
+
+}  // namespace
 
 BridgedFrame RunBridgedFrame(BridgeSteps& steps, uint64_t in, uint64_t out) {
   steps.CopyIn();
@@ -39,7 +52,7 @@ std::optional<std::string_view> BridgeWatchdog::Check(uint64_t completed, uint64
   }
   idle_ = (completed >= submitted_);
   if (!idle_ && now - since_ >= LIMIT) {
-    return "the cross-API fences made no progress for 2 s while NR's work was outstanding";
+    return WatchdogTimeoutText();
   }
   return std::nullopt;
 }

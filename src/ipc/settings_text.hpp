@@ -1,6 +1,6 @@
 #pragma once
 
-// Plan 9 (design §2.1): the settings cross the process boundary as text. The add-on runs ui::SaveSettings into a
+// The settings cross the process boundary as text. The add-on runs ui::SaveSettings into a
 // TextConfigStore and copies Serialize() into ControlBlock::settings_text; the helper parses that text back and runs
 // ui::LoadSettings over it.
 

@@ -1,9 +1,9 @@
 #include "change_common.hlsli"
 #include "vk_common.hlsli"
 
-// v2 design §3.14 (amendment 2): the exposure meter and governor, one thread group before the encode. The state
+// The exposure meter and governor, one thread group before the encode. The state
 // texture's x is the encode's and decode's exposure multiplier.
-// Plan 17: the state is 2x1. With `probe` (Input exposure = Auto while the game passes an exposure) the second texel holds
+// The state is 2x1. With `probe` (Input exposure = Auto while the game passes an exposure) the second texel holds
 // the game's exposure as the encode reads it, beside the meter's target, for the add-on's readback.
 cbuffer MeterConstants : register(b0) {
   uint encoding;
@@ -18,13 +18,13 @@ cbuffer MeterConstants : register(b0) {
   float brighter_rate;   // stops per second toward a darker exposure
   float darker_rate;     // stops per second toward a brighter exposure
   float frame_seconds;   // Δt
-  uint probe;            // Plan 17: write texel (1, 0)
+  uint probe;            // write texel (1, 0)
   uint has_game_texture;  // the game's ExposureTexture is bound at t2
   float game_factor;     // DLSS.Exposure.Scale ÷ DLSS.Pre.Exposure
-  float game_weight;     // 2026-10-09, Auto's Blend with `probe`: the game's share, in stops, of the multiplier at (0, 0).x (1 − AutoExposureBlend); 0 the meter alone
+  float game_weight;     // Auto's Blend with `probe`: the game's share, in stops, of the multiplier at (0, 0).x (1 − AutoExposureBlend); 0 the meter alone
 };
 
-// Plan 14: on Vulkan's After DLSS the source is DLSS's output, read in place from its storage view (u2), as the encode reads it.
+// On Vulkan's After DLSS the source is DLSS's output, read in place from its storage view (u2), as the encode reads it.
 #if UPLIFT_VK_SOURCE_STORAGE
 UPLIFT_IMAGE_FORMAT(UPLIFT_VK_TARGET_FORMAT) RWTexture2D<float4> source_texture : register(u2);
 #define UPLIFT_LOAD_SOURCE(pixel) source_texture[uint2(pixel)]
@@ -33,7 +33,7 @@ Texture2D<float4> source_texture : register(t0);
 #define UPLIFT_LOAD_SOURCE(pixel) source_texture.Load(int3((pixel), 0))
 #endif
 UPLIFT_IMAGE_FORMAT("rgba32f") RWTexture2D<float4> state_texture : register(u0);  // (2^E, E, the last anchor, set)
-Texture2D<float> exposure_texture : register(t2);  // Plan 17: the game's exposure, as the encode binds it
+Texture2D<float> exposure_texture : register(t2);  // the game's exposure, as the encode binds it
 
 static const uint BINS = 96u;
 static const float LOW_STOPS = -16.f;
@@ -89,14 +89,14 @@ void main(uint3 group_thread : SV_GroupThreadID) {
     const float seconds = clamp(frame_seconds, 0.001f, 0.1f);
     exposure += clamp(target - exposure, -brighter_rate * seconds, darker_rate * seconds);
   }
-  // 2026-10-09: x is what the encode and the decode multiply by; y stays the governor's E, which the next frame moves on from.
+  // Here x is what the encode and the decode multiply by; y stays the governor's E, which the next frame moves on from.
   float multiplier_stops = exposure;
   if (probe != 0u) {
-    // Plan 17: (the game's texel, its factor, what the encode would multiply by, the meter's target in stops).
+    // (the game's texel, its factor, what the encode would multiply by, the meter's target in stops).
     const float texel = (has_game_texture != 0u ? exposure_texture.Load(int3(0, 0, 0)) : 1.f);
     const float game = GameExposure(has_game_texture, texel, game_factor);
     state_texture[uint2(1, 0)] = float4(texel, game_factor, game, target);
-    // 2026-10-09, Blend: game + w · (E − game) in stops, written as E + (1 − w) · (game − E). GameExposure is finite and positive.
+    // Blend: game + w · (E − game) in stops, written as E + (1 − w) · (game − E). GameExposure is finite and positive.
     multiplier_stops += game_weight * (log2(game) - exposure);
   }
   state_texture[uint2(0, 0)] = float4(exp2(multiplier_stops), exposure, anchor, 1.f);

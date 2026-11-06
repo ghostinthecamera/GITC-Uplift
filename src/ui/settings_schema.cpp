@@ -26,20 +26,20 @@ constexpr std::array<std::string_view, 2> STATE_RESTORE_MODES = {"Full", "Minima
 constexpr std::array<std::string_view, 4> LOG_LEVELS = {"Error", "Warning", "Info", "Debug"};
 constexpr std::array<std::string_view, 2> NGX_HOOK_MODES = {"Auto", "Off (safe mode)"};
 constexpr std::array<std::string_view, 2> FOREIGN_NR_MODES = {"Yield", "Observe"};
-constexpr std::array<std::string_view, 3> VRAM_CHECKS = {"Careful", "Relaxed", "Off"};  // 2026-10-09
-constexpr std::array<std::string_view, 3> VULKAN_NR_MODES = {"Native", "Direct3D 12", "Helper"};  // Plan 19; T5: Helper
+constexpr std::array<std::string_view, 3> VRAM_CHECKS = {"Careful", "Relaxed", "Off"};
+constexpr std::array<std::string_view, 3> VULKAN_NR_MODES = {"Native", "Direct3D 12", "Helper"};
 constexpr std::array<std::string_view, 6> RESOLUTION_MODES = {"Full", "Quality (67 %)", "Balanced (58 %)",
                                                               "Performance (50 %)", "Match game", "Custom"};
 constexpr std::array<std::string_view, 3> BEFORE_FG_MOTION = {"Choose", "Off", "DLSS"};
 constexpr std::array<std::string_view, 3> FG_PRESENT_MODES = {"Off", NR_STAGE_NAMES[3], NR_STAGE_NAMES[2]};
 constexpr std::array<std::string_view, 2> UPSAMPLING_MODES = {"Classic", "Edge-aware"};
-// Split chain (2026-10-10): a pass's Runs at after its first choice, "Same as pass n-1" (PassStageChoices), in stored-index order.
+// Split chain: a pass's Runs at after its first choice, "Same as pass n-1" (PassStageChoices), in stored-index order.
 constexpr std::array<std::string_view, 3> PASS_STAGES = {NR_STAGE_NAMES[0], NR_STAGE_NAMES[1], NR_STAGE_NAMES[3]};
 constexpr std::array<std::string_view, 2> MASK_MODES = {"Auto (UPLIFT_MASK)", "Off"};
 constexpr std::array<std::string_view, 3> UI_CORRECTION_MODES = {"Auto", "Off", "On"};
 constexpr std::array<std::string_view, 3> STABILIZE_MODES = {"Off", "Static", "Motion"};
 constexpr std::array<std::string_view, 4> INPUT_EXPOSURES = {"Auto", "Game", "Metered", "Manual"};
-constexpr std::array<std::string_view, 2> AUTO_EXPOSURE_MODES = {"Blend", "Switch"};  // 2026-10-09
+constexpr std::array<std::string_view, 2> AUTO_EXPOSURE_MODES = {"Blend", "Switch"};
 constexpr std::array<std::string_view, 2> ADAPT_MODES = {"Off", "Smooth"};
 constexpr std::array<std::string_view, 4> PRIMARIES = {"Auto", "BT.709", "BT.2020", "AP1 (ACEScg)"};
 constexpr std::array<std::string_view, 2> NEURAL_TRANSFERS = {"Bounded ratio", "Consistent"};
@@ -515,7 +515,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.upsampling = FromIndex<color::Upsampling>(v); },
     },
     {
-        // Split chain (2026-10-10, design 4): a later stage group's own size, keyed by stage so moving a boundary pass keeps each stage's size.
+        // Split chain: a later stage group's own size, keyed by stage so moving a boundary pass keeps each stage's size.
         .key = "ResolutionAfterDlss",
         .kind = SettingKind::CHOICE,
         .section = SettingSection::PLACEMENT,
@@ -564,7 +564,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.resolution_scale_present = static_cast<float>(v); },
     },
     {
-        // Split chain, owner's decision Q5a: a later stage group's own Keep faces, default off. Pass 1's group follows Keep faces itself.
+        // Split chain: a later stage group's own Keep faces, default off. Pass 1's group follows Keep faces itself.
         .key = "KeepFacesAfterDlss",
         .kind = SettingKind::BOOL,
         .section = SettingSection::PLACEMENT,
@@ -609,9 +609,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return static_cast<double>(s.pass_count); },
         .set = [](Settings& s, double v) { s.pass_count = static_cast<uint32_t>(v); },
     },
-    // User decision (fix round 1): the user does not want to change DLSS modes or presets from
-    // Uplift -- it needs a DLSS re-create, and live switching is not practical -- so these 8 rows are
-    // hidden. The keys stay readable from the ini and the code stays inert at the GAME defaults.
+    // DLSS mode and preset overrides are hidden because applying them requires recreating DLSS. Their INI keys remain readable,
+    // but ToSrOverrides always returns no overrides, preserving the game's choices.
     {
         .key = "DLSSQualityMode",
         .kind = SettingKind::CHOICE,
@@ -802,7 +801,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.input_exposure = FromIndex<color::InputExposure>(v); },
     },
     {
-        // 2026-10-09 (.superpowers/sdd/2026-10-09-auto-exposure): shown only while Input exposure is Auto.
+        // Shown only while Input exposure is Auto.
         .key = "AutoExposureMode",
         .kind = SettingKind::CHOICE,
         .section = SettingSection::FIXES_COLOR,
@@ -814,7 +813,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.auto_exposure_mode = FromIndex<color::AutoExposureMode>(v); },
     },
     {
-        // 2026-10-09: shown only for Auto's Blend. Stored 0..1, shown as a percentage.
+        // Shown only for Auto's Blend. Stored 0..1, shown as a percentage.
         .key = "AutoExposureBlend",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::FIXES_COLOR,
@@ -1040,7 +1039,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.budget_margin_mb = static_cast<uint32_t>(v); },
     },
     {
-        // 2026-10-09 (owner): a Budget input, applied at once with no NR reload.
+        // A Budget input, applied at once with no NR reload.
         .key = "VramCheck",
         .kind = SettingKind::CHOICE,
         .section = SettingSection::ADVANCED,
@@ -1079,7 +1078,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return Flag(s.show_face_mask); },
         .set = [](Settings& s, double v) { s.show_face_mask = (v != 0.0); },
     },
-    // Keep faces fix round 1 addendum (the owner's request): the face mask's tuning, live in game. Shader constants only: none restarts NR or the extra run.
+    // The face mask's tuning, live in game. Shader constants only: none restarts NR or the extra run.
     {
         .key = "FaceMaskThreshold",
         .kind = SettingKind::FLOAT,
@@ -1138,7 +1137,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.face_tuning.edge_falloff = static_cast<float>(v); },
     },
     {
-        // Fix round 3 (the owner's glowing spots): lighting comes back only where the mask is dense at the Lighting scale.
+        // Lighting comes back only where the mask is dense at the Lighting scale.
         .key = "FaceLightingDensity",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::ADVANCED,
@@ -1150,7 +1149,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.density); },
         .set = [](Settings& s, double v) { s.face_tuning.density = static_cast<float>(v); },
     },
-    // Round 5 (holes in the face mask on shadowed skin): shader constants only.
+    // Shader constants only.
     {
         .key = "FaceFillSkin",
         .kind = SettingKind::BOOL,
@@ -1186,7 +1185,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.face_tuning.fill_tolerance = static_cast<float>(v); },
     },
     {
-        // Round 5: replaces round 4's FaceSpeckFilter switch (test builds only: no migration).
+        // The unpublished FaceSpeckFilter Boolean has no migration; this size setting is the persisted control.
         .key = "FaceSpeckSize",
         .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
@@ -1240,7 +1239,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.foreign_nr = FromIndex<ForeignNrMode>(v); },
     },
     {
-        // Plan 19 (the owner's decision): native by default, the private Direct3D 12 device as the fallback and as a choice. T5: Uplift's helper process
+        // Native by default, the private Direct3D 12 device as the fallback and as a choice. Uplift's helper process
         // after both, and as a choice.
         .key = "VulkanNr",
         .kind = SettingKind::CHOICE,
@@ -1288,7 +1287,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.adjust_vulkan_devices = (v != 0.0); },
     },
     {
-        // Plan 19 T1b: the pending marker's first tier. Never in the panel, like AdjustVulkanDevices.
+        // The pending marker's first tier. Never in the panel, like AdjustVulkanDevices.
         .key = "AdjustVulkanDevicesForNgx",
         .kind = SettingKind::BOOL,
         .section = SettingSection::HIDDEN,
@@ -1301,7 +1300,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.adjust_vulkan_devices_for_ngx = (v != 0.0); },
     },
     {
-        // Plan 19 T6 (I-4): native NR at Present's latch. Never in the panel, like AdjustVulkanDevicesForNgx.
+        // Native NR at Present's latch. Never in the panel, like AdjustVulkanDevicesForNgx.
         .key = "VulkanNativeNr",
         .kind = SettingKind::BOOL,
         .section = SettingSection::HIDDEN,
@@ -1314,7 +1313,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.vulkan_native_nr = (v != 0.0); },
     },
     {
-        // Plan 17: diagnostic only, never in the panel. It exercises Retry now and the 2-strike rule without a real hang.
+        // Diagnostic only, never in the panel. It exercises Retry now and the 2-strike rule without a real hang.
         .key = "DiagnosticRemoveDevice",
         .kind = SettingKind::UINT,
         .section = SettingSection::HIDDEN,
@@ -1360,7 +1359,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     },
 });
 
-// Plan 5 (v2 design §3.10, P4-P13): pass n = Index + 2's own PassSettings field, through Settings::passes[Index].
+// Pass n = Index + 2's own PassSettings field, through Settings::passes[Index].
 // `get`/`set` must stay plain function pointers (SettingDescriptor::get/set), so Index and Member are template
 // parameters rather than captured state.
 template <size_t Index, auto Member>
@@ -1409,7 +1408,7 @@ const std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT>& PassKeyStrings
   return keys;
 }
 
-// Split chain (2026-10-10): pass n's Runs at choices, its first "Same as pass n-1", built once like PassKeyStrings (SettingDescriptor::choices points
+// Split chain: pass n's Runs at choices, its first "Same as pass n-1", built once like PassKeyStrings (SettingDescriptor::choices points
 // into it).
 const std::array<std::array<std::string_view, 4>, LATER_PASS_COUNT>& PassStageChoices() {
   static const std::array<std::string, LATER_PASS_COUNT> same_labels = [] {
@@ -1549,7 +1548,7 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .pass = PASS,
       },
       {
-          // Split chain (2026-10-10, design 6.2): written and shown whether or not the pass follows pass 1, and kept by the Defaults view.
+          // Split chain: written and shown whether or not the pass follows pass 1, and kept by the Defaults view.
           .key = key(9),
           .kind = SettingKind::CHOICE,
           .section = SettingSection::PASSES,
@@ -1687,7 +1686,7 @@ std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settin
       if (descriptor.special.has_value() && value == *descriptor.special) {
         return (value < 0.0 ? std::string("same as Structure") : std::string("automatic"));
       }
-      if (descriptor.key == "AutoExposureBlend") return std::format("{:.0f} %", value * 100.0);  // 2026-10-09: stored 0..1
+      if (descriptor.key == "AutoExposureBlend") return std::format("{:.0f} %", value * 100.0);  // stored 0..1
       return std::format("{:.2f}", value);
     case SettingKind::TEXT: break;
   }
@@ -1696,7 +1695,7 @@ std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settin
 
 bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings) {
   const bool automatic = (settings.input_exposure == color::InputExposure::AUTO);
-  // Plan 17: the Adaptation rows matter wherever the meter can be used: Metered, and Auto, which meters when the game's exposure is missing, broken or blended.
+  // The Adaptation rows matter wherever the meter can be used: Metered, and Auto, which meters when the game's exposure is missing, broken or blended.
   if (descriptor.key == "ExposureAdapt" || descriptor.key == "AdaptBrighterStops" || descriptor.key == "AdaptDarkerStops") {
     return (!automatic && settings.input_exposure != color::InputExposure::METERED);
   }
@@ -1705,9 +1704,13 @@ bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& sett
   return false;
 }
 
+bool DiffuseWhiteInExposureGroup(const Settings& settings) {
+  return settings.input_exposure == color::InputExposure::MANUAL;
+}
+
 double DescriptorMax(const SettingDescriptor& descriptor) {
   if (descriptor.kind == SettingKind::CHOICE) return static_cast<double>(descriptor.choices.size()) - 1.0;
-  // Owner, 2026-10-17: a value typed with Ctrl+click may go past the slider's end, up to ten times it (or `max` when that is higher already, as
+  // A value typed with Ctrl+click may go past the slider's end, up to ten times it (or `max` when that is higher already, as
   // Intensity's 10), except where the slider's range is the meaning (SLIDER_RANGE_ONLY). The radii only pick pyramid levels, clamped to those that exist.
   if (descriptor.kind == SettingKind::FLOAT && (descriptor.flags & setting_flags::SLIDER_RANGE_ONLY) == 0u && SliderMax(descriptor) > 0.0) {
     return std::max(descriptor.max, TYPED_PAST_SLIDER * SliderMax(descriptor));

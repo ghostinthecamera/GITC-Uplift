@@ -13,13 +13,13 @@ namespace uplift::nr {
 
 inline constexpr uint64_t APPLICATION_ID = 0x876232cULL;
 
-// Set while Uplift's NR runtime is loaded, so other NR hosts can see it (v2 design §3.19).
+// Set while Uplift's NR runtime is loaded, so other NR hosts can see it.
 inline constexpr wchar_t UPLIFT_NR_RUNTIME_MARKER[] = L"UPLIFT_NR_RUNTIME_LOADED";
 
 // True for a runtime module Uplift mapped: the loaded Snippet's, or one a device loss abandoned
 // (Abandon keeps it mapped). Thread-safe; the NGX hooks call it from game threads.
 [[nodiscard]] bool IsUpliftRuntimeModule(HMODULE module);
-// Plan 2 final review M9: true when `snippet_path`'s file name, or nvngx_dlssnr.dll, is mapped by a
+// True when `snippet_path`'s file name, or nvngx_dlssnr.dll, is mapped by a
 // module that is not Uplift's own runtime (another NR host, or an Uplift instance that ReShade
 // unloaded after a device loss). Such a runtime is already initialised; Load never initialises it again.
 [[nodiscard]] bool IsRuntimeMappedElsewhere(const std::filesystem::path& snippet_path);
@@ -32,14 +32,14 @@ struct SnippetConfig {
   std::filesystem::path core_path_override;     // optional explicit _nvngx.dll
   bool allow_core_force_load = true;            // games without DLSS have no NGX core loaded
   bool enable_snippet_log = true;               // route a verified snippet layout's log callback into nr::Log
-  // Plan 7 (D3D11 design R15): also initialise an adopted core (one the game loaded) for this device, once, when the
+  // Also initialise an adopted core (one the game loaded) for this device, once, when the
   // device carries no UPLIFT_CORE_INIT_GUID mark. The D3D11 bridge's private device is one a D3D11 game's core never saw.
-  // Plan 13: BindVulkan reads it too, once per VkDevice: a smoke's "game" device was never initialised by a core that a sibling
+  // BindVulkan reads it too, once per VkDevice: a smoke's "game" device was never initialised by a core that a sibling
   // test loaded; a real game's core is adopted as it is (the game initialised it for its own device).
   bool initialize_core_for_device = false;
 };
 
-// Plan 13 (design §3.1): the game's Vulkan device and the loader's exports (the game's own chain, ReShade's layer included).
+// The game's Vulkan device and the loader's exports (the game's own chain, ReShade's layer included).
 struct VulkanBinding {
   VkInstance instance = VK_NULL_HANDLE;
   VkPhysicalDevice physical = VK_NULL_HANDLE;
@@ -54,7 +54,7 @@ enum class SnippetState : uint8_t {
   BOUND,
 };
 
-// Which API a BOUND Snippet serves (Plan 13): one API and one device per Snippet.
+// Which API a BOUND Snippet serves: one API and one device per Snippet.
 enum class SnippetApi : uint8_t {
   NONE,
   D3D12,
@@ -76,7 +76,7 @@ class Snippet {
   // Adopts a loaded NGX core or force-loads and initialises one, then calls
   // the snippet's NVSDK_NGX_D3D12_Init_Ext for `device`.
   [[nodiscard]] NVSDK_NGX_Result Bind(ID3D12Device* device);
-  // Plan 13: the Vulkan twin of Bind. Adopts the loaded core's VULKAN parameter functions (the game initialised it for its
+  // The Vulkan twin of Bind. Adopts the loaded core's VULKAN parameter functions (the game initialised it for its
   // device), or force-loads the core and runs its VULKAN_Init_Ext2 once per VkDevice, then runs the snippet's own
   // NVSDK_NGX_VULKAN_Init_Ext2 with the loader's exports (the research probe's exact call). A snippet is bound to one API and one device.
   [[nodiscard]] NVSDK_NGX_Result BindVulkan(const VulkanBinding& binding);
@@ -97,7 +97,7 @@ class Snippet {
       ID3D12GraphicsCommandList* list, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle, std::string* network = nullptr) const;
   [[nodiscard]] NVSDK_NGX_Result EvaluateFeature(
       ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters) const;
-  // Plan 13: the Vulkan binding's create and evaluate on a command buffer. A distinct name rather than an overload: `nullptr` must stay
+  // The Vulkan binding's create and evaluate on a command buffer. A distinct name rather than an overload: `nullptr` must stay
   // unambiguous for the Direct3D 12 forwarders above. Both refuse (FAIL_NotInitialized) unless bound to Vulkan.
   [[nodiscard]] NVSDK_NGX_Result CreateFeatureVulkan(
       VkCommandBuffer buffer, NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle, std::string* network = nullptr) const;

@@ -3,13 +3,13 @@
 
 #include "change_common.hlsli"
 
-// GPU twin of src/look/look_math.cpp (v2 design §3.11/§3.12): the tone key and bands, the colour split, the soft
+// GPU twin of src/look/look_math.cpp: the tone key and bands, the colour split, the soft
 // limits, the order of operations and the pyramid atlas. tests/gpu/look_gpu_test.cpp compares the two.
 
 static const float TONE_EPSILON = 1.f / 65536.f;               // ℓ_O = log2(Y(O)⁺ + 2^-16)
 static const float MAX_MODEL_LUMINANCE = 1.f - 1.f / 4096.f;  // Neutwo's inverse diverges at 1
 
-// ℓ_O in scene stops against diffuse white, from the change field's guide ℓ_M (amendment 3).
+// ℓ_O in scene stops against diffuse white, from the change field's guide ℓ_M.
 float ToneKey(bool sdr, float guide) {
   const float model = max(exp2(guide) - (sdr ? SDR_EPSILON : HDR_EPSILON), 0.f);
   if (sdr) return log2(model + TONE_EPSILON);
@@ -71,7 +71,8 @@ struct ShapeInput {
   float2 basis;        // κ_M
 };
 
-// v2 design §3.11 steps 4-10 and 12 (step 11, the mask, is the compose's). Non-finite results: no change.
+// Shape bands, suppress halos, scale sign/chroma and tonal weights, then apply limits. Compose applies the mask.
+// Non-finite results: no change.
 float3 ShapeChange(ShapeInput shape_input, ShapeSettings settings, bool sdr) {
   const float banded = settings.tone * shape_input.low + settings.detail * shape_input.high;
   const float2 chroma = shape_input.chroma_low + shape_input.chroma_high;
@@ -140,7 +141,7 @@ float4 LevelSample(Texture2D<float4> atlas, uint2 image, uint level, uint2 pixel
   return sum;
 }
 
-// v2 design §3.12's LP: trilinear between floor(level) and the next level, clamped to [1, levels].
+// Low pass: trilinear between floor(level) and the next level, clamped to [1, levels].
 float4 LowPass(Texture2D<float4> atlas, uint2 image, uint levels, float level, uint2 pixel, bool tent) {
   const float clamped = clamp(level, 1.f, float(levels));
   const uint first = uint(floor(clamped));

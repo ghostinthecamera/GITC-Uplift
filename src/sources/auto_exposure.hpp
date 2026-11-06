@@ -19,28 +19,28 @@ struct MeterBasis {
   friend bool operator==(const MeterBasis&, const MeterBasis&) = default;
 };
 
-// Plan 17 (1.0.1 design §2): one look at the game's DLSS exposure beside Uplift's meter, read back from the meter's state a few frames after it was written.
+// One look at the game's DLSS exposure beside Uplift's meter, read back from the meter's state a few frames after it was written.
 struct ExposureSample {
   float texture_value = 1.f;  // the game's ExposureTexture texel (1 without one)
   float factor = 1.f;         // DLSS.Exposure.Scale / DLSS.Pre.Exposure
   float game = 1.f;           // what the encode multiplies by: color::GameExposure of the two
   float metered_stops = 0.f;  // the meter's governed exposure E (Metered multiplies by 2^E)
   float target_stops = 0.f;   // the meter's target this frame, which E moves toward at the Adaptation rates
-  float anchor_stops = 0.f;   // 2026-10-09: the meter's anchor (the scene's mean log luminance it exposes to middle grey), for the held check
+  float anchor_stops = 0.f;   // the meter's anchor (the scene's mean log luminance it exposes to middle grey), for the held check
 };
 
-// 2026-10-09: which validity rule latched Auto to Metered.
+// Which validity rule latched Auto to Metered.
 enum class AutoLatch : uint8_t {
   NONE,
   ABOVE,  // the game's exposure sat more than ABOVE_LIMIT_STOPS above the meter's span
   BELOW,  // more than BELOW_LIMIT_STOPS below it
 };
 
-// Plan 17: Input exposure = Auto with a game that passes an exposure. The game's exposure is valid while it lies within the window around Uplift's meter;
+// Input exposure = Auto with a game that passes an exposure. The game's exposure is valid while it lies within the window around Uplift's meter;
 // once it has been invalid for SUSTAIN_SECONDS (and SUSTAIN_SAMPLES samples) in a row, Auto latches to Metered for the pipeline's life: a game whose value is
 // wrong stays wrong, and a latch never flips back. Pure, so the unit tests drive it.
-// 2026-10-09 (.superpowers/sdd/2026-10-09-auto-exposure): the window is asymmetric. A game exposure that holds still while the scene moves is noted for the
-// debug line only (the coordinator's ruling): a fixed exposure, or DLSS's Exposure 1 on pre-exposed images, is legitimate, and a constant 1 on
+// The window is asymmetric. A game exposure that holds still while the scene moves is noted for the
+// debug line only: a fixed exposure, or DLSS's Exposure 1 on pre-exposed images, is legitimate, and a constant 1 on
 // physical-unit images already lands above the window.
 class AutoExposure {
  public:
@@ -92,16 +92,16 @@ class AutoExposure {
   float held_anchor_span_ = 0.f;
 };
 
-// 2026-10-09: NR's input exposure under Auto with a game exposure, in stops: Switch the game's, Blend game + blend · (E − game) with `blend` in [0, 1]; the
+// NR's input exposure under Auto with a game exposure, in stops: Switch the game's, Blend game + blend · (E − game) with `blend` in [0, 1]; the
 // meter's E once latched. meter_cs.hlsl writes the blend into the state the encode reads.
 [[nodiscard]] float AutoStops(color::AutoExposureMode mode, float blend, bool latched, float game_stops, float metered_stops);
 
-// Plan 17: what the latest recording's encode read as its exposure, for the Details line.
+// What the latest recording's encode read as its exposure, for the Details line.
 enum class ExposureUse : uint8_t {
   NONE,     // none: an sRGB, scRGB or HDR10 image, Manual, or Game without a game exposure
   GAME,     // the game's DLSS exposure
   METERED,  // Uplift's meter
-  BLEND,    // 2026-10-09: Auto's Blend of the two
+  BLEND,    // Auto's Blend of the two
 };
 struct ExposureReport {
   ExposureUse use = ExposureUse::NONE;
@@ -116,8 +116,8 @@ struct ExposureReport {
 [[nodiscard]] std::string ExposureLine(const ExposureReport& report);
 // The one INFO line Auto logs when it latches to Metered: the rule, the game's texel, its factor, what that gives, and the meter's values, in stops too.
 [[nodiscard]] std::string AutoLatchMessage(const ExposureSample& sample, const AutoExposure& judge);
-// The debug line Auto logs once a second before a latch: the game in stops, the meter's E and target, the gap, what the mode gives, and `held_move`
-// (AutoExposure::HeldThroughMove) when there is one.
+// The debug line Auto logs once every AutoExposure::DEBUG_SECONDS before a latch: the game in stops, the meter's E and target, the gap, what the mode
+// gives, and `held_move` (AutoExposure::HeldThroughMove) when there is one.
 [[nodiscard]] std::string AutoDebugMessage(const ExposureSample& sample, color::AutoExposureMode mode, float blend, std::optional<float> held_move);
 
 }  // namespace uplift::sources

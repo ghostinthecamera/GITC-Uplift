@@ -6,6 +6,7 @@
 #include <format>
 #include <utility>
 
+#include "memory_units.hpp"
 #include "nr/log.hpp"
 
 namespace uplift::nr {
@@ -16,7 +17,7 @@ constexpr double SHRINK_FRACTION = 0.6;
 constexpr auto SHRINK_HOLD = std::chrono::seconds(2);
 constexpr auto SAMPLE_PERIOD = std::chrono::seconds(1);
 constexpr auto TEARDOWN_WAIT = std::chrono::milliseconds(2000);
-// Plan 6 (v2 design §3.18, D11): the automatic retries after a failure; then none until a change or Retry now.
+// The automatic retries after a failure; then none until a change or Retry now.
 constexpr std::array<std::chrono::milliseconds, 6> RETRY_DELAYS = {
     std::chrono::seconds(1),
     std::chrono::seconds(2),
@@ -33,19 +34,19 @@ bool Fits(Size frame, Size capacity) {
 }
 
 std::string Gigabytes(uint64_t bytes) {
-  return std::format("{:.1f} GB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+  return std::format("{:.1f} GB", static_cast<double>(bytes) / BYTES_PER_GIB);
 }
 
-std::string_view ReasonFor(SessionState state) {
+SkipReason ReasonFor(SessionState state) {
   switch (state) {
-    case SessionState::OFF:      return "off";
-    case SessionState::LOADING:  return "loading";
-    case SessionState::GRACE:    return "grace";
-    case SessionState::DRAINING: return "draining";
-    case SessionState::FAILED:   return "failed";
-    case SessionState::ACTIVE:   return "";
+    case SessionState::OFF:      return SkipReason::SESSION_OFF;
+    case SessionState::LOADING:  return SkipReason::SESSION_LOADING;
+    case SessionState::GRACE:    return SkipReason::SESSION_GRACE;
+    case SessionState::DRAINING: return SkipReason::SESSION_DRAINING;
+    case SessionState::FAILED:   return SkipReason::SESSION_FAILED;
+    case SessionState::ACTIVE:   return SkipReason::NONE;
   }
-  return "";
+  return SkipReason::NONE;
 }
 
 }  // namespace
@@ -83,7 +84,7 @@ void Session::SetEnabled(bool enabled) {
     }
     return;
   }
-  // T10-B (fix round 3): a real disable always clears a suspension, in every state -- not only OFF,
+  // A real disable always clears a suspension, in every state -- not only OFF,
   // whose own case used to do this alone and left `message_` behind ("Suspended: game needs VRAM"
   // stale on the overlay), and not skipping DRAINING, which fell through to `default: break` and kept
   // both flags. The state-specific transitions below are unaffected: they only ever run once this is settled.
@@ -94,7 +95,7 @@ void Session::SetEnabled(bool enabled) {
   switch (state_) {
     case SessionState::LOADING: state_ = SessionState::OFF; break;
     case SessionState::ACTIVE:
-      // Helper hand-over round: no grace (an owner hand-over) drains at once, never through a GRACE that ends in the same frame.
+      // No grace (an owner hand-over) drains at once, never through a GRACE that ends in the same frame.
       if (config_.grace.count() == 0) {
         BeginTeardown(SessionState::DRAINING);
       } else {
@@ -167,7 +168,7 @@ void Session::SetChain(std::span<const StageSlice> groups) {
   for (const StageSlice& group : std::span(groups_).first(group_count_)) {
     for (uint32_t index = group.first; index < group.first + group.count; ++index) {
       if (pass_stages_[index] != group.stage) {
-        // Design 3.2: a pass at another stage starts its history afresh there; its feature stays while it fits that stage's size.
+        // A pass at another stage starts its history afresh there; its feature stays while it fits that stage's size.
         pass_stages_[index] = group.stage;
         stage_reset_owed_[index] = true;
       }
@@ -231,7 +232,7 @@ void Session::Load() {
     return;
   }
   runtime_loaded_ = true;
-  create_failed_ = false;  // Plan 19: a load that works ends the creation failure
+  create_failed_ = false;  // A load that works ends the creation failure
   consecutive_failures_ = 0u;
   draining_from_failure_ = false;  // a successful reload closes out any failure drain
   ResetAllStages();
@@ -280,7 +281,7 @@ void Session::ReleaseAllFeaturesAndUnload() {
   if (runtime_loaded_) {
     host_.UnloadRuntime();
     runtime_loaded_ = false;
-    // Helper hand-over round: logged by every path that unloads the runtime (a drain, a device's destruction, a release before the game's NGX shutdown),
+    // Logged by every path that unloads the runtime (a drain, a device's destruction, a release before the game's NGX shutdown),
     // once per unload, so ReShade.log pairs each "NR runtime loaded" with it. A dropped runtime (device lost, abandoned) stays mapped: never logged so.
     Log(LogLevel::INFO, "NR runtime unloaded; NR memory released");
   }
@@ -318,7 +319,7 @@ void Session::Tick() {
       }
       break;
     case SessionState::FAILED: {
-      // Plan 6 (D11): Retry now, or the next automatic retry, once the failed teardown has finished. Always through
+      // Retry now, or the next automatic retry, once the failed teardown has finished. Always through
       // BeginLoading, so a retry starts exactly like a fresh enable.
       const bool automatic_due = (config_.auto_retry && failed_at_.has_value() && retry_attempts_ < RETRY_DELAYS.size()
                                   && now - *failed_at_ >= RETRY_DELAYS[retry_attempts_]);
@@ -354,7 +355,7 @@ void Session::SampleBudget(std::chrono::steady_clock::time_point now) {
   last_sample_ = now;
   runtime_bytes_ = host_.QueryRuntimeBytes();
   const uint32_t live = LiveFeatureCount();
-  // Decision Q5a: the last stage's twin yields first, then the earlier stages' twins, before any pass.
+  // The last stage's twin yields first, then the earlier stages' twins, before any pass.
   StageState* yielding_faces = nullptr;
   uint32_t faces_live = 0u;
   for (StageState& stage : stages_) {
@@ -377,12 +378,9 @@ void Session::SampleBudget(std::chrono::steady_clock::time_point now) {
   }
   switch (action) {
     case YieldAction::DROP_PASS: {
-      // Pooled memory only returns when the last feature is released, so a
-      // pass drop is a full rebuild with one pass fewer. Split chain: the
-      // last pass goes, so the last stage group shrinks first. Fix round 1
-      // (M1): the last live one below the limit, wherever the live passes
-      // are (pass 1's feature is missing while its stage pauses), so the
-      // limit is its index, not the live count less one.
+      // Pooled memory returns only after the last feature is released, so dropping a pass rebuilds with one fewer.
+      // A split chain drops the last live pass below the limit, shrinking its last live stage group first.
+      // The new limit is that pass's index; the live count can exclude a paused stage, including pass 1.
       uint32_t last_live = 0u;
       for (uint32_t index = std::min(passes_limit_, MAX_PASSES); index > 0u; --index) {
         if (features_[index - 1u]) {
@@ -409,7 +407,7 @@ void Session::SampleBudget(std::chrono::steady_clock::time_point now) {
       break;
     case YieldAction::NONE:
       // While a drop still holds passes_limit_ below what was requested,
-      // reuse the resume hold (§6.5) for the cost of one more feature: once
+      // reuse the resume hold for the cost of one more feature: once
       // headroom for it holds for 10 continuous seconds, raise the limit by
       // one. EnsureFeatures adds the feature on the next Evaluate, with no
       // rebuild, and its own message logic takes over once desired changes.
@@ -423,7 +421,7 @@ void Session::SampleBudget(std::chrono::steady_clock::time_point now) {
         }
         break;
       }
-      // Keep faces comes back last, after every dropped pass, with the same hold for the cost of its one feature and its surfaces (fix round 1, M5: a
+      // Keep faces comes back last, after every dropped pass, with the same hold for the cost of its one feature and its surfaces (a
       // twin that did not fit waits for it too, so it never cycles at the budget's edge). Split chain: the first stage's twin first, the yield's reverse.
       for (const StageSlice& group : std::span(groups_).first(group_count_)) {
         StageState& stage = stages_[group.stage];
@@ -443,7 +441,7 @@ void Session::SampleBudget(std::chrono::steady_clock::time_point now) {
 void Session::TryResume(std::chrono::steady_clock::time_point now) {
   if (last_sample_ && now - *last_sample_ < SAMPLE_PERIOD) return;
   last_sample_ = now;
-  // Split chain: every group's passes at its stage's size, and the surfaces. Fix round 1 (M2): each stage notes the caller's whole surfaces (every stage
+  // Split chain: every group's passes at its stage's size, and the surfaces. Each stage notes the caller's whole surfaces (every stage
   // set), so they count once, as the largest any group noted.
   uint64_t need = 0u;
   uint64_t surfaces = 0u;
@@ -510,7 +508,7 @@ uint64_t Session::LiveFeatureBytes(const StageSlice& slice) const {
 }
 
 bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& chain, const StageSlice& slice, bool faces_wanted, bool faces_ready,
-                             std::string_view* reason) {
+                             SkipReason* reason) {
   const auto now = host_.Now();
   StageState& stage = stages_[slice.stage];
   const uint32_t desired = std::min(pass_count_, passes_limit_);
@@ -526,7 +524,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
     return live;
   };
   // A pass-count decrease keeps its surplus features live and idle, as the Defaults view does: Evaluate runs the
-  // first `desired`. Under the pool rule, releasing them frees nothing while pass 1 lives (E10). They go with the
+  // first `desired`. Under the pool rule, releasing them frees nothing while pass 1 lives (tools/nrspike's e10). They go with the
   // next rebuild, yield or disable, all of which empty the pool.
   bool rebuild = false;
   const FeatureInterface* first_live = nullptr;
@@ -555,9 +553,9 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
   }
   if (rebuild) {
     // The snippet keeps feature memory in one pool that only empties when its
-    // last feature is released (spike E10), so a rebuild retires everything
+    // last feature is released (tools/nrspike's e10), so a rebuild retires everything
     // and recreates only once the pool is empty. Old and new never coexist.
-    // Split chain (decision Q2): every stage's features, so every stage waits.
+    // Split chain: every stage's features, so every stage waits.
     RetireAllFeatures();
     for (StageState& each : stages_) {
       each.small_since.reset();
@@ -576,17 +574,17 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
   }
   // Only a rebuild (every feature retired at once) waits for the pool to empty; the twin retired alone leaves the passes live.
   if (LiveFeatureCount() == 0u && !retired_.empty()) {
-    *reason = "resizing";
+    *reason = SkipReason::RESIZING;
     return false;
   }
-  // Fix round 1 (M4): without its surfaces this frame the twin is only skipped, never retired.
+  // Without its surfaces this frame the twin is only skipped, never retired.
   const bool want_face = (faces_wanted && faces_ready && stage.faces_pause == FacesPause::NONE);
   const bool need_face = (want_face && !stage.face_feature);
   const uint32_t wanted = wanted_end - slice.first;
   const uint32_t live_before = live_between(slice.first, wanted_end);
   if (live_before >= wanted && !need_face) return true;
 
-  // Design 3.2: an earlier group whose stage has not run yet (DLSS paused in a menu while a Present group runs) keeps the memory its passes need, at its
+  // An earlier group whose stage has not run yet (DLSS paused in a menu while a Present group runs) keeps the memory its passes need, at its
   // stage's last known size.
   uint64_t reserve_bytes = 0u;
   for (const StageSlice& group : std::span(groups_).first(group_count_)) {
@@ -605,7 +603,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
   const uint32_t target = std::max(std::min(fit.passes, wanted), live_before);
   if (target == 0u) {
     message_ = std::format("NR skipped: needs {}, {} free", Gigabytes(fit.need_bytes), Gigabytes(fit.available_bytes));
-    *reason = "budget";
+    *reason = SkipReason::BUDGET;
     return false;
   }
   const auto create = [&](std::unique_ptr<FeatureInterface>* created, uint32_t preset) -> NVSDK_NGX_Result {
@@ -620,7 +618,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
         && before && after && *after > *before + budget_.StatsOvercountBytes()) {
       // Legacy-only calibration: Small FP8 has different weights and pooled costs. Mixed/default configurations keep the conservative estimate.
       // Create-time stats exclude the 8 B/px capacity buffer a feature adds at its
-      // first smaller frame (E6); keep charging it (spec §6.2).
+      // first smaller frame (tools/nrspike's e6); keep charging it.
       budget_.Calibrate(chain.size,
                         *after - *before - budget_.StatsOvercountBytes() + 8u * chain.size.Pixels());
     }
@@ -634,7 +632,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
       create_failed_ = true;
       create_result_ = static_cast<uint32_t>(result);
       EnterFailed(std::format("NR feature creation failed: {:#010x}", static_cast<uint32_t>(result)));
-      *reason = "create failed";
+      *reason = SkipReason::CREATE_FAILED;
       return false;
     }
     ++live;
@@ -643,7 +641,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
     stage.reset_pending = true;  // a new set starts every pass afresh; an appended pass resets alone (index >= evaluated_end)
   }
   if (need_face && face_fits) {
-    // Fix round 1 (C2): a twin that cannot be created never turns NR off; the passes run on without it until Keep faces is toggled or NR reloads.
+    // A twin that cannot be created never turns NR off; the passes run on without it until Keep faces is toggled or NR reloads.
     if (const NVSDK_NGX_Result result = create(&stage.face_feature, presets_[slice.first]); NVSDK_NGX_FAILED(result)) {
       stage.faces_pause = FacesPause::FAILED_CREATE;
       Logf(LogLevel::ERR, "Keep faces stopped: its extra NR run could not start ({:#010x}); NR runs on without it", static_cast<uint32_t>(result));
@@ -653,7 +651,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
     }
   } else if (need_face) {
     stage.faces_pause = FacesPause::UNFIT;  // back after the resume hold (SampleBudget), not at the next frame that fits
-    budget_.ResetYield();                   // fix round 2 (1): a fresh hold, never one an earlier pause had been accumulating
+    budget_.ResetYield();                   // a fresh hold, never one an earlier pause had been accumulating
     Log(LogLevel::WARN, "Keep faces paused: no video memory for its extra NR run beside the passes");
   }
   // Split chain: the count names every live pass, whichever stage made it; the slice says whether the budget cut it.
@@ -687,14 +685,14 @@ void Session::NoteFrameSize(uint8_t stage_index, Size size) {
 
 EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChain& chain,
                                  const FrameInputs& inputs, const Controls& controls, StageSlice slice) {
-  if (slice.stage >= SESSION_STAGES || slice.first >= MAX_PASSES) return {nullptr, 0u, "invalid input"};
+  if (slice.stage >= SESSION_STAGES || slice.first >= MAX_PASSES) return {nullptr, 0u, SkipReason::INVALID_INPUT};
   slice.count = std::min(slice.count, MAX_PASSES - slice.first);
   StageState& stage = stages_[slice.stage];
   NoteFrameSize(slice.stage, chain.size);
   stage.surface_bytes = chain.surface_bytes;
   if (state_ != SessionState::ACTIVE) return {nullptr, 0u, ReasonFor(state_)};
   if (list == nullptr || chain.a == nullptr || chain.b == nullptr || chain.size.Empty()) {
-    return {nullptr, 0u, "invalid input"};
+    return {nullptr, 0u, SkipReason::INVALID_INPUT};
   }
   if (!MeetsNrFloor(chain.size)) {
     // Bail before any feature creation, rebuild or shrink check (EnsureFeatures below): the hang
@@ -702,7 +700,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
     // feature's capacity, so size alone must gate this, regardless of what is currently live.
     message_ = std::format("NR needs a frame of at least {}x{} (this frame is {}x{})", MIN_NR_LONG_SIDE,
                            MIN_NR_SHORT_SIDE, chain.size.width, chain.size.height);
-    return {nullptr, 0u, "frame too small"};
+    return {nullptr, 0u, SkipReason::FRAME_TOO_SMALL};
   }
   stage.last_size = chain.size;
   if (!SliceRuns(slice)) {
@@ -710,14 +708,14 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
     // passes did not run this frame: when they do again, each restarts its history.
     stage.evaluated_end = slice.first;
     const bool budget_cut = (slice.first < pass_count_ && slice.first >= passes_limit_);
-    return {nullptr, 0u, (budget_cut ? std::string_view("budget") : std::string_view())};
+    return {nullptr, 0u, (budget_cut ? SkipReason::BUDGET : SkipReason::NONE)};
   }
 
   // Keep faces needs the resolver, which recombines the twin's output with pass 1's.
   const bool faces_wanted = (inputs.faces.wanted && inputs.resolver != nullptr);
   stage.faces_requested = faces_wanted;
   stage.faces_surface_bytes = (faces_wanted ? inputs.faces.surface_bytes : 0u);
-  std::string_view reason;
+  SkipReason reason = SkipReason::NONE;
   if (!EnsureFeatures(list, chain, slice, faces_wanted, inputs.faces.output != nullptr, &reason)) return {nullptr, 0u, reason};
   const bool faces_run = (faces_wanted && inputs.faces.output != nullptr && stage.face_feature != nullptr && stage.faces_pause == FacesPause::NONE);
   bool faces_ran = false;
@@ -725,7 +723,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   ID3D12Resource* color = chain.a;
   ID3D12Resource* output = chain.b;
   const bool reset = stage.reset_pending || inputs.reset_hint;
-  // Plan 7: a pass-count decrease keeps its surplus features idle; Evaluate runs only the first `desired`, exactly
+  // A pass-count decrease keeps its surplus features idle; Evaluate runs only the first `desired`, exactly
   // as the Defaults view's pass_view_limit_ already narrows it, without a rebuild either. A pass that did not run
   // the previous frame starts its history afresh (index >= evaluated_end, below). Split chain: the slice's live passes,
   // in order, by their global index.
@@ -741,13 +739,13 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   // A slice whose first pass the budget left unmade (a later pass of it is live from an earlier chain) runs nothing.
   if (run_end == slice.first) {
     stage.evaluated_end = slice.first;
-    return {nullptr, 0u, "budget"};
+    return {nullptr, 0u, SkipReason::BUDGET};
   }
   for (uint32_t index = slice.first; index < run_end; ++index) {
     auto& feature = features_[index];
-    // Chained history off (F25) is a diagnostic: every pass after the first starts fresh each frame.
+    // Chained history off is a diagnostic: every pass after the first starts fresh each frame.
     const bool pass_reset = reset || (!inputs.chained_history && index > 0u) || index >= stage.evaluated_end || stage_reset_owed_[index];
-    // Plan 5: pass n ≥ 2 runs with its own controls unless it follows pass 1.
+    // Pass n ≥ 2 runs with its own controls unless it follows pass 1.
     const std::optional<Controls>* const own =
         (index > 0u && index - 1u < inputs.later_passes.size() ? &inputs.later_passes[index - 1u] : nullptr);
     const Controls& pass_controls = (own != nullptr && own->has_value() ? **own : controls);
@@ -783,7 +781,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
         inputs.resolver->CombineFaces(list, output, inputs.faces.output);
         faces_ran = true;
       } else {
-        // Fix round 1 (C2): a failed twin never turns NR off. The pass's own result stands (no recombination), the twin goes, and Keep faces stays stopped
+        // A failed twin never turns NR off. The pass's own result stands (no recombination), the twin goes, and Keep faces stays stopped
         // until it is toggled or NR loads again; NR's failure count is untouched.
         stage.faces_pause = FacesPause::FAILED_EVALUATE;
         RetireFaceFeature(&stage);
@@ -798,7 +796,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
         EnterFailed(std::format("NR disabled after {} failed frames (last {:#010x})", consecutive_failures_,
                                 static_cast<uint32_t>(result)));
       }
-      return {nullptr, 0u, "evaluate failed"};
+      return {nullptr, 0u, SkipReason::EVALUATE_FAILED};
     }
     if (index > 0u && inputs.resolver != nullptr) {
       inputs.resolver->ResolvePass(list, index, color, output);
@@ -816,7 +814,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
     wanted_end = std::min(wanted_end, pass_view_limit_);
   }
   const uint32_t wanted = wanted_end - slice.first;
-  return {color, run, (run < wanted ? std::string_view("budget") : std::string_view())};
+  return {color, run, (run < wanted ? SkipReason::BUDGET : SkipReason::NONE)};
 }
 
 void Session::OnDeviceDestroyed() {

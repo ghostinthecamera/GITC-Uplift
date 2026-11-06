@@ -10,13 +10,13 @@
 
 namespace uplift::ngx_hooks {
 
-// One DLSS evaluate as the After-DLSS placement needs it (v2 design §3.1). Resources are the game's;
+// One DLSS evaluate as the After-DLSS placement needs it. Resources are the game's;
 // nothing here is dereferenced or kept past the evaluate.
 struct DlssFrame {
   const NVSDK_NGX_Handle* handle = nullptr;
   NVSDK_NGX_Feature feature = NVSDK_NGX_Feature_Reserved_Unknown;
   CreateSnapshot snapshot;
-  uint64_t serial = 0u;  // Plan 15 fix round: the feature's creation order (FeatureRecord::serial), so a context can tell a feature created after a shutdown
+  uint64_t serial = 0u;  // the feature's creation order (FeatureRecord::serial), so a context can tell a feature created after a shutdown
   ID3D12Resource* color = nullptr;
   ID3D12Resource* output = nullptr;
   ID3D12Resource* motion_vectors = nullptr;
@@ -38,12 +38,12 @@ struct DlssFrame {
 [[nodiscard]] DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle,
                                          const FeatureRecord& record);
 
-// Plan 18 (design §2): CaptureDlssFrame for a Direct3D 11 block, whose resources NGX_D3D11_EVALUATE_DLSS_EXT sets as ID3D11Resource*: each is read as one
+// CaptureDlssFrame for a Direct3D 11 block, whose resources NGX_D3D11_EVALUATE_DLSS_EXT sets as ID3D11Resource*: each is read as one
 // (else as a void*) and carried punned (nr/d3d11_handles.hpp), never dereferenced. Regions the block leaves unset stay at the create-time sizes; the
 // Direct3D 11 bridge resolves an empty one from the texture (bridge::ResolveRegion11).
 [[nodiscard]] DlssFrame CaptureD3D11DlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record);
 
-// Plan 13 (design §5, key decision b): a Vulkan evaluate's five resources, copied by value during the hooked call (the game's
+// A Vulkan evaluate's five resources, copied by value during the hooked call (the game's
 // NVSDK_NGX_Resource_VK pointers are valid for that call alone). A DlssFrame captured with CaptureVkDlssFrame points at these copies.
 struct VkDlssResources {
   NVSDK_NGX_Resource_VK color = {};
@@ -81,7 +81,7 @@ class MotionJitterTracker {
   std::optional<Sample> previous_;
 };
 
-// The game's Reset as NR's reset hint (v2 design §3.1): the first Reset of a burst passes, and any
+// The game's Reset as NR's reset hint: the first Reset of a burst passes, and any
 // further Reset within `window` of the last one that passed is merged, because a burst of history
 // resets shows as pops.
 class ResetMerger {

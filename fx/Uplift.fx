@@ -1,4 +1,4 @@
-// Uplift marker technique (spec §8.1). Put this file in one of ReShade's effect search paths,
+// Uplift marker technique. Put this file in one of ReShade's effect search paths,
 // enable "Uplift" and drag it to where DLSS-NR should run: techniques above it see the game's
 // image, techniques below it see NR's output. Without it, Uplift runs NR before every effect.
 //
@@ -43,7 +43,7 @@ uniform bool UpliftAllowLumenite <
   #endif
 #endif
 
-// Lumenite (2026-10-08): only without LaunchPad's, from Direct3D 10 on (the nine-cell upsample below is not checked on shader model 3).
+// Lumenite: only without LaunchPad's, from Direct3D 10 on (the nine-cell upsample below is not checked on shader model 3).
 #define UPLIFT_LUMENITE 0
 #if !UPLIFT_LAUNCHPAD && UPLIFT_USE_LUMENITE && __RENDERER__ >= 0xa000
   // A renamed Kernel is also supported: the add-on recognizes its technique and explicitly links this pass.

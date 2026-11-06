@@ -56,7 +56,7 @@ Rgb Saturate(Rgb value) {
   return PerChannel(value, [](float channel) { return std::clamp(channel, 0.f, 1.f); });
 }
 
-// Plan 5: the AP1 (ACEScg, D60) <-> BT.709 (D65) matrices, with a Bradford adaptation.
+// The AP1 (ACEScg, D60) <-> BT.709 (D65) matrices, with a Bradford adaptation.
 constexpr float AP1_TO_BT709[3][3] = {
     {1.7050509927f, -0.6217921207f, -0.0832588720f},
     {-0.1302564175f, 1.1408047366f, -0.0105483191f},
@@ -95,7 +95,7 @@ float ChangeEpsilon(Encoding encoding) {
   return (IsSdr(encoding) ? SDR_EPSILON : HDR_EPSILON);
 }
 
-// v2 design §3.7's rebuild with the F15 Consistent gain and the F14 chroma clamp (change_common.hlsli's Rebuild).
+// Rebuild with the Consistent gain and the chroma clamp (change_common.hlsli's Rebuild).
 Rgb Rebuild(Encoding encoding, Rgb original, const ChangeTexel& change, const RebuildOptions& options) {
   const float epsilon = ChangeEpsilon(encoding);
   const float luminance = std::max(Luminance(original), 0.f);

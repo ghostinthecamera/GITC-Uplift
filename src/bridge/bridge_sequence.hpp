@@ -7,7 +7,10 @@
 
 namespace uplift::bridge {
 
-// The cross-API steps of one bridged recording (D3D11 design §2). A bool step returns false when the API refused it.
+// Vulkan/OpenGL bridge and helper transports skip a frame on timeout and stop at this limit; each caller owns its counter and reset point.
+inline constexpr uint32_t MAX_CONSECUTIVE_TIMEOUTS = 3u;
+
+// The cross-API steps of one bridged recording. A Boolean step reports a detected API refusal.
 class BridgeSteps {
  public:
   virtual ~BridgeSteps() = default;
@@ -26,15 +29,15 @@ struct BridgedFrame {
   std::string_view failure;      // static text; non-empty: the bridge stops for the session
 };
 
-// D3D11 design §1.3: runs the steps in the one order that cannot leave the game's GPU waiting on a value nobody
+// Runs the steps in the one order that cannot leave the game's GPU waiting on a value nobody
 // signals. D3D11 waits only for a value whose D3D12 signal was already submitted, and the private queue always
 // signals once it has waited, even when nothing ran.
 BridgedFrame RunBridgedFrame(BridgeSteps& steps, uint64_t in, uint64_t out);
 
-// D3D11 design §1.3 and §9 f, the second line of defence. At every present, a removed private device (its fence
-// reads UINT64_MAX) stops the bridge, and so do fences that made no progress for LIMIT while a D3D12 signal was
-// outstanding. Final review I-2: progress, not age, so slow frames that still progress (hotsampling at 1-4 fps, a
-// paging stall, NGX creating a feature) never trip it. Pure, so the unit tests drive it.
+// At every present, a removed private device (its fence reads UINT64_MAX) stops the bridge, and so do fences
+// that made no progress for LIMIT while a D3D12 signal was outstanding. Progress, not age, so slow frames that
+// still progress (hotsampling at 1-4 fps, a paging stall, NGX creating a feature) never trip it. Pure, so the
+// unit tests drive it.
 class BridgeWatchdog {
  public:
   static constexpr std::chrono::seconds LIMIT{2};

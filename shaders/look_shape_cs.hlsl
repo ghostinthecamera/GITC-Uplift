@@ -1,7 +1,8 @@
+#include "../src/color/shader_values.h"
 #include "look_common.hlsli"
 #include "vk_common.hlsli"
 
-// v2 design §3.11/§3.12: the change field C rewritten in place with the shaped change (a*, δ*), keeping ℓ_M in w
+// The change field C rewritten in place with the shaped change (a*, δ*), keeping ℓ_M in w
 // for the edge-aware upsample.
 cbuffer ShapeConstants : register(b0) {
   uint image_width;
@@ -26,9 +27,9 @@ cbuffer ShapeConstants : register(b0) {
   float max_color;
 };
 
-static const uint SHAPE_FLAG_SDR = 1u;
-static const uint SHAPE_FLAG_STABILIZED = 2u;  // t2 holds this frame's stabilised levels
-static const uint SHAPE_FLAG_DETAIL = 4u;      // t4 holds this frame's stabilised fine band
+static const uint SHAPE_FLAG_SDR = UPLIFT_SHAPE_FLAG_SDR;
+static const uint SHAPE_FLAG_STABILIZED = UPLIFT_SHAPE_FLAG_STABILIZED;  // t2 holds this frame's stabilised levels
+static const uint SHAPE_FLAG_DETAIL = UPLIFT_SHAPE_FLAG_DETAIL;      // t4 holds this frame's stabilised fine band
 
 Texture2D<float4> gauss_atlas : register(t0);
 Texture2D<float> peak_atlas : register(t1);

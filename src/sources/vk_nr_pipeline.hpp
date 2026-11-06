@@ -24,7 +24,7 @@
 
 namespace uplift::sources {
 
-// The After-DLSS target on Vulkan (v2 design §3.4 and Plan 13 design §4.3): the region of DLSS's Output that NR runs on. UavTarget's twin; the resources
+// The After-DLSS target on Vulkan: the region of DLSS's Output that NR runs on. UavTarget's twin; the resources
 // are the copies of the game's NVSDK_NGX_Resource_VK the caller made during the hooked call (their pointers are valid for it alone). Before upscaling's input
 // uses it too, with `resource` the game's Color (a sampled view in SHADER_READ_ONLY_OPTIMAL, only read) and `region` its render subrect.
 struct VkDlssTarget {
@@ -38,7 +38,7 @@ struct VkDlssTarget {
   float exposure_factor = 1.f;                      // DLSS.Exposure.Scale / DLSS.Pre.Exposure
 };
 
-// Plan 19: native NR at Present's target: the swap-chain image, in `layout` on entry and on return (PRESENT_SRC_KHR at the present event, ReShade's
+// Native NR at Present's target: the swap-chain image, in `layout` on entry and on return (PRESENT_SRC_KHR at the present event, ReShade's
 // render-target layout inside its effects). Its bits are copied raw into Uplift's image of `copy_format`, the format the Vulkan bridge shares it in (the
 // UNORM member of a mutable-format swap chain's family: an sRGB-created image's stored values, never linearised), which a blit converts into an RGBA16F
 // intermediate that NR runs on in place, as on DLSS's Output; the result goes back the same way. `encoding` is resolved for `copy_format`'s values.
@@ -54,7 +54,7 @@ struct VkPresentTarget {
   // DLSS's vectors copied in the game's frame for this present (PresentMotion: SHADER_READ_ONLY_OPTIMAL, in the motion region's own pixels, scaled), bound
   // whole at (1, 1); or null.
   const NVSDK_NGX_Resource_VK* dlss_motion = nullptr;
-  // Stress round: DLSS's copy is the motion input this NR load was set up with, but none was made for this present (DLSS skipped a frame, a slot was busy): a
+  // DLSS's copy is the motion input this NR load was set up with, but none was made for this present (DLSS skipped a frame, a slot was busy): a
   // cleared RG16F image of this size (the copies' own) stands in, so NGX sees the same kind of input every frame. Empty: no stand-in.
   nr::Size dlss_motion_gap_size;
   // Otherwise this frame's UPLIFT_MV (a sampled view in SHADER_READ_ONLY_OPTIMAL, back-buffer pixels), converted into the work image's pixels; or none.
@@ -65,7 +65,7 @@ struct VkPresentTarget {
   float motion_scale_y = 1.f;
 };
 
-// The Vulkan DLSS placements' recordings (Plan 13 design §4.3, Plan 14 design §3): encode DLSS's Output in place into A, the Session's NR passes, Direct3D 12's
+// The Vulkan DLSS placements' recordings: encode DLSS's Output in place into A, the Session's NR passes, Direct3D 12's
 // change path and look stage (RecordAfterNr's port: the change field, the pyramids, the stabiliser, the shape), decode in place (After DLSS); or encode the
 // game's Color (sampled) into A on a padded canvas, the same, and decode into Uplift's own colour that DLSS reads instead (Before upscaling). Both work at a
 // settled work size below the output (the decode upsamples the change field), meter the input's exposure when InputExposure asks for it, give each later pass
@@ -76,7 +76,7 @@ struct VkPresentTarget {
 // transitioned. Never blocks. Not thread-safe: the add-on's lock.
 class VkNrPipeline final : private nr::PassResolver {
  public:
-  static constexpr uint32_t STAGE_SETS = nr::SESSION_STAGES;  // split chain (Task 5): one set per stage group, as NrPipeline's
+  static constexpr uint32_t STAGE_SETS = nr::SESSION_STAGES;  // split chain: one set per stage group, as NrPipeline's
 
   VkNrPipeline(const vk::NrFunctions& functions, VkDevice device, const VkPhysicalDeviceMemoryProperties& memory, nr::Session& session,
                nr::Timeline& timeline);
@@ -85,16 +85,16 @@ class VkNrPipeline final : private nr::PassResolver {
   VkNrPipeline& operator=(const VkNrPipeline&) = delete;
 
   bool Initialize(std::string* error);
-  // Plan 14 (design §3.2): the look stage, the colour fixes (InputExposure included: Auto or Game binds DLSS's exposure texture and scale, Metered the meter's
+  // The look stage, the colour fixes (InputExposure included: Auto or Game binds DLSS's exposure texture and scale, Metered the meter's
   // state, Manual none), the mask and passes 2..10's model controls and own strengths for the next recordings, with Δt per recording.
   void SetLookConfig(const LookConfig& config);
   // The device can load and store the look's R16F and RGBA32F images (RGBA16F is native NR's own requirement); without them the look stage, the meter and the
   // per-pass strengths are skipped, as on a Direct3D 12 device without typed UAV loads.
   void SetLookStorage(bool supported) { look_storage_ = supported; }
-  // Batch 2 review (minor 3): builds the encode, decode and look pipelines of `output_format` now (the caller warms them at enable, outside the hooked
+  // Builds the encode, decode and look pipelines of `output_format` now (the caller warms them at enable, outside the hooked
   // evaluate). False when the format has no variant or one could not be built: nothing would be recorded for it.
   bool Prepare(VkFormat output_format) { return color_.Prepare(output_format); }
-  // Batch 3 review, minor 5: `output_format`'s pipelines are built already, so a recording builds nothing inside the hooked evaluate.
+  // `output_format`'s pipelines are built already, so a recording builds nothing inside the hooked evaluate.
   [[nodiscard]] bool Prepared(VkFormat output_format) const { return color_.Prepared(output_format); }
   // NR on the region of DLSS's Output, inside the game's command buffer `buffer` right after DLSS's evaluate: opening barrier, encode (in place) into A at the
   // work image of `layout` (empty: the region's own size, Full), the Session's passes, the change path and the look, decode (in place), closing barrier.
@@ -102,22 +102,22 @@ class VkNrPipeline final : private nr::PassResolver {
   // token's event is set at the end of the hooked evaluate, whatever the result). `recorded` says whether anything went onto `buffer`. Nothing is recorded
   // for: Intensity 0 ("intensity 0": exact pass-through), an output format without a variant ("unsupported format"), a variant whose pipelines cannot be
   // built ("pipeline failed"), a region or a canvas below the NR floor (640x360) ("frame too small").
-  // Split chain (Task 5): each recording below runs `part` of the chain (its Session slice, on its stage group's set); the default is the whole chain on
+  // Split chain: each recording below runs `part` of the chain (its Session slice, on its stage group's set); the default is the whole chain on
   // set 0, the single chain of before the split.
   PipelineResult RecordAfterDlss(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
                                  const WorkLayout& layout = {}, const ChainPart& part = {});
-  // Task 10, Before upscaling (design §4.1, v2 design §3.9): NR on the region of the game's Color (`color.resource`: a sampled image view in
+  // Before upscaling: NR on the region of the game's Color (`color.resource`: a sampled image view in
   // SHADER_READ_ONLY_OPTIMAL, only read) before DLSS-SR upscales it, inside the game's command buffer right before DLSS's evaluate. The region is resampled
-  // into the SETTLED work image of `layout` (the set is keyed on it, never on the per-frame render region, Plan 4's I-1), mirror-padded into the floor
+  // into the SETTLED work image of `layout` (the set is keyed on it, never on the per-frame render region), mirror-padded into the floor
   // canvas (`layout.canvas`; the image itself when it meets the floor), the game's motion vectors are copied into a canvas motion image, NR runs at the
-  // canvas, and the decode composes NR's change into PrivateColor() at the region, upsampled from the work image (Plan 14: a render region that moves while
-  // the work size settles keeps NR running, R88). DLSS reads that as its Color for this evaluate (the NGX detour swaps it in). Nothing is recorded for:
+  // canvas, and the decode composes NR's change into PrivateColor() at the region, upsampled from the work image (a render region that moves while
+  // the work size settles keeps NR running). DLSS reads that as its Color for this evaluate (the NGX detour swaps it in). Nothing is recorded for:
   // Intensity 0, a Color format the sampled encode cannot read ("unsupported format"), a pipeline that cannot be built ("pipeline failed"), motion vectors
   // outside their image. The caller issued the token before this call; its event is set after DLSS has read the private colour. `nr_applied` says the
   // private colour holds NR's result, left in SHADER_READ_ONLY_OPTIMAL for DLSS.
   PipelineResult RecordPreSr(VkCommandBuffer buffer, const VkDlssTarget& color, const nr::FrameInputs& inputs, const nr::Controls& controls,
                              const WorkLayout& layout, const ChainPart& part = {});
-  // Plan 19: native NR at Present, inside Uplift's own command buffer `buffer` (never a game's, never ReShade's immediate one), which the caller submits to
+  // Native NR at Present, inside Uplift's own command buffer `buffer` (never a game's, never ReShade's immediate one), which the caller submits to
   // the effect queue: the swap-chain image copied in (VkPresentTarget), RecordAfterDlss on the RGBA16F intermediate (no game exposure; UI correction as
   // LookConfig says; DLSS's Present copy, else Launchpad's UPLIFT_MV converted, else none, NR's history restarting when that provider changes), and the
   // result copied back only when NR applied. The image is back in its layout on return either way, behind a global dependency on everything after. The
@@ -131,30 +131,30 @@ class VkNrPipeline final : private nr::PassResolver {
     const Intermediates& set = sets_[0].intermediates;
     return set.private_color.image != VK_NULL_HANDLE ? &set.private_color.ngx : nullptr;
   }
-  // Split chain (Task 5, design 3.3): the sets of the groups from `first` on, which a chain that has fewer no longer uses, go behind their last use, as a
+  // Split chain: the sets of the groups from `first` on, which a chain that has fewer no longer uses, go behind their last use, as a
   // placement switch's set did.
   void RetireSetsFrom(uint32_t first);
   // The formats Before upscaling reads the game's Color in: the five output variants, and BGRA8 (a sampled view needs no storage format).
   [[nodiscard]] static bool PreSrColorFormatSupported(VkFormat format);
-  // The game's motion vectors are read as floats (D3D12's MotionViewFormat: unconverted ones cannot be copied, E9): RG16F, RG32F, RGBA16F, RGBA32F.
+  // The game's motion vectors are read as floats (D3D12's MotionViewFormat: unconverted ones cannot be copied, tools/nrspike's e9): RG16F, RG32F, RGBA16F, RGBA32F.
   [[nodiscard]] static bool MotionFormatReadable(VkFormat format);
   // The colour pipeline's pre-SR pipelines (the sampled encode, the private-colour decode, the motion copy, the look), built now so the first compile stays
   // out of the hooked evaluate. False when one could not be built.
   bool PreparePreSr() { return color_.PreparePreSr(); }
-  // Plan 14 (design §3.2, key decision 8 of Plan 5): Uplift's copy of UPLIFT_MASK on the game's device, an image of `format` (the effect texture's own, as
+  // Uplift's copy of UPLIFT_MASK on the game's device, an image of `format` (the effect texture's own, as
   // a format the decode samples raw: color::DescribeMaskFormat's view format) at `size`, which the add-on copies the effect's texture into at the end of
   // ReShade's effects through ReShade's command list. Recordings bind it (t3, SHADER_READ_ONLY_OPTIMAL) from NoteMaskCopied on. A format Uplift's decode
   // cannot sample, or an empty `size`, releases the copy and returns VK_NULL_HANDLE (as does an image that cannot be made). `*first`: nothing was copied
   // into it yet, so its layout is UNDEFINED (between copies it rests in SHADER_READ_ONLY_OPTIMAL).
   VkImage PrepareMaskCopy(VkFormat format, nr::Size size, bool* first);
   void NoteMaskCopied() { mask_.copied = (mask_.image.image != VK_NULL_HANDLE); }
-  // Plan 17: the exposure the latest recording's encode read (the Details line), as Direct3D 12's NrPipeline. Split chain: pass 1's group's (set 0).
+  // The exposure the latest recording's encode read (the Details line), as Direct3D 12's NrPipeline. Split chain: pass 1's group's (set 0).
   [[nodiscard]] ExposureReport LastExposure() const { return sets_[0].exposure_report; }
-  // Keep faces (2026-10-08): the device loads and stores the formats its recombination needs (the look's).
+  // Keep faces: the device loads and stores the formats its recombination needs (the look's).
   [[nodiscard]] bool KeepFacesSupported() const { return look_storage_ && !color_.FacesFailed(); }
   // The mask copy, now when the GPU has passed its last use, else at its mark (Mask off, the effect off, NR off).
   void ReleaseMaskCopy() { RetireMask(); }
-  // Plan 14 (design §2.3): at the hooked evaluate, with NR on the Present path, DLSS's motion vectors (`motion`, a sampled view in
+  // At the hooked evaluate, with NR on the Present path, DLSS's motion vectors (`motion`, a sampled view in
   // SHADER_READ_ONLY_OPTIMAL, its region `region`) into the slot of `frame` (the present that closes this frame), at the region's own size and in its
   // pixels times (scale_x, scale_y). The slot ends in SHADER_READ_ONLY_OPTIMAL, the state the bridge's copy-in assumes. The Session is never involved: nothing
   // here loads NR. False (nothing recorded) when the slot or the constants ring is still in use, or an image cannot be made. The caller issued its
@@ -169,46 +169,43 @@ class VkNrPipeline final : private nr::PassResolver {
   [[nodiscard]] bool HasPresentMotion(uint64_t frame) const;  // PresentMotion without the stamp
   // The motion copy's pipeline, built now so its first compile stays out of the hooked evaluate. False when it could not be built.
   bool PreparePresentMotion() { return color_.PrepareMotion(); }
-  // The slots, freed now when the GPU has passed them, else at their marks (FreeFinished); the ring starts at four slots again.
+  // The slots, freed now when the GPU has passed them, else at their marks (FreeFinished); the ring returns to PRESENT_MOTION_MIN_SLOTS.
   void ReleasePresentMotion();
   // Frees the intermediates, the look surfaces and the mask copy now when the GPU has passed the newest recording that used them (a drain to OFF normally
-  // has); otherwise hands them to the timeline (the mask, and Plan 19's Present surfaces: FreeFinished), which frees them once it does. The Present motion
+  // has); otherwise hands them to the timeline (the mask, and Present surfaces: FreeFinished), which frees them once it does. The Present motion
   // copies are left alone (ReleasePresentMotion).
   void ReleaseIntermediates();
   // ReleaseIntermediates without the mask copy: A, B, the change field, the look surfaces and the meter's state, which only the game's command buffers use,
-  // so their completion tokens cover them (the game's NGX shutdown, final review C-1).
+  // so their completion tokens cover them (the game's NGX shutdown).
   void ReleaseNrSurfaces();
-  // Final review C-1: the images ReShade's queue also uses (a Present copy slot, read by the bridge's copy-in; the mask copy, written by the add-on's copy)
+  // The images ReShade's queue also uses (a Present copy slot, read by the bridge's copy-in; the mask copy, written by the add-on's copy)
   // never go through the timeline's pending releases, which a flush runs whatever the GPU still does (the Session's, at the game's NGX shutdown), and
   // no completion token covers that queue. Retired ones wait here: this frees those whose mark is complete. Returns how many still wait. The
   // destructor frees the rest (after the game's idle).
   size_t FreeFinished();
-  // Split chain: every stage set's surfaces count (design 3.5).
+  // Split chain: every stage set's surfaces count.
   [[nodiscard]] uint64_t HeldBytes() const;
 
  private:
   struct Intermediates {
-    vk::NrImage a;  // the model texture NR reads first; RGBA16F at `size`
+    vk::NrImage a;  // the model texture NR reads first; RGBA16F at the canvas
     vk::NrImage b;
-    // RG16F at `size`. Batch 2 review (minor 4): made at the first frame that needs one, and freed with the set.
+    // RG16F at the canvas. Made at the first frame that needs one, and freed with the set.
     vk::NrImage zero_motion;    // MotionVectors = None (or Before upscaling's canvas without readable vectors)
     vk::NrImage canvas_motion;  // Before upscaling in a canvas: the game's vectors copied in, mirrored like the image
     vk::NrImage private_color;  // Before upscaling: RGBA16F at the game's Color dimensions, what DLSS reads as Color
-    vk::NrImage change;         // required RGBA16F change field at `image`
-    nr::Size size;              // A and B: the canvas NR runs at (the work image, padded before upscaling below the floor)
-    nr::Size image;             // the work image: the region resampled to this size
-    nr::Size output;            // After DLSS: the output region the set was made for; Before upscaling: the work image (I-1)
-    nr::Size color_size;        // Before upscaling: the game's Color dimensions; empty for After DLSS
+    vk::NrImage change;         // required RGBA16F change field at the work image
+    SetSizes sizes;             // the canvas is the work image, padded before upscaling below the floor
     bool pre_sr = false;
     uint64_t bytes = 0u;         // what the budget is charged for A, B, the change field and the private colour
     uint64_t motion_bytes = 0u;  // and for each motion image, while it exists
-    bool reset_pending = true;   // a new set, or a new encoding: NR's history starts afresh (Plan 3)
+    bool reset_pending = true;   // a new set, or a new encoding: NR's history starts afresh
     color::Encoding encoding = color::Encoding::AUTO;
     float input_scale = 0.f;
     nr::Mark last_use;  // the newest recording on this set: the GPU is done with it once complete
   };
 
-  // Plan 14 (Direct3D 12's LookSurfaces): the look stage's surfaces (sources::LookPlan), apart from the main set so that the look never restarts NR's history.
+  // As in Direct3D 12's LookSurfaces, the look stage's surfaces (sources::LookPlan), apart from the main set so that the look never restarts NR's history.
   struct LookSurfaces {
     LookPlan plan;
     look::Atlas atlas;
@@ -225,20 +222,20 @@ class VkNrPipeline final : private nr::PassResolver {
     nr::Mark last_use;
   };
 
-  // Keep faces (2026-10-08), Direct3D 12's FaceSurfaces: the twin's output (an NGX output, then the face mask the later passes read) and the pyramid of a pass's
+  // Keep faces, Direct3D 12's FaceSurfaces: the twin's output (an NGX output, then the face mask the later passes read) and the pyramid of a pass's
   // weighted change, at the canvas. Apart from the main set, made while Keep faces is on, opened each recording like A and B, and freed like the look set.
   struct FaceSurfaces {
     vk::NrImage twin;    // RGBA16F
-    vk::NrImage detail;  // RGBA16F: fix round 4's despiked difference (made with the others, so Remove specks never reallocates)
+    vk::NrImage detail;  // RGBA16F: despiked difference (made with the others, so Remove specks never reallocates)
     vk::NrImage atlas;   // RGBA16F, look::MakeAtlas(size)
-    vk::NrImage fill;    // RGBA16F, the same size: round 5's fill pyramid (made with the others, so Fill skin by colour never reallocates)
+    vk::NrImage fill;    // RGBA16F, the same size: fill pyramid (made with the others, so Fill skin by colour never reallocates)
     look::Atlas layout;
     nr::Size size;
     uint64_t bytes = 0u;
     nr::Mark last_use;
   };
 
-  // Plan 14: Uplift's copy of the effect's UPLIFT_MASK, sampled in SHADER_READ_ONLY_OPTIMAL once copied into.
+  // Uplift's copy of the effect's UPLIFT_MASK, sampled in SHADER_READ_ONLY_OPTIMAL once copied into.
   struct MaskCopy {
     vk::NrImage image;
     nr::Size size;
@@ -255,8 +252,8 @@ class VkNrPipeline final : private nr::PassResolver {
     bool ok = true;                               // false: the change pass could not be recorded
   };
 
-  // v2 design §3.14: the governor's RGBA32F state, (2^E, E, the last anchor, set), which the encode and the decode read as their exposure. It carries across
-  // frames in GENERAL, as the stabiliser's histories do. Plan 17: 2x1, the second texel Auto's check (the game's exposure beside the meter's target).
+  // The governor's RGBA32F state, (2^E, E, the last anchor, set), which the encode and the decode read as their exposure. It carries across
+  // frames in GENERAL, as the stabiliser's histories do. 2x1, the second texel Auto's check (the game's exposure beside the meter's target).
   struct MeterState {
     vk::NrImage state;
     std::optional<MeterBasis> basis;
@@ -269,13 +266,13 @@ class VkNrPipeline final : private nr::PassResolver {
     color::VkSampledView view;
     float factor = 1.f;
     bool metered = false;  // `view` is the meter's state
-    bool probe = false;    // Plan 17: the meter runs beside the game's exposure for Auto's check
-    // With `probe`: the game's exposure as the meter reads it, and (2026-10-09, Auto's Blend) its share of the state's multiplier in stops.
+    bool probe = false;    // the meter runs beside the game's exposure for Auto's check
+    // With `probe`: the game's exposure as the meter reads it, and its share of the state's multiplier in stops.
     color::VkSampledView game_view;
     float game_factor = 1.f;
     float game_weight = 0.f;
   };
-  // Plan 17: Auto's check, as Direct3D 12's: the state's two texels copied into a host-visible ring after the meter, read once the GPU has passed them.
+  // Auto's check, as Direct3D 12's: the state's two texels copied into a host-visible ring after the meter, read once the GPU has passed them.
   static constexpr uint32_t CHECK_SLOTS = 4u;
   struct ExposureCheck {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -297,13 +294,13 @@ class VkNrPipeline final : private nr::PassResolver {
   static constexpr size_t MAX_OPENED = 24u;              // the images one recording moves UNDEFINED -> GENERAL at its start (Before upscaling: 20)
   static constexpr uint64_t EXPOSURE_STATE_BYTES = 32u;  // the meter's 2x1 RGBA32F state
 
-  // Plan 19: native NR at Present's own images, used in Uplift's own command buffers on ReShade's queue alone (their marks are frames: that queue's frame
+  // Native NR at Present's own images, used in Uplift's own command buffers on ReShade's queue alone (their marks are frames: that queue's frame
   // signal follows each submission).
   struct PresentSurfaces {
     vk::NrImage staging;    // `format`: the swap-chain image's bits, copied raw
     vk::NrImage color;      // RGBA16F: NR's target, in place
     vk::NrImage launchpad;  // RG16F at `launchpad_size`: UPLIFT_MV in the work image's pixels
-    vk::NrImage stand_in;   // stress round: RG16F, cleared at each use: the motion input's stand-in for a frame its source missed
+    vk::NrImage stand_in;   // RG16F, cleared at each use: the motion input's stand-in for a frame its source missed
     nr::Size stand_in_size;
     nr::Size size;
     VkFormat format = VK_FORMAT_UNDEFINED;
@@ -320,7 +317,7 @@ class VkNrPipeline final : private nr::PassResolver {
     nr::Mark mark;
   };
 
-  // Split chain (Task 5): what one stage group records on, apart from every other group's, as NrPipeline's StageSet: a group's encoding, size, exposure and
+  // Split chain: what one stage group records on, apart from every other group's, as NrPipeline's StageSet: a group's encoding, size, exposure and
   // look never restart another's. With every pass at one stage only sets_[0] is ever made: the single set of before the split. Shared by the groups: the
   // colour pipeline and its ring, the mask copy, the Present motion copies and native Present's own surfaces (only a Present group uses them).
   struct StageSet {
@@ -329,7 +326,7 @@ class VkNrPipeline final : private nr::PassResolver {
     FaceSurfaces faces;
     MeterState exposure;
     ExposureCheck check;
-    AutoExposure auto_exposure;  // Plan 17: kept for the pipeline's life (a latch never flips back)
+    AutoExposure auto_exposure;  // kept for the pipeline's life (a latch never flips back)
     ExposureReport exposure_report;
   };
 
@@ -337,18 +334,18 @@ class VkNrPipeline final : private nr::PassResolver {
   void RetireSet(StageSet* set);
   void RetireLook(StageSet* set);
   void RetireMask();
-  void RetirePresent();           // Plan 19: the staging image and the intermediate (and Launchpad's conversion)
-  void RetirePresentLaunchpad();  // Plan 19: Launchpad's conversion alone (its vectors stopped coming)
-  // Plan 19: UPLIFT_MV into present_.launchpad at `work`'s canvas, in the work image's pixels, filtered as the motion copy filters (non-finite vectors dropped,
+  void RetirePresent();           // the staging image and the intermediate (and Launchpad's conversion)
+  void RetirePresentLaunchpad();  // Launchpad's conversion alone (its vectors stopped coming)
+  // UPLIFT_MV into present_.launchpad at `work`'s canvas, in the work image's pixels, filtered as the motion copy filters (non-finite vectors dropped,
   // the rest clamped), then handed to NGX in SHADER_READ_ONLY_OPTIMAL. False when nothing was written (NR then binds no vectors).
   bool ConvertLaunchpadMotion(VkCommandBuffer buffer, const VkPresentTarget& target, const WorkLayout& work);
-  // Stress round: present_.stand_in at `size`, cleared to zero and handed to NGX in SHADER_READ_ONLY_OPTIMAL; null when it cannot be made.
+  // present_.stand_in at `size`, cleared to zero and handed to NGX in SHADER_READ_ONLY_OPTIMAL; null when it cannot be made.
   const NVSDK_NGX_Resource_VK* ZeroStandIn(VkCommandBuffer buffer, nr::Size size);
   void RetireExposure(StageSet* set);
   void RetireExposureCheck(StageSet* set);
   bool EnsureExposureCheck();  // the readback ring, made on first use
   void PollExposureChecks();   // reads the samples the GPU has passed into the set's auto_exposure
-  // Final review C-1: frees `image` now when `mark` is complete, else keeps it in `reshade_retired_` (never in the timeline's pending releases).
+  // Frees `image` now when `mark` is complete, else keeps it in `reshade_retired_` (never in the timeline's pending releases).
   void RetireReshadeImage(const vk::NrImage& image, const nr::Mark& mark);
   // The Session's nr::PassResolver: pass `index`'s own Transfer and Colour strength applied to its raw output in place (Direct3D 12's ResolvePass).
   void ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) override;
@@ -360,12 +357,11 @@ class VkNrPipeline final : private nr::PassResolver {
   // Keep faces: one pass's recombination (`pass.changed` rewritten) on the recording's slot: a barrier, the pyramid of its weighted change, the combine.
   void RecordFaces(VkCommandBuffer buffer, color::VkFacesPass pass);
   // Keep faces, before a recording's Session evaluate: the twin's surfaces and `frame_inputs->faces` while it is on (and can run), else its surfaces go.
-  // Call before OpenRecording, which opens the surfaces. Split chain: the twin of `slice`'s first pass, at its stage (decision Q5a).
+  // Call before OpenRecording, which opens the surfaces. Split chain: the twin of `slice`'s first pass, at its stage.
   void PrepareFaces(nr::Size canvas, const nr::Controls& controls, const nr::StageSlice& slice, nr::FrameInputs* frame_inputs);
   // The look set for `plan`, made now unless it is the one held. False (logged once): optional shaping is skipped this recording.
   bool EnsureLook(const LookPlan& plan);
   [[nodiscard]] LookPlan LookPlanFor(nr::Size image) const;  // sources::PlanLook for this device and this set
-  [[nodiscard]] uint32_t ShaderOptions() const;                            // the encode's and the decode's shader_options
   [[nodiscard]] color::VkSampledView BoundMask(uint32_t slot);             // the mask copy for this recording, or none
   // A global memory dependency: everything written before `source_stage` is visible to everything after (every Uplift image stays in GENERAL).
   void Barrier(VkCommandBuffer buffer, VkPipelineStageFlags source_stage) const;
@@ -374,7 +370,7 @@ class VkNrPipeline final : private nr::PassResolver {
   // (they carry across frames). Then the colour pipeline's placeholders likewise.
   void OpenRecording(VkCommandBuffer buffer, std::span<const vk::NrImage* const> images, bool with_look);
   // An Uplift image NGX reads as an input (the zero or canvas motion, the private colour) moves GENERAL -> SHADER_READ_ONLY_OPTIMAL, as a game's own inputs
-  // are (R79), with the write finished and visible to everything after.
+  // are, with the write finished and visible to everything after.
   void HandToNgx(VkCommandBuffer buffer, const vk::NrImage& image) const;
   // The game's exposure texture as a sampled view (SHADER_READ_ONLY_OPTIMAL), or empty when it is not an image view.
   [[nodiscard]] static color::VkSampledView GameExposureView(const NVSDK_NGX_Resource_VK* exposure);
@@ -383,12 +379,12 @@ class VkNrPipeline final : private nr::PassResolver {
   ExposureChoice ChooseExposure(color::Encoding encoding, const NVSDK_NGX_Resource_VK* game_texture, float game_factor);
   // The meter before the encode (`pass`'s state, snap, smoothing, rates and Δt are filled here), then a barrier so the encode reads what it wrote. False: no
   // dispatch could be recorded.
-  // Plan 17: with `exposure.probe`, the meter also writes Auto's check, and its state is copied into the readback ring.
+  // With `exposure.probe`, the meter also writes Auto's check, and its state is copied into the readback ring.
   bool RecordMeter(VkCommandBuffer buffer, uint32_t slot, color::VkMeterPass pass, const ExposureChoice& exposure);
   // The stabiliser's motion vectors (the game's own, current -> previous) with a resolved rect and their scale, or none: absent or unreadable vectors make
-  // Motion change-gated static (decision D4), as Direct3D 12's StabilizeMotionOf.
+  // Motion change-gated static, as Direct3D 12's StabilizeMotionOf.
   [[nodiscard]] static color::VkStabilizeMotion StabilizeMotionOf(const nr::FrameInputs& inputs);
-  // The target's input scale, and NR's history restarting when the encoding or the scale changed (Plan 2 final review M4).
+  // The target's input scale, and NR's history restarting when the encoding or the scale changed.
   float NoteEncoding(const VkDlssTarget& target);
   // Generate the required change field, optionally shape it, and make the writes visible to composition.
   AfterNr RecordAfterNr(VkCommandBuffer buffer, uint32_t slot, const color::VkEncodePass& encode, VkImageView nr_output, uint32_t passes_run, bool reduced, bool look_ready,
@@ -414,12 +410,12 @@ class VkNrPipeline final : private nr::PassResolver {
   std::array<PresentMotionSlot, PRESENT_MOTION_SLOTS> present_motion_;
   nr::Size present_motion_size_;        // the slots' size: the motion region
   uint64_t present_motion_bytes_ = 0u;  // the slots in use, while they exist
-  size_t present_motion_slots_ = PRESENT_MOTION_MIN_SLOTS;  // fix round 1 (M6): 4, or 8 once a copy was skipped for a slot still read
+  size_t present_motion_slots_ = PRESENT_MOTION_MIN_SLOTS;  // grows from PRESENT_MOTION_MIN_SLOTS after a copy skips a slot still being read
   // Makes present_motion_[first, end) at `size`; on a failure none of them stays (logged) and false.
   bool MakePresentMotionSlots(size_t first, size_t end, nr::Size size);
-  PresentSurfaces present_;                                         // Plan 19
-  MotionSource present_motion_source_ = MotionSource::NONE;         // Plan 19: the latest Present recording's provider (a switch restarts NR's history)
-  std::vector<RetiredImage> reshade_retired_;  // final review C-1: retired slots and mask copies whose mark is not complete yet
+  PresentSurfaces present_;
+  MotionSource present_motion_source_ = MotionSource::NONE;         // the latest Present recording's provider (a switch restarts NR's history)
+  std::vector<RetiredImage> reshade_retired_;  // retired slots and mask copies whose mark is not complete yet
   std::array<nr::Mark, color::VkColorPipeline::RING_SLOTS> slot_marks_ = {};
   uint32_t next_slot_ = 0u;
   bool allocation_failure_logged_ = false;

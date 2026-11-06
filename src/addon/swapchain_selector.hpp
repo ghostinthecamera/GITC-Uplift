@@ -4,7 +4,7 @@
 
 namespace uplift::addon {
 
-// Spec §8.1 (amendment 7): NR runs on one swap chain per device, the first that presents, until
+// NR runs on one swap chain per device, the first that presents, until
 // it has not presented for `handover` (a launcher or splash window giving way to the game's).
 //
 // There is deliberately no destroyed-swap-chain callback. ReShade's v6.0.0 `destroy_swapchain`

@@ -9,20 +9,21 @@ namespace uplift::ngx_hooks {
 
 struct FrameGenState {
   bool active = false;
-  uint32_t multiplier = 1u;  // presented frames per rendered frame: 2, 3 or 4 when active
+  uint32_t multiplier = 1u;  // presented frames per rendered frame
   bool from_ngx = false;     // a live NGX FrameGeneration feature says so
 };
 
-// v2 design §3.5. A live NGX FrameGeneration feature is authoritative. Frame generation made outside
-// NGX shows as a cadence: over the last 1 s, presents per main-handle evaluate of at least 1.8, 2.7
-// or 3.6 mean 2x, 3x or 4x, and a new reading must hold for 3 s before it is shown. Not thread-safe.
+// A live NGX feature takes effect immediately. A change in measured cadence must persist through the hysteresis interval. Callers serialize access.
 class FrameGenDetector {
  public:
   void OnPresent(std::chrono::steady_clock::time_point now);
   void OnMainEvaluate(std::chrono::steady_clock::time_point now);
   // Once per present, after OnPresent. `ngx_live`: the live NGX FrameGeneration features.
   FrameGenState Update(std::chrono::steady_clock::time_point now, uint32_t ngx_live);
-  [[nodiscard]] FrameGenState State() const { return state_; }
+  [[nodiscard]] bool HasCadence() const;
+  [[nodiscard]] FrameGenState ObservedState() const { return ReportedState(false); }
+  // Route activity applies to this read only. It never contributes to the measured cadence or NGX provenance.
+  [[nodiscard]] FrameGenState ReportedState(bool route_active) const;
 
  private:
   std::deque<std::chrono::steady_clock::time_point> presents_;
@@ -30,7 +31,7 @@ class FrameGenDetector {
   uint32_t shown_multiplier_ = 1u;
   uint32_t candidate_multiplier_ = 1u;
   std::optional<std::chrono::steady_clock::time_point> candidate_since_;
-  FrameGenState state_;
+  bool from_ngx_ = false;
 };
 
 }  // namespace uplift::ngx_hooks

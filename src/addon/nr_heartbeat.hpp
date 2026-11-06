@@ -15,7 +15,7 @@
 
 namespace uplift::addon {
 
-// 1.0.1 (the Launchpad investigation, F2): three failures in two games came about 217 s after NR began running with Launchpad's motion vectors, and the
+// 1.0.1: three failures in two games came about 217 s after NR began running with Launchpad's motion vectors, and the
 // logs could not say how long NR had run, with what, or how much memory the game held then. While NR runs, a device logs one INFO line a minute: the NR
 // frames since the current motion source started, that source, how long NR has been running, and the process's private bytes and VRAM; the same figures
 // once more when its bridge stops or its device is removed. The counting is pure (unit-tested); the memory figures are read by the caller.

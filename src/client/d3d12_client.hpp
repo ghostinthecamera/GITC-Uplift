@@ -32,7 +32,7 @@ enum class D3D12Usage : uint32_t {
   PRESENT = 0x80000000u | 0x4u | 0x800u,
 };
 
-// What the client records with (design §6). The add-on's host is ReShade's API on the present queue's immediate command list; the smoke's is a native list
+// What the client records with. The add-on's host is ReShade's API on the present queue's immediate command list; the smoke's is a native list
 // that is closed and executed at Signal. Nothing here is recorded natively on the game's own lists. Not thread-safe: the caller's lock.
 class D3D12Host {
  public:
@@ -45,11 +45,11 @@ class D3D12Host {
   virtual bool Wait(ID3D12Fence* fence, uint64_t value) = 0;                   // command_queue::wait: no flush; everything recorded or flushed later waits
 };
 
-// Plan 12 (design §6): a 32-bit Direct3D 12 game's frames to and from NR in gitc-uplift-helper64.exe through an NrLink. D3D11Client's FENCED half with Direct3D 12 calls:
+// A 32-bit Direct3D 12 game's frames to and from NR in gitc-uplift-helper64.exe through an NrLink. D3D11Client's FENCED half with Direct3D 12 calls:
 // the helper's NT textures and both fences are opened on the game's native device (OpenSharedHandle, so no ReShade event is raised), RunBridgedFrame runs unchanged
 // on this side, and every command is recorded through the D3D12Host. There is no CPU-ordered fallback: Direct3D 12 always has shared fences.
 //
-// R17 across processes: the game queue's wait is queued only after the helper's reply said it submitted that very signal. A fence reading UINT64_MAX means the
+// Across processes: the game queue's wait is queued only after the helper's reply said it submitted that very signal. A fence reading UINT64_MAX means the
 // helper or its device is gone. Frees: D3D12 frees at once, so an opened texture or fence the game's queue may still use goes on a retire list behind a client
 // fence signalled on that queue (the retire fence, CreateFence on the native device); Describe releases what the fence has passed. DestroyDevice (no host:
 // ReShade may already have released its queue) waits at most 2 s for the last retire value and leaks on a timeout, never releases under the GPU.
@@ -72,7 +72,7 @@ class D3D12Client {
   // The FRAME reply's news: opens the helper's fences and shared textures (taking every NT handle in the reply), runs the fence watchdog, and retires the shared
   // surfaces when the helper's NR is not running.
   void Apply(const ipc::Reply& reply, NrLink& link, D3D12Host& host);
-  // One RUN (design §6): the back buffer (in `entry_state`: present at PRESENT, render_target in the effects) and `motion` (this frame's UPLIFT_MV, in
+  // One RUN: the back buffer (in `entry_state`: present at PRESENT, render_target in the effects) and `motion` (this frame's UPLIFT_MV, in
   // shader_resource; null for none) out, NR, back. True when NR's result reached `back_buffer`.
   bool Run(D3D12Host& host, ID3D12Resource* back_buffer, D3D12Usage entry_state, ID3D12Resource* motion, addon::TriggerPoint point, NrLink& link);
   [[nodiscard]] bool LastRunSent() const { return run_sent_; }  // the last Run put a RUN on the wire
@@ -90,7 +90,7 @@ class D3D12Client {
   void DestroyDevice(bool wait = true);
   [[nodiscard]] std::string Line() const;
   [[nodiscard]] std::string_view Latch() const { return latch_; }  // non-empty once the transport stopped for the session
-  // Plan 17: Retry now after the helper stopped (the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
+  // Retry now after the helper stopped (when the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
   void ClearLatch() { latch_.clear(); }
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
   // What this side still keeps alive of the helper's textures: the opened colour, mask and motion, and the ones on the retire lists that no fence has released.
@@ -111,7 +111,7 @@ class D3D12Client {
     nr::Size size;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
   };
-  // A share that failed: not retried for this size and format until NR is re-enabled (Plan 7's final review Minor 3).
+  // A share that failed: not retried for this size and format until NR is re-enabled.
   struct ShareFailure {
     nr::Size size;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;

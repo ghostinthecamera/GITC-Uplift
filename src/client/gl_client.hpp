@@ -21,22 +21,25 @@
 
 namespace uplift::client {
 
-// Plan 12 (OpenGL design §5): an OpenGL context's frames to and from NR in gitc-uplift-helper64.exe through an NrLink. VkClient's logic on the GL game side (src/gl/):
+// An OpenGL context's frames to and from NR in gitc-uplift-helper64.exe through an NrLink. VkClient's logic on the GL game side (src/gl/):
 // FENCED when the context offers GL_EXT_semaphore_win32 (the helper's two D3D12 fences imported as GL semaphores, RunBridgedFrame running unchanged on this
 // side), SHARED_CPU otherwise or when the import is refused (the same NT textures with no fences: the copy in, a capped GLsync wait, RUN, whose reply comes at
 // completion, then the copy out). Every copy goes through the GameHost (ReShade's copy_texture_region in the add-on, a native copy in the smokes); the
 // imports, semaphores and frees through gl::Interop. Not thread-safe: the add-on's lock.
 //
-// What GL cannot do is read a semaphore (design §5, R70): where VkClient reads its imported fences, this client reads the helper's own view of them, which
-// every reply carries (Reply::to12_completed and to11_completed; UINT64_MAX is the helper's device removed). R17 across processes is unchanged: a GL wait is
-// queued only after the helper's reply said it submitted that very signal. Every CPU wait is capped at 2 s; a timeout skips that frame and three in a row stop
-// the client for the session.
+// What GL cannot do is read a semaphore: where VkClient reads its imported fences, this client reads the helper's own view of them, which
+// every reply carries (Reply::to12_completed and to11_completed; UINT64_MAX is the helper's device removed). Across processes, a GL wait is
+// queued only after the helper's reply said it submitted that very signal. Every CPU wait is capped; a timeout skips that frame and
+// bridge::MAX_CONSECUTIVE_TIMEOUTS in a row stop the client for the session.
 //
 // Every GL call is made with the runtime's context current (GameHost::Valid()). While it is not, nothing is imported, and the NT handles a reply brought are
 // still taken and closed once (the helper's two fence handles are kept, not closed, until a valid frame imports them: they are handed out only once). Frees wait
-// for a valid frame too, and destroy_device is ForgetGl: no GL call at all (design §3.6).
+// for a valid frame too, and destroy_device is ForgetGl: no GL call at all.
 class GlClient {
  public:
+  // The cap on the game thread's waits.
+  static constexpr uint32_t WAIT_CAP_MS = 2000u;
+
   // `functions`: gl::Functions::Load's (the runtime's context current); `allow_fences` false forces SHARED_CPU (the smoke uses it to test it on a context that
   // could do both).
   GlClient(gl::Functions functions, LUID luid, bool allow_fences);
@@ -68,13 +71,13 @@ class GlClient {
   void ReleaseMask(gl::GameHost& host);
   // The helper is gone (or this transport is): every shared surface and imported fence goes (deleted now, or at the next valid frame). True when it held any.
   bool ReleaseAll(gl::GameHost& host);
-  // destroy_device (design §3.6): every GL name forgotten WITHOUT a GL call (they die with the share group).
+  // destroy_device: every GL name forgotten WITHOUT a GL call (they die with the share group).
   void ForgetGl();
   // What this side imported (the helper's transport counts the same textures as its own VRAM, so the overlay never adds it).
   [[nodiscard]] uint64_t ImportedBytes() const { return color_.bytes + mask_.bytes + motion_.bytes; }
   [[nodiscard]] std::string Line() const;
   [[nodiscard]] std::string_view Latch() const { return latch_; }  // non-empty once the client stopped for the session
-  // Plan 17: Retry now after the helper stopped (the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
+  // Retry now after the helper stopped (when the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
   void ClearLatch() { latch_.clear(); }
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
 
@@ -88,7 +91,7 @@ class GlClient {
     // What host.Copy takes for the shared texture.
     [[nodiscard]] gl::ImageInfo Image() const { return {.handle = gl.Handle(), .size = size, .format = format, .samples = 1u}; }
   };
-  // A share that failed: not retried for this size and format until NR is re-enabled (Plan 7's final review Minor 3).
+  // A share that failed: not retried for this size and format until NR is re-enabled.
   struct ShareFailure {
     nr::Size size;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
@@ -112,7 +115,7 @@ class GlClient {
   // Stops the client for the session ("The OpenGL bridge stopped: ..."): no new wait is ever queued again, the helper's side latches and CPU-signals both
   // fences up to the waited values, and the shared surfaces go.
   void Stop(std::string_view reason, NrLink& link, gl::GameHost& host);
-  // A capped wait ran its full 2 s: counted in `consecutive`; the third in a row stops the client.
+  // Count a capped wait timeout in consecutive; bridge::MAX_CONSECUTIVE_TIMEOUTS stops the client. Callers own the reset point.
   void NoteTimeout(uint32_t* consecutive, std::string_view what, NrLink& link, gl::GameHost& host);
   bool RunFenced(gl::GameHost& host, const gl::ImageInfo& frame, const gl::ImageInfo& motion, ipc::Run run, NrLink& link);
   bool RunCpuOrdered(gl::GameHost& host, const gl::ImageInfo& frame, const gl::ImageInfo& motion, ipc::Run run, NrLink& link);
@@ -123,7 +126,7 @@ class GlClient {
   gl::Interop interop_;
   LUID luid_ = {};
   bool fenced_ = false;
-  std::string cpu_reason_;  // why SHARED_CPU, when it is (design §7's reason)
+  std::string cpu_reason_;  // why SHARED_CPU, when it is
   // FENCED: the helper's two fences, imported. to12 is signalled here (odd values) and waited on by the helper's queue; to11 is signalled by the helper's queue
   // and waited on here. The NT handles are held (not closed) from the reply that brought them until a valid frame imported them.
   GLuint to12_gl_ = 0u;

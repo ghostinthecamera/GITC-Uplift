@@ -7,15 +7,15 @@
 
 #include "color/encoding.hpp"
 #include "ipc/control_block.hpp"
+#include "memory_units.hpp"
 #include "nr/log.hpp"
+#include "text/effect_names.hpp"
+#include "text/helper_messages.hpp"
+#include "text/timeout_messages.hpp"
 #include "vk/format.hpp"
 
 namespace uplift::client {
 namespace {
-
-constexpr uint32_t WAIT_CAP_MS = 2000u;  // the design's R29 cap on the game thread's waits
-constexpr uint32_t MAX_CONSECUTIVE_TIMEOUTS = 3u;
-constexpr double MIB = 1024.0 * 1024.0;
 
 std::string ShareFailureText(const char* what, DXGI_FORMAT format, std::string_view failure) {
   return std::format("{} could not be shared with Uplift's helper (DXGI_FORMAT {}, {})", what, static_cast<int>(format), failure);
@@ -26,7 +26,7 @@ std::string ShareFailureText(const char* what, DXGI_FORMAT format, std::string_v
 VkClient::VkClient(vk::Device device, LUID luid, bool allow_fences) : interop_(std::move(device)), luid_(luid) {
   const vk::Device& functions = interop_.Functions();
   const vk::DeviceRecord& record = functions.record;
-  // Design §2.5: GPU-ordered needs both Win32 extensions and timeline semaphores (adjusted, or the game's own, as DXVK 2.5.2's); without them the frame
+  // GPU-ordered needs both Win32 extensions and timeline semaphores (adjusted, or the game's own, as DXVK 2.5.2's); without them the frame
   // crosses through shared textures, ordered on the CPU.
   fenced_ = (allow_fences && record.semaphore_win32 && record.timeline && record.memory_win32 && functions.vkImportSemaphoreWin32HandleKHR != nullptr
              && functions.vkGetSemaphoreCounterValue != nullptr);
@@ -97,8 +97,8 @@ void VkClient::Stop(std::string_view reason, NrLink& link, vk::GameHost& host) {
 }
 
 void VkClient::NoteTimeout(uint32_t* consecutive, std::string_view what, NrLink& link, vk::GameHost& host) {
-  if (++*consecutive >= MAX_CONSECUTIVE_TIMEOUTS) {
-    Stop(std::format("{} did not finish within 2 s, {} times in a row", what, MAX_CONSECUTIVE_TIMEOUTS), link, host);
+  if (++*consecutive >= bridge::MAX_CONSECUTIVE_TIMEOUTS) {
+    Stop(uplift::text::ConsecutiveTimeoutsText(what, std::chrono::milliseconds{WAIT_CAP_MS}, bridge::MAX_CONSECUTIVE_TIMEOUTS), link, host);
   }
 }
 
@@ -116,7 +116,7 @@ bool VkClient::Import(vk::GameHost& host, HANDLE handle, nr::Size size, DXGI_FOR
 
 ipc::Target VkClient::Describe(vk::GameHost& host, const vk::ImageInfo& back_buffer, bool enabled, bool running) {
   interop_.FreeFinished(host);
-  present_synced_ = false;  // a new frame: its present-queue wait (design §3.4 case 2) is still to do
+  present_synced_ = false;  // a new frame: its present-queue wait is still to do
   ipc::Target target;
   target.width = back_buffer.size.width;
   target.height = back_buffer.size.height;
@@ -135,13 +135,13 @@ ipc::Target VkClient::Describe(vk::GameHost& host, const vk::ImageInfo& back_buf
     problem = vk::BackBufferProblem(back_buffer, interop_.Functions().record.memory_win32);
   }
   if (!running || !problem.empty()) {
-    ReleaseShared(host);  // NR is off, or this image cannot go: the shared surfaces go with it (Plan 7's final review C-1)
+    ReleaseShared(host);  // NR is off, or this image cannot go: the shared surfaces go with it
   }
   if (problem.empty() && color_failure_ && color_failure_->Matches(back_buffer.size, back_buffer.format)) {
     problem = ShareFailureText("The back buffer", back_buffer.format, color_failure_->what);
   }
   if (problem.empty() && running && host.Valid()) {
-    // Batch 2 review I-1 (a), as VkBridge::BeginFrame: this event comes before ReShade records its effects, so the barrier leads the immediate list.
+    // As VkBridge::BeginFrame: this event comes before ReShade records its effects, so the barrier leads the immediate list.
     vk::RecordOpeningBarrier(host);
   }
   if (problem != problem_) {
@@ -192,7 +192,7 @@ bool VkClient::Apply(const ipc::Reply& reply, NrLink& link, vk::GameHost& host) 
     }
     if (imported != VK_SUCCESS) {
       // An unusual driver or wrapper refuses the import: no restart would help, so the frame crosses through shared textures, ordered on the CPU, which
-      // need no fences. The caller re-attaches the helper with SHARED_CPU (Plan 9 M-4's lesson).
+      // need no fences. The caller re-attaches the helper with SHARED_CPU.
       interop_.DestroySemaphore(&to12_vk_);
       interop_.DestroySemaphore(&to11_vk_);
       cpu_reason_ = std::format("the driver refused the fence import ({} returned VkResult {})", step, static_cast<int>(imported));
@@ -206,7 +206,7 @@ bool VkClient::Apply(const ipc::Reply& reply, NrLink& link, vk::GameHost& host) 
   if (!fell_back) {
     std::string failure;
     if (color != nullptr && latch_.empty()) {
-      // The colour of the FRAME that was sent (color_ask_), which this reply may only be delivering from an earlier one (batch 3 review, minor 1).
+      // The colour of the FRAME that was sent (color_ask_), which this reply may only be delivering from an earlier one.
       if (Import(host, color, color_ask_.size, vk::SharedFormatOf(color_ask_.format),
                  color::DescribeFormat(color_ask_.format).value_or(color::FormatInfo{}).bytes_per_pixel, &color_, &failure)) {
         color_failure_.reset();
@@ -222,13 +222,13 @@ bool VkClient::Apply(const ipc::Reply& reply, NrLink& link, vk::GameHost& host) 
         mask_failure_.reset();
       } else {
         mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .what = failure};
-        nr::Log(nr::LogLevel::WARN, ShareFailureText("UPLIFT_MASK", mask_ask_.format, failure));
+        nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MASK_TEXTURE, mask_ask_.format, failure));
       }
     }
     if (motion != nullptr && latch_.empty()) {
       if (!Import(host, motion, motion_ask_size_, DXGI_FORMAT_R16G16_FLOAT, 4u, &motion_, &failure)) {
         motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .what = failure};
-        nr::Log(nr::LogLevel::WARN, ShareFailureText("UPLIFT_MV", DXGI_FORMAT_R16G16_FLOAT, failure));
+        nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MOTION_TEXTURE, DXGI_FORMAT_R16G16_FLOAT, failure));
       }
     }
   }
@@ -272,7 +272,7 @@ bool VkClient::SyncPresentQueue(vk::GameHost* present_host, vk::GameHost& host, 
 }
 
 vk::ImageInfo VkClient::PrepareMotion(vk::GameHost& host, const vk::ImageInfo& motion, NrLink& link) {
-  // Plan 7 decision 3: LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
+  // LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
   if (motion.image == VK_NULL_HANDLE || motion.format != DXGI_FORMAT_R16G16_FLOAT || motion.samples != 1u) {
     // 1.1.2 (a player's freeze, NFS Underground 2): a frame without LaunchPad's motion (the Uplift technique skipped a frame) keeps the share; it goes
     // with NR (Release), at a new size, or when the helper says so. Releasing and re-sharing it around one such frame coincided with a GPU fault.
@@ -298,7 +298,7 @@ vk::ImageInfo VkClient::PrepareMotion(vk::GameHost& host, const vk::ImageInfo& m
       if (opened) {
         motion_failure_.reset();
       } else {
-        // Logged once: not retried for this size (Plan 7's final review Minor 3).
+        // Logged once: not retried for this size.
         motion_failure_ = ShareFailure{.size = motion.size, .format = DXGI_FORMAT_R16G16_FLOAT, .what = failure};
         nr::Logf(nr::LogLevel::WARN, "UPLIFT_MV could not be shared with Uplift's helper ({}); NR runs without LaunchPad's motion", failure);
       }
@@ -350,7 +350,7 @@ bool VkClient::RunFenced(vk::GameHost& host, const vk::ImageInfo& back_buffer, v
     }
     pending_out_ = 0u;
   }
-  // Final review, minor 4: after the skips above, and before anything below can submit (PrepareMotion's retire fence flushes the immediate list).
+  // After the skips above, and before anything below can submit (PrepareMotion's retire fence flushes the immediate list).
   if (!SyncPresentQueue(present_host, host, link)) return false;
   const vk::ImageInfo shared_motion_source = PrepareMotion(host, motion, link);
   if (in_flight_) return false;
@@ -393,7 +393,7 @@ bool VkClient::RunFenced(vk::GameHost& host, const vk::ImageInfo& back_buffer, v
       return reply.submitted != 0u;
     }
     bool SignalD3D12(uint64_t /*value*/) override { return reply.signalled != 0u; }
-    // R17: only after the reply said the signal was submitted (RunBridgedFrame calls this after SignalD3D12 returned true).
+    // Only after the reply said the signal was submitted (RunBridgedFrame calls this after SignalD3D12 returned true).
     bool WaitD3D11(uint64_t value) override {
       client_.waited11_ = value;  // for Stop, whether or not the queue took it
       if (host_.Wait(client_.to11_vk_, value)) return true;
@@ -419,13 +419,13 @@ bool VkClient::RunFenced(vk::GameHost& host, const vk::ImageInfo& back_buffer, v
   const bridge::BridgedFrame frame = bridge::RunBridgedFrame(steps, in, out);
   run_sent_ = steps.sent;
   if (steps.timed_out) {
-    // No reply in 2 s (or the helper is gone, which the launcher shows next frame). Nothing was queued on this side's GPU after the copy in, and no Vulkan
+    // No reply within RUN_REPLY_CAP (or the helper is gone, which the launcher shows next frame). Nothing was queued on this side's GPU after the copy in, and no Vulkan
     // wait ever will be for `out`; the helper's list may still run, so until to11 shows its signal (or a late reply says there is none) nothing touches the
     // shared textures. A RUN the link refused never reached the helper.
     if (steps.sent) {
       pending_out_ = out;
       in_flight_ = true;
-      nr::Log(nr::LogLevel::WARN, "Uplift's 64-bit helper did not answer within 2 s; frames go without NR until it does");
+      nr::Logf(nr::LogLevel::WARN, uplift::text::RUN_REPLY_TIMEOUT_LINE, std::chrono::duration<double>(RUN_REPLY_CAP).count());
     }
     return false;
   }
@@ -446,9 +446,9 @@ bool VkClient::RunFenced(vk::GameHost& host, const vk::ImageInfo& back_buffer, v
 
 bool VkClient::RunCpuOrdered(vk::GameHost& host, const vk::ImageInfo& back_buffer, vk::Usage entry_state, const vk::ImageInfo& motion, ipc::Run run,
                              NrLink& link, vk::GameHost* present_host) {
-  // Design §3.3, in this order: the copy in, its completion on the CPU (capped), RUN (whose reply comes when the helper's GPU work is done), the copy out.
-  // Nothing waits on the GPU, so there is no fence to strand; a timeout skips this frame and three in a row stop the client.
-  if (!SyncPresentQueue(present_host, host, link)) return false;  // final review, minor 4: before anything below can submit
+  // In this order: the copy in, its completion on the CPU (capped), RUN (whose reply comes when the helper's GPU work is done), the copy out.
+  // Nothing waits on the GPU, so there is no fence to strand; a timeout skips this frame and bridge::MAX_CONSECUTIVE_TIMEOUTS in a row stop the client.
+  if (!SyncPresentQueue(present_host, host, link)) return false;  // before anything below can submit
   const vk::ImageInfo shared_motion_source = PrepareMotion(host, motion, link);
   if (in_flight_) return false;
   vk::RecordCopyIn(host, back_buffer.image, entry_state, color_.vulkan.image, shared_motion_source.image, motion_.vulkan.image);
@@ -511,7 +511,7 @@ MaskCopy VkClient::CopyMask(vk::GameHost& host, const vk::ImageInfo& mask, NrLin
       CloseHandle(handle);
     }
     if (!opened) {
-      // Logged once: not retried for this size and format (final review Minor 3).
+      // Logged once: not retried for this size and format.
       mask_failure_ = ShareFailure{.size = mask.size, .format = format->view_format, .what = failure};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, {})", static_cast<int>(format->view_format),
                failure);
@@ -532,8 +532,8 @@ bool VkClient::FreeRetired(vk::GameHost& host) {
 }
 
 std::string VkClient::Line(std::string_view route_reason) const {
-  const double mib = static_cast<double>(ImportedBytes()) / MIB;
-  // T5: gitc-uplift.addon64 names the route of a Vulkan device whose NR runs in the helper, and why the chain got there.
+  const double mib = static_cast<double>(ImportedBytes()) / BYTES_PER_MIB;
+  // gitc-uplift.addon64 names the route of a Vulkan device whose NR runs in the helper, and why the chain got there.
   const std::string lead = (route_reason.empty() ? std::format("Vulkan ({}): NR runs in Uplift's 64-bit helper", BITNESS)
                                                  : std::format("Vulkan: NR runs in Uplift's helper process: {}", route_reason));
   std::string line = (fenced_ ? std::format("{} (shared textures and fences, {:.1f} MiB)", lead, mib)

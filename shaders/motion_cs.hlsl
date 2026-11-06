@@ -29,10 +29,10 @@ UPLIFT_IMAGE_FORMAT("rg16f") RWTexture2D<float2> motion_target : register(u1);
 // vectors (the Present copy, the pre-SR canvas) and Launchpad's UPLIFT_MV.
 static const float MOTION_LIMIT_CANVASES = 2.f;
 
-// Amendment 7 and v2 design §3.9 step 4: the game's motion vectors copied into an Uplift texture in
-// destination pixels, resampled to the image and mirror-padded to the canvas, with the mirrored axis's
-// component negated. Uplift binds the result with its full size as the subrect and a scale of (1, 1).
-// A non-finite vector (Inf, NaN) becomes no motion; a finite one is clamped to MOTION_LIMIT_CANVASES.
+// The game's motion vectors copied into an Uplift texture in destination pixels, resampled to the
+// image and mirror-padded to the canvas, with the mirrored axis's component negated. Uplift binds the
+// result with its full size as the subrect and a scale of (1, 1). A non-finite vector (Inf, NaN)
+// becomes no motion; a finite one is clamped to MOTION_LIMIT_CANVASES.
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
   if (id.x >= canvas_width || id.y >= canvas_height) return;

@@ -60,7 +60,7 @@ NVSDK_NGX_Result Feature::Evaluate(ID3D12GraphicsCommandList* list, const Evalua
   if (handle_ == nullptr || list == nullptr || inputs.color == nullptr || inputs.output == nullptr) {
     return NVSDK_NGX_Result_FAIL_InvalidParameter;
   }
-  // The NR floor (spec §6.2), enforced here too so no caller can reach NGX below it.
+  // The NR floor, enforced here too so no caller can reach NGX below it.
   const D3D12_RESOURCE_DESC output_desc = inputs.output->GetDesc();
   const Size output_size = {static_cast<uint32_t>(output_desc.Width), output_desc.Height};
   if (!MeetsNrFloor(output_size)) {

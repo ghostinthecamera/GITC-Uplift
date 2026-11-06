@@ -5,7 +5,16 @@
 
 namespace uplift::addon {
 
-// Fix round 1, Important 1 (v2 design's Safety latch, amended): the device-removal latch survives a
+// Persistent device-removal latch.
+inline constexpr std::wstring_view REMOVAL_LATCH_EXTENSION = L".latch";
+// Vulkan device adjustment awaiting proof of presentation or clean teardown.
+inline constexpr std::wstring_view VK_DEVICE_PENDING_EXTENSION = L".vkdevice-pending";
+// Native Vulkan NR startup awaiting enough successful frames or a clean stop.
+inline constexpr std::wstring_view VK_NATIVE_PENDING_EXTENSION = L".vknative-pending";
+// 9Ex startup awaiting proof of its first frame or clean teardown.
+inline constexpr std::wstring_view D3D9EX_PENDING_EXTENSION = L".d3d9ex";
+
+// The device-removal latch survives a
 // game that crashes right after a removal, because ReShade's own ini cache only reaches disk on a
 // later present or at shutdown. Uplift instead persists a marker file of its own, synchronously,
 // the moment the latch trips.

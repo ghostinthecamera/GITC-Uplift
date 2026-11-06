@@ -20,15 +20,15 @@
 
 namespace uplift::client {
 
-// Plan 10 (design §3). A 32-bit Direct3D 10 device's frames through Plan 8's relay (bridge::KeyedRelay) and Plan 9's D3D11Client on it:
-// FENCED to the helper, GPU-ordered end to end. Only fences cross the process boundary. ReShade-free: native pointers, and on the
-// game's device only CopyResource, Flush, OpenSharedResource and AcquireSync/ReleaseSync on the keyed textures. Not thread-safe: the
-// add-on's lock. Destroy it outside that lock: the relay is ReShade's proxy, whose last release raises destroy_device.
+// A 32-bit Direct3D 10 device's frames use bridge::KeyedRelay and D3D11Client, with FENCED transport to the helper.
+// Keyed mutexes stay within the game process; cross-process synchronisation uses shared fences. The game side uses native copy,
+// flush, sharing and keyed acquire/release calls.
+// The caller holds the add-on lock, but destroys the relay outside it: ReShade's proxy raises destroy_device on its last release.
 //
-// The hand-off is D3D10Bridge's (Plan 8, design §2 rule 3): key 0 is the game's side and key 1 the relay's, every acquire is capped at
-// 2 s and only S_OK counts, every key taken is given back, and each side flushes before the other acquires. The relay has no Present
-// (Plan 8's final review C-1), so this flushes it after every call that can release on it. R17 across the relay: the D3D11 client
-// queues no wait for a value the helper's reply did not say it submitted, and the keys go back whatever it did.
+// D3D10Bridge's handoff rules apply: key 0 belongs to the game, key 1 to the relay; acquires are capped and only S_OK succeeds.
+// Every acquired key is returned and each side flushes before the other acquires. The relay has no Present, so releases are
+// followed by a flush.
+// The D3D11 client queues a wait only for a value the helper reports as submitted; keys are returned on every outcome.
 class D3D10Client {
  public:
   // nullptr + `error` as bridge::KeyedRelay::Create or D3D11Client::Create (label "Direct3D 10"). `relay_created` receives the relay
@@ -51,7 +51,7 @@ class D3D10Client {
   // The FRAME reply's news, D3D11Client::Apply's: True when the transport changed (the relay device could not open the helper's fences:
   // the caller DETACHes and ATTACHes afresh with Kind()). Then flushes the relay.
   bool Apply(const ipc::Reply& reply, NrLink& link);
-  // One RUN (design §3.1): the back buffer (and `motion`, this frame's UPLIFT_MV, FENCED only) into the keyed textures, D3D11Client::Run
+  // One RUN: the back buffer (and `motion`, this frame's UPLIFT_MV, FENCED only) into the keyed textures, D3D11Client::Run
   // on the relay's side, the keys back, and NR's result into `back_buffer` when it wrote. True when NR's result reached `back_buffer`.
   bool Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, addon::TriggerPoint point, NrLink& link);
   [[nodiscard]] bool LastRunSent() const { return run_sent_; }  // the last Run put a RUN on the wire
@@ -64,7 +64,7 @@ class D3D10Client {
   [[nodiscard]] uint64_t SharedBytes() const { return color_.bytes + mask_.bytes + motion_.bytes + d3d11_->SharedBytes(); }
   [[nodiscard]] std::string Line() const;
   [[nodiscard]] std::string_view Latch() const { return d3d11_->Latch(); }  // non-empty once the transport stopped for the session
-  // Plan 17: as D3D11Client::ClearLatch, the relay's latch too.
+  // As D3D11Client::ClearLatch, the relay's latch too.
   void ClearLatch() {
     d3d11_->ClearLatch();
     relay_->ClearLatch();
@@ -74,7 +74,7 @@ class D3D10Client {
   D3D10Client() = default;
 
   using Keyed = bridge::KeyedRelay::Keyed;
-  // A keyed texture that could not be made: retried only for another size or format, or after a re-enable (Plan 7 final review Minor 3).
+  // A keyed texture that could not be made: retried only for another size or format, or after a re-enable.
   struct ShareFailure {
     nr::Size size;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;

@@ -5,7 +5,7 @@
 
 namespace uplift::vk {
 
-// Plan 11 (Vulkan design §2.3, batch 2 review I-3): who the pending marker is waiting on. The marker is one file for the whole process, so the
+// Who the pending marker is waiting on. The marker is one file for the whole process, so the
 // hook counts the adjusted devices that are unproven (neither presented twice nor destroyed): the file is written when the count leaves 0 and
 // deleted only when it returns to 0. The first adjusted device to present twice proves the adjustment for this game: the file goes, every device
 // still counting is released, and nothing is written for a device created later. The methods only say when the file must be written or deleted;
@@ -15,7 +15,7 @@ class MarkerLedger {
   struct Reservation {
     bool counted = false;  // the creation counts toward the marker until Created or Proven says otherwise
     bool write = false;    // the file must be written now, before the device is created
-    bool ngx = false;      // Plan 19 T1b: the file, when written now, says a device with NGX's additions waits on it (the first tier)
+    bool ngx = false;      // the file, when written now, says a device with NGX's additions waits on it (the first tier)
   };
 
   // An adjusted device is about to be created; `ngx`: with NGX's additions. Not counted once the adjustment is proven. The file is written when

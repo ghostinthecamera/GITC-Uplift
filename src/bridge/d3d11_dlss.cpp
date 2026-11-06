@@ -6,16 +6,17 @@
 
 #include "bridge/d3d11_bridge.hpp"
 #include "color/encoding.hpp"
+#include "memory_units.hpp"
 #include "nr/log.hpp"
 
-// Plan 18 (design §3, §4, §6): the Direct3D 11 bridge's DLSS stages, inside the game's hooked evaluate on its immediate context: the mid-frame hand-off
+// The Direct3D 11 bridge's DLSS stages, inside the game's hooked evaluate on its immediate context: the mid-frame hand-off
 // (RunDlss) and the shares it keeps, and DLSS's vectors copied for the Present path (CopyPresentMotion: copies only, no fence). The hand-off's order is
 // RunBridgedFrame's, the one that cannot leave the game's GPU waiting on a value nobody signals.
 
 namespace uplift::bridge {
 namespace {
 
-// Plan 18: a typed share format for DLSS's vectors (RG16F, RG32F, and RGBA16F since fix round 1, M-6, as Direct3D 12's MotionViewFormat reads them) and
+// A typed share format for DLSS's vectors (RG16F, RG32F, and RGBA16F, as Direct3D 12's MotionViewFormat reads them) and
 // exposure (R32F, R16F), their typeless families included. RGBA32F vectors are not shared: Direct3D 11 opens no shared Direct3D 12 RGBA32F texture
 // (bridge_gpu_test.cpp's UPLIFT_MASK finding); NR then runs without them.
 struct ShareFormat {
@@ -42,11 +43,10 @@ std::optional<ShareFormat> ExposureShareFormat(DXGI_FORMAT format) {
     default:                    return std::nullopt;
   }
 }
-// D3D11 opens a shared D3D12 texture only when it allows render targets, and outside R8, R16 and the display formats only when it is also simultaneous-access
-// (Plan 7 design §9 g).
+// D3D11 opens a shared D3D12 texture only when it allows render targets, and outside R8, R16 and the display formats only when it is also simultaneous-access.
 constexpr D3D12_RESOURCE_FLAGS SHARE_FLAGS = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
 
-// Plan 18 (fix round 1, M-5): a share the API refused for its format (or format and flags), as RGBA32F is: the stage cannot run on this image. Anything else
+// A share the API refused for its format (or format and flags), as RGBA32F is: the stage cannot run on this image. Anything else
 // (out of memory, a removed device) is not the format's: that evaluate goes without NR, and the stage stays offered.
 bool IsFormatRefusal(HRESULT result) {
   return result == E_INVALIDARG || result == DXGI_ERROR_UNSUPPORTED;
@@ -74,7 +74,7 @@ bool D3D11Bridge::EnsureShared(Shared* shared, std::optional<ShareFailure>* fail
   if (*failure && (*failure)->Matches(size, format, flags)) return false;
   HRESULT result = S_OK;
   if (!CreateShared(size, format, flags, bytes_per_pixel, L"Uplift shared DLSS texture", shared, &result)) {
-    *failure = ShareFailure{.size = size, .format = format, .result = result, .flags = flags};
+    *failure = ShareFailure{.size = size, .format = format, .cause = result, .flags = flags};
     nr::Logf(nr::LogLevel::WARN, "{} could not be shared with the private Direct3D 12 device (DXGI_FORMAT {}, HRESULT {:#010x})", what,
              static_cast<int>(format), static_cast<uint32_t>(result));
     return false;
@@ -85,15 +85,15 @@ bool D3D11Bridge::EnsureShared(Shared* shared, std::optional<ShareFailure>* fail
 }
 
 void D3D11Bridge::ReleaseDlss() {
-  Retire(&dlss_image_);
-  Retire(&dlss_pre_image_);
-  Retire(&dlss_motion_);
-  Retire(&dlss_exposure_);
-  Retire(&dlss_swap_);
+  Retire(&dlss_image_.shared);
+  Retire(&dlss_pre_image_.shared);
+  Retire(&dlss_motion_.shared);
+  Retire(&dlss_exposure_.shared);
+  Retire(&dlss_swap_.shared);
 }
 
 DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecorder& record, std::chrono::steady_clock::time_point now) {
-  CheckWatchdog(now);  // Plan 18 (design §6): the mid-frame waits are covered as the present's are
+  CheckWatchdog(now);  // the mid-frame waits are covered as the present's are
   if (!latch_.empty()) return {.skipped = DlssSkip::STOPPED};
   if (input.region.width == 0u || input.region.height == 0u) return {.skipped = DlssSkip::NO_INPUT};
   const bool after = (input.stage == DlssStage::AFTER_DLSS);
@@ -110,27 +110,26 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
     ++busy_skips_;  // this evaluate goes without NR rather than waiting
     return {.skipped = DlssSkip::BUSY};
   }
-  // Split chain (Task 4): each DLSS stage has its own share. Unless the chain runs both, the other stage's go first, so one stage holds what it did.
-  Shared& shared_image = (after ? dlss_image_ : dlss_pre_image_);
-  std::optional<ShareFailure>& image_failure = (after ? dlss_image_failure_ : dlss_pre_image_failure_);
+  // Split chain: each DLSS stage has its own share. Unless the chain runs both, the other stage's go first, so one stage holds what it did.
+  ShareSlot& image_slot = (after ? dlss_image_ : dlss_pre_image_);
   if (!input.keep_other_stage) {
     if (after) {
-      Retire(&dlss_pre_image_);
-      Retire(&dlss_swap_);
+      Retire(&dlss_pre_image_.shared);
+      Retire(&dlss_swap_.shared);
     } else {
-      Retire(&dlss_image_);
+      Retire(&dlss_image_.shared);
     }
   }
   // After DLSS: the region at (0, 0), written by NR's decode (a UAV). Before upscaling: the whole colour, so the region keeps its place, only read.
   const nr::Size image_size = (after ? nr::Size{input.region.width, input.region.height} : nr::Size{image->Width, image->Height});
   const D3D12_RESOURCE_FLAGS image_flags = (SHARE_FLAGS | (after ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE));
-  if (!EnsureShared(&shared_image, &image_failure, image_size, format->uav_format, image_flags, format->bytes_per_pixel, "DLSS's image")) {
-    const HRESULT result = (image_failure ? image_failure->result : E_FAIL);
-    // Fix round 1 (M-5): out of memory is not the format's; the stage is not greyed for the context's life (EnsureShared logged it once).
+  if (!EnsureShared(&image_slot.shared, &image_slot.failure, image_size, format->uav_format, image_flags, format->bytes_per_pixel, "DLSS's image")) {
+    const HRESULT result = (image_slot.failure ? image_slot.failure->cause : E_FAIL);
+    // Out of memory is not the format's; the stage is not greyed for the context's life (EnsureShared logged it once).
     if (!IsFormatRefusal(result)) return {.skipped = DlssSkip::SHARE_FAILED};
     return unsupported(result);
   }
-  if (!after && !EnsureShared(&dlss_swap_, &dlss_swap_failure_, image_size, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 8u,
+  if (!after && !EnsureShared(&dlss_swap_.shared, &dlss_swap_.failure, image_size, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 8u,
                               "Before upscaling's colour")) {
     return {.skipped = DlssSkip::SHARE_FAILED};
   }
@@ -138,24 +137,24 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
   ID3D12Resource* motion12 = nullptr;
   const std::optional<D3D11_TEXTURE2D_DESC> motion = TextureDesc11(input.motion);
   const std::optional<ShareFormat> motion_format = (motion ? MotionShareFormat(motion->Format) : std::nullopt);
-  // Fix round 1 (M-4): at the vectors' whole size, so a dynamic render size (a region that changes every evaluate) never remakes the share here.
+  // At the vectors' whole size, so a dynamic render size (a region that changes every evaluate) never remakes the share here.
   if (motion_format && motion->SampleDesc.Count == 1u && input.motion_region.width != 0u && input.motion_region.height != 0u
-      && EnsureShared(&dlss_motion_, &dlss_motion_failure_, {motion->Width, motion->Height}, motion_format->format, SHARE_FLAGS,
+      && EnsureShared(&dlss_motion_.shared, &dlss_motion_.failure, {motion->Width, motion->Height}, motion_format->format, SHARE_FLAGS,
                       motion_format->bytes_per_pixel, "DLSS's motion vectors")) {
-    motion12 = dlss_motion_.d3d12.Get();
+    motion12 = dlss_motion_.shared.d3d12.Get();
   } else if (input.motion == nullptr) {
-    Retire(&dlss_motion_);
+    Retire(&dlss_motion_.shared);
   }
   ID3D12Resource* exposure12 = nullptr;
   const std::optional<D3D11_TEXTURE2D_DESC> exposure = TextureDesc11(input.exposure);
   const std::optional<ShareFormat> exposure_format = (exposure ? ExposureShareFormat(exposure->Format) : std::nullopt);
-  if (exposure_format && EnsureShared(&dlss_exposure_, &dlss_exposure_failure_, {1u, 1u}, exposure_format->format, SHARE_FLAGS,
+  if (exposure_format && EnsureShared(&dlss_exposure_.shared, &dlss_exposure_.failure, {1u, 1u}, exposure_format->format, SHARE_FLAGS,
                                       exposure_format->bytes_per_pixel, "DLSS's exposure")) {
-    exposure12 = dlss_exposure_.d3d12.Get();
+    exposure12 = dlss_exposure_.shared.d3d12.Get();
   } else if (input.exposure == nullptr) {
-    Retire(&dlss_exposure_);
+    Retire(&dlss_exposure_.shared);
   }
-  // The steps on this bridge's objects; RunBridgedFrame owns their order (D3D11 design §1.3).
+  // The steps on this bridge's objects; RunBridgedFrame owns their order.
   class Steps final : public BridgeSteps {
    public:
     Steps(D3D11Bridge& bridge, const DlssHandoffInput& input, Shared& image, bool after, ID3D12Resource* motion12, ID3D12Resource* exposure12,
@@ -171,11 +170,11 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
                                                 0u, &region_box);
       if (motion12_ != nullptr) {
         const D3D11_BOX motion_box = BoxOf(input_.motion_region);
-        bridge_.context11_->CopySubresourceRegion(bridge_.dlss_motion_.d3d11.Get(), 0u, 0u, 0u, 0u, input_.motion, 0u, &motion_box);
+        bridge_.context11_->CopySubresourceRegion(bridge_.dlss_motion_.shared.d3d11.Get(), 0u, 0u, 0u, 0u, input_.motion, 0u, &motion_box);
       }
       if (exposure12_ != nullptr) {
         const D3D11_BOX texel = BoxOf({.x = 0u, .y = 0u, .width = 1u, .height = 1u});
-        bridge_.context11_->CopySubresourceRegion(bridge_.dlss_exposure_.d3d11.Get(), 0u, 0u, 0u, 0u, input_.exposure, 0u, &texel);
+        bridge_.context11_->CopySubresourceRegion(bridge_.dlss_exposure_.shared.d3d11.Get(), 0u, 0u, 0u, 0u, input_.exposure, 0u, &texel);
       }
     }
     bool SignalD3D11(uint64_t value) override {
@@ -198,8 +197,8 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
           .motion_region = (motion12_ != nullptr ? nr::Rect{.x = 0u, .y = 0u, .width = input_.motion_region.width, .height = input_.motion_region.height}
                                                  : nr::Rect{}),
           .exposure = exposure12_,
-          .mask = (bridge_.mask_fresh_ ? bridge_.mask_.d3d12.Get() : nullptr),
-          .swap = (after_ ? nullptr : bridge_.dlss_swap_.d3d12.Get()),
+          .mask = (bridge_.mask_fresh_ ? bridge_.mask_.shared.d3d12.Get() : nullptr),
+          .swap = (after_ ? nullptr : bridge_.dlss_swap_.shared.d3d12.Get()),
       };
       if (targets.mask != nullptr) {
         Transition(list, targets.mask, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -249,37 +248,36 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
     ID3D12Resource* exposure12_;
     const DlssRecorder& record_;
   };
-  Steps steps(*this, input, shared_image, after, motion12, exposure12, record);
+  Steps steps(*this, input, image_slot.shared, after, motion12, exposure12, record);
   const uint64_t in = ++last_value_;  // monotonic even when a step fails
   const uint64_t out = ++last_value_;
   const BridgedFrame frame = RunBridgedFrame(steps, in, out);
-  // As Run's (final review C-1): stamped whenever the list was submitted, even when the D3D12 signal then failed, so nothing it reads is freed under it.
+  // As Run's: stamped whenever the list was submitted, even when the D3D12 signal then failed, so nothing it reads is freed under it.
   if (steps.executed || frame.d3d12_signalled) {
-    shared_image.last_use = out;
+    image_slot.shared.last_use = out;
     if (!after) {
-      dlss_swap_.last_use = out;
+      dlss_swap_.shared.last_use = out;
     }
     if (motion12 != nullptr) {
-      dlss_motion_.last_use = out;
+      dlss_motion_.shared.last_use = out;
     }
     if (exposure12 != nullptr) {
-      dlss_exposure_.last_use = out;
+      dlss_exposure_.shared.last_use = out;
     }
     if (steps.used_mask) {
-      mask_.last_use = out;
+      mask_.shared.last_use = out;
       mask_fresh_ = false;
     }
   }
   if (frame.d3d12_signalled) {
-    // The clock starts here, at this evaluate's time (from before the recording, a few milliseconds earlier than Run's submission time of final review
-    // I-2): the hand-off's own `now`, so a test can drive the 2 s with its own times.
+    // This handoff uses the evaluate's captured time; Run's ordinary Present path samples the clock after recording.
     watchdog_.Submitted(out, now);
   }
   if (!frame.failure.empty()) {
-    latch_ = std::format("The {} bridge stopped: {}", label_, frame.failure);
+    Stop(std::format("The {} bridge stopped: {}", label_, frame.failure));
     nr::Log(nr::LogLevel::ERR, latch_);
   }
-  return {.wrote = frame.wrote, .executed = steps.executed, .color = ((!after && frame.wrote) ? dlss_swap_.d3d11.Get() : nullptr)};
+  return {.wrote = frame.wrote, .executed = steps.executed, .color = ((!after && frame.wrote) ? dlss_swap_.shared.d3d11.Get() : nullptr)};
 }
 
 bool D3D11Bridge::CopyPresentMotion(ID3D11Resource* motion, nr::Rect region, float scale_x, float scale_y) {
@@ -291,7 +289,7 @@ bool D3D11Bridge::CopyPresentMotion(ID3D11Resource* motion, nr::Rect region, flo
   const uint64_t frame = presents_ + 1u;
   RingSlot& slot = ring_[sources::PresentMotionSlotOf(frame, ring_slots_)];
   if (slot.shared.d3d12 && slot.shared.last_use > side_->Completed()) {
-    // Still read: no copy this frame (its present binds an older one). Fix round 1 (M6): the ring grows once; the slots in use keep their copies and marks.
+    // Still read: no copy this frame (its present binds an older one). The ring grows once; the slots in use keep their copies and marks.
     if (sources::PresentMotionGrows(ring_slots_, sources::PresentMotionWrite::SLOT_BUSY)) {
       nr::Logf(nr::LogLevel::INFO, "{}: the private queue runs too far behind for four slots: DLSS's motion copies for Present grow from {} to {} slots",
                label_, ring_slots_, RING_SLOTS);
@@ -299,7 +297,7 @@ bool D3D11Bridge::CopyPresentMotion(ID3D11Resource* motion, nr::Rect region, flo
     }
     return false;
   }
-  // Fix round 1 (M-4): at the vectors' whole size; the region is copied to (0, 0) and the slot keeps it, for the Present path's subrect.
+  // At the vectors' whole size; the region is copied to (0, 0) and the slot keeps it, for the Present path's subrect.
   if (!EnsureShared(&slot.shared, &ring_failure_, {description->Width, description->Height}, format->format, SHARE_FLAGS, format->bytes_per_pixel,
                     "DLSS's motion vectors for Present")) {
     return false;
@@ -314,19 +312,18 @@ bool D3D11Bridge::CopyPresentMotion(ID3D11Resource* motion, nr::Rect region, flo
 }
 
 void D3D11Bridge::ReleasePresentMotion() {
-  // Test phase (the final review's ring question, four slots or three): what the ring held, once per use, as it goes. Retire empties each slot, so a later
-  // call finds nothing and logs nothing.
+  // Count occupied slots before retiring them; Retire empties each slot, so a later call cannot count it again.
   if (const uint64_t bytes = RingBytes(); bytes > 0u) {
     const auto slots = std::count_if(ring_.begin(), ring_.end(), [](const RingSlot& slot) { return slot.shared.bytes > 0u; });
     nr::Logf(nr::LogLevel::INFO, "{}: DLSS's motion vectors' copies for Present released ({} of {} slots, {:.1f} MiB)", label_, slots, ring_slots_,
-             static_cast<double>(bytes) / (1024.0 * 1024.0));
+             static_cast<double>(bytes) / BYTES_PER_MIB);
   }
   for (RingSlot& slot : ring_) {
     Retire(&slot.shared);
     slot.region = {};
     slot.frame = 0u;
   }
-  ring_slots_ = sources::PRESENT_MOTION_MIN_SLOTS;  // fix round 1 (M6): the next copies start small again
+  ring_slots_ = sources::PRESENT_MOTION_MIN_SLOTS;  // the next copies start small again
 }
 
 }  // namespace uplift::bridge

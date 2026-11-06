@@ -56,7 +56,7 @@ ChainPlan DecideChain(const ChainFacts& facts) {
       plan.effective[index] = picked;
       continue;
     }
-    // Ruling 3: the nearest stage that can run, later first, then earlier, never before the pass before's.
+    // The nearest stage that can run, later first, then earlier, never before the pass before's.
     bool found = false;
     for (auto stage = static_cast<uint32_t>(picked) + 1u; !found && stage < STAGE_COUNT; ++stage) {
       if (can_run(static_cast<Stage>(stage))) {

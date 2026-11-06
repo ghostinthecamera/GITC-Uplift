@@ -1,4 +1,3 @@
-// Plan 10 (design §2.2): addon::HelperFront, moved out of addon32.cpp with no behaviour change in 32-bit games. See the header.
 #include "addon/helper_front.hpp"
 
 #include <Windows.h>
@@ -15,11 +14,15 @@
 #include "addon/environment.hpp"
 #include "addon/launchpad_link.hpp"
 #include "addon/live_facts.hpp"
+#if defined(_WIN64)
+#include "addon/placement.hpp"
+#endif
 #include "addon/removal_latch.hpp"
 #include "addon/swapchain_usage.hpp"
 #include "addon/reshade_d3d12_host.hpp"
 #include "addon/reshade_gl_host.hpp"
 #include "addon/reshade_vk_host.hpp"
+#include "addon/vk_route.hpp"
 #include "build_id.hpp"
 #include "color/encoding.hpp"
 #include "ipc/control_block.hpp"
@@ -27,6 +30,7 @@
 #include "ipc/settings_text.hpp"
 #include "nr/log.hpp"
 #include "nr/session_status.hpp"
+#include "text/effect_names.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/status_text.hpp"
 
@@ -35,11 +39,8 @@ namespace {
 
 namespace api = reshade::api;
 
-constexpr char MASK_TEXTURE[] = "UPLIFT_MASK";
-constexpr char MOTION_TEXTURE[] = "UPLIFT_MV";
-constexpr char LAUNCHPAD_TECHNIQUE[] = "MartysMods_Launchpad";
 constexpr wchar_t HELPER_FILE[] = L"gitc-uplift-helper64.exe";
-constexpr auto MEMORY_PERIOD = std::chrono::seconds(1);  // the game's DXGI budget crosses at most this often (design §2.10)
+constexpr auto MEMORY_PERIOD = std::chrono::seconds(1);  // the game's DXGI budget crosses at most this often
 
 static_assert(static_cast<uint32_t>(api::color_space::unknown) == static_cast<uint32_t>(color::ColorSpace::UNKNOWN));
 static_assert(static_cast<uint32_t>(api::color_space::srgb_nonlinear) == static_cast<uint32_t>(color::ColorSpace::SRGB_NONLINEAR));
@@ -79,7 +80,7 @@ nr::SessionStatus SessionOf(const ipc::Status& status) {
   return session;
 }
 
-// Plans 11 and 12: the host of the device's client (ReShade's API on `queue`): a Vulkan device's, an OpenGL context's or a Direct3D 12 device's; none is set for
+// The host of the device's client (ReShade's API on `queue`): a Vulkan device's, an OpenGL context's or a Direct3D 12 device's; none is set for
 // every other API. `present_queue`: the present event's queue, null in the effect events (an OpenGL host is valid only when it is the runtime's).
 struct Hosts {
   std::optional<ReshadeVkHost> vulkan;
@@ -105,7 +106,7 @@ Hosts HostsOf(const HelperDevice& device, api::device* game_device, api::command
 }
 
 // The image NR runs on in an effect event: Direct3D 9's render target (bit 0 marks sRGB), OpenGL's intermediate, which is the event's rtv resource and not FB0
-// (design §3.2). Other APIs run on the back buffer and ignore it.
+// Other APIs run on the back buffer and ignore it.
 uint64_t EventImage(const HelperDevice& device, api::effect_runtime* runtime, uint64_t rtv) {
   return device.gl ? runtime->get_device()->get_resource_from_view(api::resource_view{rtv}).handle : (rtv & ~uint64_t{1u});
 }
@@ -123,7 +124,7 @@ std::string_view ApiName(api::device_api device_api) {
   return "an unknown API";
 }
 
-// Design §2.9: ReShade's create_device event.
+// ReShade's create_device event.
 constexpr uint32_t CREATE_DEVICE_EVENT = 96u;
 constexpr uint32_t D3D9EX_API_VERSION = 0x9100u;
 
@@ -135,8 +136,8 @@ HelperFront::HelperFront(std::string_view addon_file, std::filesystem::path addo
       addon_directory_(std::move(addon_directory)),
       game_directory_(std::move(game_directory)),
       ngx_data_directory_(state_directory / L"ngx"),
-      // Design §2.9: the pending marker sits next to the latch marker, per game exe, with its own extension.
-      ex_marker_path_(LatchMarkerPath(state_directory, game_exe).replace_extension(L".d3d9ex")) {}
+      // The pending marker sits next to the latch marker, per game exe, with its own extension.
+      ex_marker_path_(LatchMarkerPath(state_directory, game_exe).replace_extension(D3D9EX_PENDING_EXTENSION)) {}
 
 std::optional<std::string> HelperFront::CheckExMarker(ui::Settings* settings, ui::ConfigStore* config) {
   // If the marker survived the last start, that start asked for 9Ex and never got a 9Ex device to present or to destroy: turn the toggle
@@ -150,9 +151,13 @@ std::optional<std::string> HelperFront::CheckExMarker(ui::Settings* settings, ui
   return std::string("Direct3D 9Ex turned off: the last start with it did not reach its first frame");
 }
 
-void HelperFront::SettingsChanged(const ui::Settings& settings) {
-  ++settings_generation_;  // the helper reloads its copy, and restarts the retry backoff (Plan 6, D11)
-  // What the helper reads instead of ReShade.ini (design §2.1).
+void HelperFront::SettingsChanged(ui::Settings settings) {
+#if defined(_WIN64)
+  if (remote_owner_ && remote_owner_->get_api() == api::device_api::vulkan) {
+    settings.source = VkPresentSource(settings.source);
+  }
+#endif
+  ++settings_generation_;
   ipc::TextConfigStore store;
   ui::SaveSettings(settings, &store);
   settings_text_ = store.Serialize();
@@ -175,7 +180,7 @@ void HelperFront::NotePresent(HelperDevice& device, api::device* owner, const ui
     }
   }
   if (device.d3d9_ex && device.ex_presents < 2u) {
-    // Design §2.9: the pending marker asks whether the game got through a first real Present on a 9Ex device. ReShade raises
+    // The pending marker asks whether the game got through a first real Present on a 9Ex device. ReShade raises
     // this event before it calls that Present, so the second event is the proof: a 9Ex problem that crashes inside the first
     // Present, or in the first frame, leaves the marker.
     ++device.ex_presents;
@@ -201,9 +206,9 @@ void HelperFront::RunClient(HelperDevice& device, api::device* game_device, api:
   if (device.frame_ready && remote_) {
     if (device.vulkan) {
       Hosts hosts = HostsOf(device, game_device, queue, nullptr, outer_host);
-      // Design §3.4 case 2: the game presents from a queue other than the effect runtime's. Uplift's submissions are ordered after the game's frame only
+      // The game presents from a queue other than the effect runtime's. Uplift's submissions are ordered after the game's frame only
       // by submission order on the runtime's queue, so the client flushes the present queue and waits for it on the CPU (2 s; a timeout skips this
-      // frame's NR) inside Run, once per frame, after its own skip checks and before the copy in (final review, minor 4).
+      // frame's NR) inside Run, once per frame, after its own skip checks and before the copy in.
       std::optional<ReshadeVkHost> present_host;
       if (!outer_host && device.present_queue != nullptr && queue != nullptr && device.present_queue != queue) {
         if (!device.vk_second_queue_logged) {
@@ -218,7 +223,7 @@ void HelperFront::RunClient(HelperDevice& device, api::device* game_device, api:
                                     *remote_, (present_host ? &*present_host : nullptr));
       sent = device.vulkan->LastRunSent();
     } else if (device.gl) {
-      // Design §3.2: FB0 at the present event, ReShade's intermediate (the event's rtv resource) at the technique and after the effects. GL work runs only
+      // FB0 at the present event, ReShade's intermediate (the event's rtv resource) at the technique and after the effects. GL work runs only
       // when the present is on the runtime's own context (the host is invalid otherwise, and Run does nothing).
       Hosts hosts = HostsOf(device, game_device, queue, (at_present ? device.present_queue : nullptr));
       returned = device.gl->Run(*hosts.opengl, GlImageInfo(game_device, {source}), GlImageInfo(game_device, {launchpad_motion}), point, *remote_);
@@ -275,7 +280,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   if (vulkan || opengl) {
     entry.present_queue = frame.present_queue;
     if (frame.queue == nullptr) {
-      // Vulkan design §3.1: without an effect runtime (not up yet) there is no queue to record on, and nothing runs. Nothing is said either: an OpenGL card's R63
+      // On Vulkan without an effect runtime (not up yet) there is no queue to record on, and nothing runs. Nothing is said either: an OpenGL card's context-mismatch reason
       // text from an earlier present (ReShade makes its runtime again) must not outlive it, as addon.cpp's NONE case clears it (a rejected device never gets here).
       if (opengl) {
         entry.message.clear();
@@ -284,17 +289,18 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
     }
   }
 
-  // The client is made at the first present with NR on: a game that never enables NR pays nothing (design §2.7).
+  // The client is made at the first present with NR on: a game that never enables NR pays nothing.
   if (!entry.HasClient()) {
     if (!settings.enabled) {
-      entry.message.clear();  // only R63's text can be here (a rejected device never gets this far): NR is off, so there is nothing to say
+      entry.message.clear();  // only the context-mismatch text can be here (a rejected device never gets this far): NR is off, so there is nothing to say
       return;
     }
     std::string error;
     if (opengl) {
-      // OpenGL design §3.1, as addon.cpp's GlBridge (batch 2 review I-1): the context is checked FIRST, from the queues and the system wglGetCurrentContext
+      // As in GlBridge, the context is checked FIRST, from the queues and the system wglGetCurrentContext
       // alone, with no GL call. A context of the game's own, or a present with none current, gets nothing this frame, is asked again at the next one, and is
-      // never rejected for good; only the game's own context gets the card's R63 text. gl::Functions::Load, which does make GL calls, then runs once, on the runtime's own context.
+      // never rejected for good; only the game's own context gets the card's context-mismatch text. gl::Functions::Load, which does make GL
+      // calls, then runs once, on the runtime's own context.
       if (const RuntimeContext context = CheckRuntimeContext(frame.queue, frame.present_queue); context != RuntimeContext::CURRENT) {
         entry.message = (context == RuntimeContext::OTHER ? std::string(gl::WRONG_CONTEXT_PROBLEM) : std::string());
         return;
@@ -308,7 +314,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
     } else if (d3d12) {
       entry.d3d12 = client::D3D12Client::Create(AsNative<ID3D12Device>(device->get_native()), &error);
     } else if (vulkan) {
-      // Vulkan design §4 (as addon.cpp's VkBridge): the vendor, the LUID and the device's functions (with what the vkCreateDevice hook recorded) decide it.
+      // On Vulkan, the vendor, the LUID and the device's functions (with what the vkCreateDevice hook recorded) decide it.
       LUID luid = {};
       if (VulkanAdapterLuid(device, &luid, &error)) {
         std::optional<vk::Device> functions = vk::Device::Open(VulkanHandleOf<VkDevice>(device->get_native()));
@@ -340,7 +346,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   if (!entry.snippet_located) {
     entry.snippet_located = true;
     const std::string& configured = settings.snippet_path;
-    // I1: a hand-edited SnippetPath can be invalid UTF-8; it is treated like an unset one.
+    // A hand-edited SnippetPath can be invalid UTF-8; it is treated like an unset one.
     const std::optional<std::filesystem::path> configured_path = PathFromUtf8(configured);
     if (!configured_path && !configured.empty() && !warned_invalid_snippet_path_) {
       warned_invalid_snippet_path_ = true;
@@ -386,14 +392,18 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
       remote_->SetAttach(attach);
     }
     remote_owner_ = device;
+#if defined(_WIN64)
+    // The new owner's API can change the effective source. Publishing a fresh generation also restarts the helper session's retry backoff.
+    if (settings.source == ui::PlacementSource::DLSS) SettingsChanged(settings);
+#endif
   }
   client::RemoteNr& remote = *remote_;
-  // Plans 11 and 12: a Vulkan, OpenGL or Direct3D 12 device's host, on the effect runtime's queue (none for every other API); OpenGL's is valid only while the
+  // A Vulkan, OpenGL or Direct3D 12 device's host, on the effect runtime's queue (none for every other API); OpenGL's is valid only while the
   // present is on the runtime's own context.
   Hosts hosts = HostsOf(entry, device, frame.queue, frame.present_queue, frame.outer_vulkan_host);
 
-  // The FRAME (design §2.2): what crosses every present.
-  const bool early = frame.early_marker.technique.handle != 0u && frame.early_marker.technique == frame.marker;
+  // The FRAME: what crosses every present.
+  const bool early = frame.early_marker.Rendered() && frame.early_marker.technique == frame.marker;
   ipc::Frame wire = {
       .settings_generation = settings_generation_,
       .drag_bits = ipc::DragBits(frame.overlay->drag),
@@ -406,14 +416,14 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   wire.early_motion_width = frame.early_marker.extent.width;
   wire.early_motion_height = frame.early_marker.extent.height;
   wire.drain_now = (frame.drain_now ? 1u : 0u);
-  wire.uplift_mv_lumenite = (entry.uplift_mv_lumenite ? 1u : 0u);  // 2026-10-08: the helper's readouts name UPLIFT_MV's source
-  // Plan 5 (key decision 8): without a running UPLIFT_MASK there is no mask to bind. Shared on Direct3D 9 (both transports, Plan 10) and on
-  // Direct3D 10 and 11 with fences (design §2.8).
+  wire.uplift_mv_lumenite = (entry.uplift_mv_lumenite ? 1u : 0u);  // the helper's readouts name UPLIFT_MV's source
+  // Without a running UPLIFT_MASK there is no mask to bind. Shared on Direct3D 9 (both transports) and on
+  // Direct3D 10 and 11 with fences.
   bool mask_running = false;
   if (entry.SharesImages()) {
     const api::effect_texture_variable mask_variable =
         (settings.mask == ui::MaskMode::AUTO && frame.runtime != nullptr && frame.runtime->get_effects_state())
-            ? frame.runtime->find_texture_variable(nullptr, MASK_TEXTURE)
+            ? frame.runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MASK_TEXTURE)
             : api::effect_texture_variable{0u};
     const bool mask_declared = mask_variable.handle != 0u;
     mask_running = mask_declared && MaskEffectRunning(frame.runtime, mask_variable);
@@ -454,7 +464,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
     wire.target = entry.vulkan->Describe(*hosts.Vulkan(), frame.outer_vulkan_host ? frame.outer_vulkan_image : VulkanImageInfo(device, frame.back_buffer), settings.enabled, entry.running);
   } else if (entry.gl) {
     // FB0 describes the target at the present event (the Session's size and shared format); the technique's intermediate has FB0's size and format family
-    // (design §3.2). MSAA is refused only when NR would run at PRESENT (no marker): `at_present`.
+    // MSAA is refused only when NR would run at PRESENT (no marker): `at_present`.
     wire.target = entry.gl->Describe(*hosts.opengl, GlImageInfo(device, frame.back_buffer), /*at_present=*/(early || frame.marker.handle == 0u), settings.enabled,
                                      entry.running);
   } else if (entry.d3d12) {
@@ -473,7 +483,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
 
   std::optional<ipc::Reply> reply = remote.Present(settings.enabled, wire, settings_text_, HELPER_LOG);
   if (remote.Attached() && remote.LastStatus().device_lost != 0u) {
-    // Plan 17: the helper's own Direct3D 12 device was removed, so its NR would stay off for the session. The helper is ended as a hung one is, and Retry
+    // The helper's own Direct3D 12 device was removed, so its NR would stay off for the session. The helper is ended as a hung one is, and Retry
     // now starts a fresh one with a new device, under the same 2-strike rule as a bridge's private device.
     remote.Abort("Its Direct3D 12 device was removed (ReShade.log has the details)");
     reply.reset();
@@ -519,7 +529,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
       entry.frame_ready = false;
     }
   } else if (!remote.Running()) {
-    // The helper exited, failed, or has not started: everything shared with it goes (design §2.7).
+    // The helper exited, failed, or has not started: everything shared with it goes.
     entry.running = false;
     entry.nr_returned_logged = false;
     entry.ReleaseAll(hosts.Pointers());
@@ -539,10 +549,10 @@ void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, 
     device.unreported_point = TriggerPoint::MARKER;  // recovery was observed without a RUN; replay it before the next FRAME
   }
   if (point == TriggerPoint::NONE) return;
-  // Plan 6 (v2 design §3.20), Plan 7 (decision 3): at the Uplift technique, the UPLIFT_MV its pass just wrote while LaunchPad
-  // runs, and only when MotionVectors can use it (a 32 MiB copy at 4K otherwise); FENCED only (design §2.8). Plan 10 (design §4.3): Direct3D 9
+  // At the Uplift technique, the UPLIFT_MV its pass just wrote while LaunchPad
+  // runs, and only when MotionVectors can use it (a 32 MiB copy at 4K otherwise); FENCED only. Direct3D 9
   // too, on both transports, while LAUNCHPAD_ON_D3D9 holds (the one switch): the binding is the IDirect3DTexture9 itself.
-  // 2026-10-08: Lumenite's Kernel too (from Direct3D 10 on), whose vectors Uplift.fx writes into the same UPLIFT_MV.
+  // Lumenite's Kernel too (from Direct3D 10 on), whose vectors Uplift.fx writes into the same UPLIFT_MV.
   api::resource launchpad = {0u};
   const bool launchpad_here = (!device.d3d9 || LAUNCHPAD_ON_D3D9);
   const bool lumenite_here = (!device.d3d9 || LUMENITE_ON_D3D9);
@@ -553,7 +563,7 @@ void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, 
     const api::effect_technique lumenite_technique = (lumenite_here ? runtime->find_technique(nullptr, LUMENITE_TECHNIQUE) : api::effect_technique{0u});
     const bool source_on = UpliftMvValid(device.uplift_mv_source, (launchpad_technique.handle != 0u && runtime->get_technique_state(launchpad_technique)),
                                          (lumenite_technique.handle != 0u && runtime->get_technique_state(lumenite_technique)));
-    const api::effect_texture_variable motion = runtime->find_texture_variable(nullptr, MOTION_TEXTURE);
+    const api::effect_texture_variable motion = runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MOTION_TEXTURE);
     if (source_on && motion.handle != 0u) {
       api::resource_view view = {0u};
       api::resource_view view_srgb = {0u};
@@ -563,16 +573,16 @@ void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, 
       }
     }
   }
-  // Direct3D 9: the event's render target, bit 0 marking sRGB (design §2.8): for X8 and multisampled back buffers it is
-  // ReShade's resolved copy, which is where NR must read and write. OpenGL: ReShade's intermediate, the rtv's resource (design §3.2).
+  // Direct3D 9: the event's render target, bit 0 marking sRGB: for X8 and multisampled back buffers it is
+  // ReShade's resolved copy, which is where NR must read and write. OpenGL: ReShade's intermediate, the rtv's resource.
   RunClient(device, runtime->get_device(), runtime->get_command_queue(), point, EventImage(device, runtime, rtv), launchpad.handle, /*at_present=*/false);
 }
 
 void HelperFront::FinishEffects(HelperDevice& device, api::effect_runtime* runtime, const ui::Settings& settings) {
-  // Plan 5 (key decision 8): this frame's UPLIFT_MASK, copied now that the effects have run, into the shared mask the next
+  // This frame's UPLIFT_MASK, copied now that the effects have run, into the shared mask the next
   // RUN hands to NR. Direct3D 9, and 10 and 11 with fences (the note is set in the present event otherwise).
   if (!device.SharesImages() || settings.mask != ui::MaskMode::AUTO) return;
-  const api::effect_texture_variable variable = runtime->find_texture_variable(nullptr, MASK_TEXTURE);
+  const api::effect_texture_variable variable = runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MASK_TEXTURE);
   if (variable.handle == 0u) return;
   Hosts hosts = HostsOf(device, runtime->get_device(), runtime->get_command_queue());  // OpenGL: no present queue in an effect event
   if (!MaskEffectRunning(runtime, variable)) {
@@ -610,13 +620,13 @@ void HelperFront::FinishEffects(HelperDevice& device, api::effect_runtime* runti
     device.mask_note = (device.d3d9 ? std::format("NR mask: UPLIFT_MASK's format is not supported on Direct3D 9 (D3DFMT {})", copied.d3d9_format)
                                     : std::string("NR mask: UPLIFT_MASK's format is not supported"));
   } else if (copied.relay_failed) {
-    device.mask_note = "NR mask: UPLIFT_MASK could not be shared with Uplift's relay device";  // Plan 8's text: the Direct3D 10 keyed share
+    device.mask_note = "NR mask: UPLIFT_MASK could not be shared with Uplift's relay device";  // Direct3D 10 keyed share
   } else if (!copied.busy) {
     device.mask_note = "NR mask: UPLIFT_MASK could not be shared with Uplift's helper";
   }
 }
 
-// Design §2.7: ReShade raises no destroy_device at a Direct3D 9 Reset or ResetEx. What it does raise, after it has released its own
+// ReShade raises no destroy_device at a Direct3D 9 Reset or ResetEx. What it does raise, after it has released its own
 // resources (swap chain, effect runtime, back-buffer views, auto depth-stencil) and before it calls the real Reset, is
 // destroy_command_queue (d3d9_device.cpp Reset/ResetEx -> on_reset). On Direct3D 9 the queue is the device. A live D3DPOOL_DEFAULT
 // resource makes the game's Reset fail with D3DERR_INVALIDCALL, so every object this add-on made on the device goes here (the twins,
@@ -633,11 +643,11 @@ void HelperFront::DestroyQueue(HelperDevice& device, api::device* owner) {
   }
 }
 
-// Design §2.7: the device is going away. Everything this add-on made on it is released and the helper detached (a Direct3D 9
+// The device is going away. Everything this add-on made on it is released and the helper detached (a Direct3D 9
 // device already did both at destroy_command_queue).
 std::unique_ptr<client::D3D10Client> HelperFront::DestroyDevice(HelperDevice* device, api::device* owner) {
   if (owner->get_api() == api::device_api::d3d9) {
-    // Design §2.9: a 9Ex device that was created and then destroyed is neither of the two cases the pending marker guards (a
+    // A 9Ex device that was created and then destroyed is neither of the two cases the pending marker guards (a
     // CreateDeviceEx that failed leaves no device; a crash leaves no destroy_device). A game that makes a probe device and
     // destroys it without presenting must not turn the toggle off at the next load.
     Microsoft::WRL::ComPtr<IDirect3DDevice9Ex> device_ex;
@@ -647,15 +657,15 @@ std::unique_ptr<client::D3D10Client> HelperFront::DestroyDevice(HelperDevice* de
   }
   if (device == nullptr) return nullptr;
   if (device->vulkan) {
-    // Vulkan design §6, R62: ReShade has already deleted its queues and dropped the device from its dispatch map, so the host has no queue and this is
+    // ReShade has already deleted its queues and dropped the device from its dispatch map, so the host has no queue and this is
     // only ever ReShade's destroy_resource for the images and functions its layer does not intercept for the rest.
     ReshadeVkHost host(owner, nullptr, device->vulkan->VulkanDevice().vkQueueSubmit);
     device->vulkan->FreeVulkan(host);
   } else if (device->gl) {
-    // OpenGL design §3.6: ReShade makes the share group's last context current only for its own teardown, so no GL call is made: the names die with it.
+    // On OpenGL, ReShade makes the share group's last context current only for its own teardown, so no GL call is made: the names die with it.
     device->gl->ForgetGl();
   } else if (device->d3d12) {
-    // Design §6: no host (ReShade may already have released its queue). A capped wait for the retire fence, then everything is released (or leaked on a
+    // No host (ReShade may already have released its queue). A capped wait for the retire fence, then everything is released (or leaked on a
     // timeout) and the native device reference is dropped here, before ReShade's own release.
     device->d3d12->DestroyDevice();
   } else {
@@ -671,14 +681,14 @@ std::unique_ptr<client::D3D10Client> HelperFront::DestroyDevice(HelperDevice* de
 void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, api::device_api device_api, const ui::Settings& settings,
                           ui::OverlayView* view, ui::OverlayState* state, std::chrono::steady_clock::time_point now) const {
   const bool d3d9 = (device_api == api::device_api::d3d9);
-  // Plan 14 (design §1.2, §1.3): every game this front hosts runs NR in the helper, on the presented image: the DLSS choices and Match game are fixed causes
+  // Every game this front hosts runs NR in the helper, on the presented image: the DLSS choices and Match game are fixed causes
   // (the host set view->dlss_unavailable), and what runs comes back in the helper's status.
   ui::SetupFacts facts;
   facts.before_fg_late_effects = device != nullptr && device->game_facing;
   FillPreference(&facts, settings, false);
   facts.dlss_unavailable = view->dlss_unavailable;
   facts.match_game_readable = false;
-  // Fix round 1 (M5): a 64-bit Vulkan device on the helper route. The DLSS stages are greyed with the route's reason (the host's), and DLSS's vectors with
+  // A 64-bit Vulkan device on the helper route. The DLSS stages are greyed with the route's reason (the host's), and DLSS's vectors with
   // their own: the native context copies them only for a Present that runs on the game's device or a private Direct3D 12 device.
   if (!view->vulkan_stages_off.empty()) {
     facts.after_dlss_fixed = view->vulkan_stages_off;
@@ -691,7 +701,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   facts.lumenite_ready = (device != nullptr && device->lumenite_ready);
   facts.uplift_mv_lumenite = (device != nullptr && device->uplift_mv_lumenite);
   if (device != nullptr && device->HasClient() && !device->SharesImages()) {
-    // Batch 1 review: a Direct3D 10 or 11 device on the CPU-ordered fallback shares no images with the helper, so UPLIFT_MV never reaches NR (Technique skips it).
+    // A Direct3D 10 or 11 device on the CPU-ordered fallback shares no images with the helper, so UPLIFT_MV never reaches NR (Technique skips it).
     facts.launchpad_fixed = (device->d3d10 ? "Launchpad's vectors are not available on this Direct3D 10 device (no fences)"
                                            : "Launchpad's vectors are not available on this Direct3D 11 device (no fences)");
     facts.lumenite_fixed = (device->d3d10 ? "Lumenite's vectors are not available on this Direct3D 10 device (no fences)"
@@ -702,13 +712,13 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   }
   std::string api_label = (addon_file_ == "gitc-uplift.addon32" ? std::format("{} (32-bit)", ApiName(device_api)) : std::string(ApiName(device_api)));
   if (device != nullptr && !device->route_reason.empty()) {
-    api_label = std::format("{} (helper)", ApiName(device_api));  // T5: a 64-bit Vulkan device's route, as "Vulkan (native NR)" and "Vulkan (Direct3D 12)"
+    api_label = std::format("{} (helper)", ApiName(device_api));  // a 64-bit Vulkan device's route, as "Vulkan (native NR)" and "Vulkan (Direct3D 12)"
   }
   facts.api = api_label;
   view->details_backend = std::format("{} (64-bit NR helper)", ApiName(device_api));
   if (d3d9) {
     if (device != nullptr) {
-      // Design §2.9: which case applies, from the device, the toggle, and whether ReShade ever raised create_device.
+      // Which case applies, from the device, the toggle, and whether ReShade ever raised create_device.
       view->d3d9ex_readout = (device->d3d9_ex ? "Now: Direct3D 9Ex: frames reach NR on the GPU"
                               : !settings.use_d3d9ex
                                   ? (ex_turned_off_
@@ -768,7 +778,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
     }
     view->intermediate_bytes += client_bytes;
   }
-  // The first failing stage, as in 64-bit games (Plan 6, D1), with the helper's own stage after the device's.
+  // The first failing stage, as in 64-bit games, with the helper's own stage after the device's.
   if (!latch.empty() || !helper_problem.empty() || device->strikes.Stopped() || (status && status->device_lost)) {
     std::string reason(latch.empty() ? helper_problem : latch);
     if (reason.empty()) reason = "The helper rendering device stopped.";
@@ -797,35 +807,35 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
         .placement_note = ipc::TextOf(status->placement_note),
         .nr_applied = (status->nr_applied != 0u),
         .passes_run = status->passes_run,
-        .skip_reason = ipc::TextOf(status->skip_reason),
+        .skip_reason = nr::SkipReasonFromText(ipc::TextOf(status->skip_reason)),
         .skip_from_session = (status->skip_from_session != 0u),
         .working_line = view->status_line,
         .vram_check = settings.vram_check,
         .addon_file = addon_file_,
     });
   } else if (settings.enabled && has_client && owner && remote->Running()) {
-    // The helper's process is up but not attached yet (design §2.2, start-up).
+    // The helper's process is up but not attached yet.
     view->card = {.stage = ui::CardStage::SESSION, .title = "Starting NR", .reason = "Starting Uplift's 64-bit helper"};
   } else {
     view->card = ui::BuildStatusCard({.enabled = settings.enabled, .addon_file = addon_file_});
   }
-  // Plan 14: what runs (the helper's context decided it), and the card's detail.
+  // What runs (the helper's context decided it), and the card's detail.
   if (status != nullptr) {
     FillRunning(&facts, *status, view->card.working);
     if (settings.enabled && status->nr_applied && view->card.working) view->stage_runs[device->game_facing ? 2u : 3u] = {
         0u, status->passes_run, {status->canvas_width, status->canvas_height}, static_cast<sources::MotionSource>(status->motion_source)};
   }
   if (device->strikes.Exhausted() && !helper_problem.empty()) {
-    facts.stopped = ui::PRIVATE_DEVICE_STOPPED_TWICE_REASON;  // Plan 17: the helper's second stop is a fixed cause
+    facts.stopped = ui::PRIVATE_DEVICE_STOPPED_TWICE_REASON;  // the helper's second stop is a fixed cause
   }
   facts.vram_bytes = view->runtime_bytes.value_or(0u) + view->intermediate_bytes;
-  facts.passes_note = ((view->card.working && !view->card.fixes.empty()) ? std::string_view(view->card.fixes.front()) : std::string_view());
+  facts.passes_note = view->card.WorkingNote();
   ui::FinishSetup(view, state, game_device, facts, now);
 }
 
 void HelperFront::RetryNow(HelperDevice* device) {
   if (remote_ && !remote_->Failure().empty()) {
-    // Plan 17: the 2-strike rule; the card offers no Retry now after the second stop, and this refuses it too.
+    // The 2-strike rule; the card offers no Retry now after the second stop, and this refuses it too.
     if (device != nullptr) {
       if (!device->strikes.Retried()) return;
       device->ClearClientLatch();

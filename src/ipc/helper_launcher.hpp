@@ -15,7 +15,7 @@
 
 namespace uplift::ipc {
 
-// Plan 9 (design §2.2): starts gitc-uplift-helper64.exe in a kill-on-close job and owns the channel to it. The game thread
+// Starts gitc-uplift-helper64.exe in a kill-on-close job and owns the channel to it. The game thread
 // never blocks here beyond the caps its callers pass. Not thread-safe: the add-on's lock.
 class HelperLauncher {
  public:
@@ -44,8 +44,8 @@ class HelperLauncher {
   // The outstanding request's reply, without waiting. REPLIED also when nothing is outstanding.
   Wait Poll();
   [[nodiscard]] bool Pending() const { return pending_; }
-  // Pending with the heartbeat unchanged for 20 s (design §2.2): how long the outstanding request has been waiting for its reply
-  // (a long handler that beat for 120 s first counts them all). nullopt while the helper is not hung.
+  // Once a pending request's heartbeat is unchanged for HUNG_AFTER, returns the full time since Send, including any long-handler heartbeat period.
+  // nullopt while no request is pending or its heartbeat is still healthy.
   [[nodiscard]] std::optional<std::chrono::seconds> Hung(std::chrono::steady_clock::time_point now) const;
   // DuplicateHandle(helper -> this process, DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS): takes over an NT handle by
   // its value in the helper's table, closing the helper's copy in the same call. The caller closes `local`.

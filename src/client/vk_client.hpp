@@ -21,17 +21,21 @@
 
 namespace uplift::client {
 
-// Plan 11 (Vulkan design §5): a Vulkan device's frames to and from NR in gitc-uplift-helper64.exe through an NrLink. D3D11Client's logic on the Vulkan game side
+// A Vulkan device's frames to and from NR in gitc-uplift-helper64.exe through an NrLink. D3D11Client's logic on the Vulkan game side
 // (src/vk/): FENCED when the device has both Win32 extensions and timeline semaphores (the helper's two D3D12 fences imported as timeline
 // semaphores, RunBridgedFrame running unchanged on this side), SHARED_CPU otherwise (the same NT textures with no fences: the copy in, a capped CPU
 // wait, RUN, whose reply comes at completion, then the copy out). Every Vulkan command goes through the GameHost (ReShade's API in the add-on, a native
 // command buffer in the smokes); the imports and frees through vk::Interop. Not thread-safe: the add-on's lock.
 //
-// R17 across processes: a Vulkan wait is queued only after the helper's reply said it submitted that very signal. A counter reading UINT64_MAX means the
-// helper or its device is gone. Every CPU wait is capped at 2 s; a timeout skips that frame and three in a row stop the client for the session.
-// destroy_device: FreeVulkan only (R62).
+// Across processes: a Vulkan wait is queued only after the helper's reply said it submitted that very signal. A counter reading UINT64_MAX means the
+// helper or its device is gone. Every CPU wait is capped; a timeout skips that frame and
+// bridge::MAX_CONSECUTIVE_TIMEOUTS in a row stop the client for the session.
+// destroy_device: FreeVulkan only.
 class VkClient {
  public:
+  // The cap on the game thread's waits.
+  static constexpr uint32_t WAIT_CAP_MS = 2000u;
+
   // `device`: the game's Vulkan device (vk::Device::Open), with its record in `device.record`; `allow_fences` false forces SHARED_CPU (the smoke uses it
   // to test it on a device that could do both).
   VkClient(vk::Device device, LUID luid, bool allow_fences);
@@ -44,22 +48,22 @@ class VkClient {
   [[nodiscard]] LUID Luid() const { return luid_; }
   [[nodiscard]] const vk::Device& VulkanDevice() const { return interop_.Functions(); }
   // FRAME's target for `back_buffer`: its size, format and why NR cannot take it (no copy access, multisampled, an unsupported format, a share that
-  // failed, the latch). While `running` and usable, it also records the opening global barrier into the present event's immediate list (batch 2 review
-  // I-1 (a)). Frees what the queue has passed. `enabled` false forgets failed shares. The colour space is the caller's.
+  // failed, the latch). While `running` and usable, it also records the opening global barrier into the present event's immediate list.
+  // Frees what the queue has passed. `enabled` false forgets failed shares. The colour space is the caller's.
   ipc::Target Describe(vk::GameHost& host, const vk::ImageInfo& back_buffer, bool enabled, bool running);
   // The FRAME reply's news: imports the helper's fences and shared textures (taking every NT handle in the reply), runs the fence watchdog, and drops the
   // shared surfaces when the helper's NR is not running. True when the transport changed: the device could not import the helper's fences, so this client
   // is SHARED_CPU now (Kind() says so) and the caller must DETACH and ATTACH afresh with it.
   bool Apply(const ipc::Reply& reply, NrLink& link, vk::GameHost& host);
   // The FRAME Describe described was put on the wire (the caller read NrLink's FrameSent after the present): a colour handle that reply, or a late one
-  // stashed from an earlier FRAME, brings is imported with the size and format of that FRAME's target (batch 3 review, minor 1).
+  // stashed from an earlier FRAME, brings is imported with the size and format of that FRAME's target.
   void NoteFrameSent();
   void NoteSecondQueue() { second_queue_ = true; }
   // One RUN: the back buffer (and `motion`, this frame's UPLIFT_MV: an empty info for none) out, NR, back. True when NR's result reached `back_buffer`.
-  // `entry_state`: the back buffer's state in the calling event. `present_host`: design §3.4 case 2, when the game presents from a queue other than the
-  // one Uplift records on: that queue is flushed and waited for on the CPU (2 s), once per frame (Describe starts a frame), after the skip checks and
+  // `entry_state`: the back buffer's state in the calling event. `present_host`: when the game presents from a queue other than the
+  // one Uplift records on: that queue is flushed and waited for on the CPU (WAIT_CAP_MS), once per frame (Describe starts a frame), after the skip checks and
   // before the first thing that could submit work (the copy in, or a motion share's retire fence, which flushes the immediate list); this frame goes
-  // without NR when that timed out or failed, and three timeouts in a row stop the client.
+  // without NR when that timed out or failed, and bridge::MAX_CONSECUTIVE_TIMEOUTS timeouts in a row stop the client.
   bool Run(vk::GameHost& host, const vk::ImageInfo& back_buffer, vk::Usage entry_state, const vk::ImageInfo& motion, addon::TriggerPoint point,
            NrLink& link, vk::GameHost* present_host = nullptr);
   [[nodiscard]] bool LastRunSent() const { return run_sent_; }  // the last Run put a RUN on the wire
@@ -68,18 +72,18 @@ class VkClient {
   void ReleaseMask(vk::GameHost& host);
   // The helper is gone (or this transport is): every shared surface and imported fence goes behind a fence of the queue. True when it held any.
   bool ReleaseAll(vk::GameHost& host);
-  // destroy_device (R62): every Vulkan object, through ReShade's API for the images and the functions its layer does not intercept for the rest. `host`
+  // destroy_device: every Vulkan object, through ReShade's API for the images and the functions its layer does not intercept for the rest. `host`
   // needs only the device.
   void FreeVulkan(vk::GameHost& host);
   // What this side imported (the helper's transport counts the same textures as its own VRAM, so the overlay never adds it).
   [[nodiscard]] uint64_t ImportedBytes() const { return color_.bytes + mask_.bytes + motion_.bytes; }
-  // T5 (gitc-uplift.addon64): after ReleaseAll, once the device's NR left the helper: frees what the queue has passed. True when nothing is retired and no
+  // On gitc-uplift.addon64, after ReleaseAll, once the device's NR left the helper: frees what the queue has passed. True when nothing is retired and no
   // capped wait is in flight any more; everything is freed then, and the client may go (it holds no Vulkan object).
   bool FreeRetired(vk::GameHost& host);
-  // The Details line. `route_reason` (T5, gitc-uplift.addon64 only): why a 64-bit Vulkan device's NR runs in the helper; the line then names that route.
+  // The Details line. `route_reason` (gitc-uplift.addon64 only): why a 64-bit Vulkan device's NR runs in the helper; the line then names that route.
   [[nodiscard]] std::string Line(std::string_view route_reason = {}) const;
   [[nodiscard]] std::string_view Latch() const { return latch_; }  // non-empty once the client stopped for the session
-  // Plan 17: Retry now after the helper stopped (the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
+  // Retry now after the helper stopped (when the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
   void ClearLatch() { latch_.clear(); }
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
 
@@ -91,7 +95,7 @@ class VkClient {
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     uint64_t bytes = 0u;
   };
-  // A share that failed: not retried for this size and format until NR is re-enabled (Plan 7's final review Minor 3).
+  // A share that failed: not retried for this size and format until NR is re-enabled.
   struct ShareFailure {
     nr::Size size;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
@@ -112,9 +116,9 @@ class VkClient {
   // Stops the client for the session ("The Vulkan bridge stopped: ..."): no new wait is ever queued again, the helper's side latches and CPU-signals both
   // fences up to the waited values, and the shared surfaces go.
   void Stop(std::string_view reason, NrLink& link, vk::GameHost& host);
-  // A capped wait ran its full 2 s: counted in `consecutive`; the third in a row stops the client.
+  // Count a capped wait timeout in consecutive; bridge::MAX_CONSECUTIVE_TIMEOUTS stops the client. Callers own the reset point.
   void NoteTimeout(uint32_t* consecutive, std::string_view what, NrLink& link, vk::GameHost& host);
-  // This frame's present-queue wait (design §3.4 case 2), once: true when the frame may go on (no second queue, or the wait is done).
+  // This frame's present-queue wait, once: true when the frame may go on (no second queue, or the wait is done).
   bool SyncPresentQueue(vk::GameHost* present_host, vk::GameHost& host, NrLink& link);
   bool RunFenced(vk::GameHost& host, const vk::ImageInfo& back_buffer, vk::Usage entry_state, const vk::ImageInfo& motion, ipc::Run run,
                  NrLink& link, vk::GameHost* present_host);
@@ -127,7 +131,7 @@ class VkClient {
   vk::Interop interop_;
   LUID luid_ = {};
   bool fenced_ = false;
-  std::string cpu_reason_;  // why SHARED_CPU, when it is (design §8's reason)
+  std::string cpu_reason_;  // why SHARED_CPU, when it is
   // FENCED: the helper's two fences, imported. to12 is signalled here (odd values) and waited on by the helper's queue; to11 is signalled by the helper's
   // queue and waited on here.
   VkSemaphore to12_vk_ = VK_NULL_HANDLE;

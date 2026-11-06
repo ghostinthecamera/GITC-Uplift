@@ -20,20 +20,20 @@
 
 namespace uplift::client {
 
-// Plan 9 (design §2.3, §2.4): a D3D11 device's frames to and from NR through an NrLink. FENCED on a device with
-// ID3D11Device5 and ID3D11DeviceContext4 (Plan 7's NT textures and two shared fences, split across the IPC: RunBridgedFrame
+// A D3D11 device's frames to and from NR through an NrLink. FENCED on a device with
+// ID3D11Device5 and ID3D11DeviceContext4 (NT textures and two shared fences, split across the IPC: RunBridgedFrame
 // runs unchanged on this side), KMT otherwise (a legacy shared texture, CPU-ordered). ReShade-free: it takes native
 // pointers and calls only CopyResource, Flush, OpenSharedResource1, OpenSharedFence, Signal/Wait on the context 4,
 // CreateTexture2D and queries. Not thread-safe: the add-on's lock.
 //
-// R17 across processes: a D3D11 GPU wait is queued only after the helper's reply said it submitted that very signal. A reply
+// Across processes: a D3D11 GPU wait is queued only after the helper's reply said it submitted that very signal. A reply
 // that never came (or a helper that died) means no wait is ever queued; a fence reading UINT64_MAX means its owner is gone.
 // KMT's one CPU wait (an event query) is capped at 2 s: a frame whose GPU work outlasts it is skipped, and the frames after it
 // are skipped until that work is done (nothing is latched).
 class D3D11Client {
  public:
   // nullptr + `error` when the device's adapter is not NVIDIA's or cannot be read. `allow_fences` false forces KMT (the smoke
-  // uses it once to test the fallback). Plan 10: `label` names the game's API in the latch and the multisample texts ("Direct3D 10"
+  // uses it once to test the fallback). `label` names the game's API in the latch and the multisample texts ("Direct3D 10"
   // when the device is D3D10Client's relay).
   static std::unique_ptr<D3D11Client> Create(ID3D11Device* device, bool allow_fences, std::string* error,
                                              std::string_view label = "Direct3D 11");
@@ -47,15 +47,15 @@ class D3D11Client {
   // that failed, the latch). On KMT, while `running`, it also makes the shared texture. `enabled` false forgets failed shares,
   // so re-enabling retries them. The colour space is the caller's.
   ipc::Target Describe(ID3D11Resource* back_buffer, bool enabled, bool running);
-  // Plan 10: the same from a description (nullopt: not a 2D texture). D3D10Client has no D3D11 texture to describe while NR is off, but the
-  // helper's Session still loads from the back buffer's size and format (Plan 8's Minor 2).
+  // The same from a description (nullopt: not a 2D texture). D3D10Client has no D3D11 texture to describe while NR is off, but the
+  // helper's Session still loads from the back buffer's size and format.
   ipc::Target Describe(const std::optional<D3D11_TEXTURE2D_DESC>& description, bool enabled, bool running);
   // The FRAME reply's news: opens the helper's fences and shared textures (taking every NT handle in the reply), runs the
   // fence watchdog, and drops the shared surfaces when the helper's NR is not running. True when the transport changed: the
   // device could not open the helper's fences, so this client is KMT now (Kind() says so) and the caller must DETACH and ATTACH
   // afresh with it.
   bool Apply(const ipc::Reply& reply, NrLink& link);
-  // One RUN (design §2.4): the back buffer (and `motion`, this frame's UPLIFT_MV, FENCED only) out, NR, back. True when NR's
+  // One RUN: the back buffer (and `motion`, this frame's UPLIFT_MV, FENCED only) out, NR, back. True when NR's
   // result reached `back_buffer`.
   bool Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon::TriggerPoint point, NrLink& link);
   [[nodiscard]] bool LastRunSent() const { return run_sent_; }  // the last Run put a RUN on the wire
@@ -63,17 +63,17 @@ class D3D11Client {
   MaskCopy CopyMask(ID3D11Resource* mask, NrLink& link);
   void ReleaseMask();
   // destroy_device, the helper gone. True when it released something (a shared texture, a fence or the query): the D3D11 context frees those at
-  // its next Flush, which D3D10Client makes only then (batch 3 review, minor 4).
+  // its next Flush, which D3D10Client makes only then.
   bool ReleaseAll();
   // Stops the transport for the session ("The {label} bridge stopped: ..."): no new wait is ever queued again, the helper's side latches
-  // and CPU-signals both fences up to the waited values, and the shared surfaces go. Plan 10: public, so a failure of the D3D10 relay
+  // and CPU-signals both fences up to the waited values, and the shared surfaces go. Public, so a failure of the D3D10 relay
   // under this client (a key that did not come) latches it too.
   void Stop(std::string_view reason, NrLink& link);
   // VRAM this side made. FENCED: none (the helper's transport counts the shared textures both sides map).
   [[nodiscard]] uint64_t SharedBytes() const { return kmt_bytes_; }
   [[nodiscard]] std::string Line() const;
   [[nodiscard]] std::string_view Latch() const { return latch_; }  // non-empty once the transport stopped for the session
-  // Plan 17: Retry now after the helper stopped (the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
+  // Retry now after the helper stopped (when the front's 2-strike rule allows it): a latch its stop caused (its fences read UINT64_MAX) goes with it.
   void ClearLatch() { latch_.clear(); }
   [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
 
@@ -87,7 +87,7 @@ class D3D11Client {
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     uint64_t bytes = 0u;
   };
-  // A share that failed: not retried for this size and format until NR is re-enabled (Plan 7's final review Minor 3).
+  // A share that failed: not retried for this size and format until NR is re-enabled.
   struct ShareFailure {
     nr::Size size;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
@@ -145,7 +145,7 @@ class D3D11Client {
   std::optional<ShareFailure> motion_failure_;
   std::string problem_;  // the back buffer's problem, logged once per change
   std::string latch_;
-  std::string label_ = "Direct3D 11";  // Plan 10: Create's label
+  std::string label_ = "Direct3D 11";  // Create's label
   bool in_flight_ = false;             // a request has no reply yet: no share is touched until a FRAME reply
   bool gpu_pending_ = false;           // KMT: the event query's 2 s ran out; frames skip until the copy into the shared texture is done
   bool run_sent_ = false;

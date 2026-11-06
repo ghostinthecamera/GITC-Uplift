@@ -1,5 +1,7 @@
 #include "ui/status_text.hpp"
+#include "memory_units.hpp"
 #include "nr/types.hpp"
+#include "text/before_fg_messages.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -7,6 +9,9 @@
 #include <utility>
 
 namespace uplift::ui {
+namespace {
+constexpr char WORKING_TITLE[] = "NR is working";
+}  // namespace
 
 SetupView ResolveSetup(const SetupFacts& facts) {
   SetupView view;
@@ -18,7 +23,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     } else if (!facts.dlss_seen) {
       *option = {.why = DLSS_NOT_SEEN_REASON, .temporary = true};
     } else if (facts.dlss_off) {
-      *option = {.why = DLSS_OFF_REASON, .temporary = true};  // Plan 18 Task 12
+      *option = {.why = DLSS_OFF_REASON, .temporary = true};
     }
   };
 
@@ -30,7 +35,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     before = {.why = "The game's DLSS is Ray Reconstruction, which keeps NR after DLSS", .temporary = true};
   }
   view.before_upscaling_on_rr = (facts.ray_reconstruction && !facts.ray_reconstruction_after_dlss);
-  // Plan 18: a stage whose image the Direct3D 11 bridge cannot share is a fixed cause for that stage alone; it beats the temporary ones.
+  // A stage whose image the Direct3D 11 bridge cannot share is a fixed cause for that stage alone; it beats the temporary ones.
   const auto grey_fixed = [](OptionState* option, std::string_view fixed) {
     if (!fixed.empty() && (option->why.empty() || option->temporary)) {
       *option = {.why = fixed};
@@ -43,7 +48,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   } else if (facts.frame_generation_blocks_present) {
     at(view.stage_options, SourcePick::PRESENT) = {.why = FG_PRESENT_OFF_REASON, .temporary = true};
   }
-  // Plan 15: held after the game's NGX shutdown on Direct3D 12, no stage can run until the game's DLSS starts again. That beats the other temporary causes
+  // Held after the game's NGX shutdown on Direct3D 12, no stage can run until the game's DLSS starts again. That beats the other temporary causes
   // (it is why nothing runs now); a fixed cause keeps its own text, since it would not clear with the hold.
   const auto hold = [&facts](OptionState* option) {
     if (!facts.held.empty() && (option->why.empty() || option->temporary)) {
@@ -85,7 +90,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   } else if (!facts.launchpad_ready) {
     launchpad = {.why = "Enable Launchpad above Uplift and allow Launchpad motion in Uplift.fx.", .temporary = true};
   }
-  // 2026-10-08: Lumenite, as Launchpad.
+  // Lumenite, as Launchpad.
   OptionState& lumenite = at(view.motion_options, MotionPick::LUMENITE);
   if (!facts.lumenite_fixed.empty()) {
     lumenite = {.why = facts.lumenite_fixed};
@@ -120,13 +125,13 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   // Resolution.
   OptionState& match_game = at(view.resolution_options, ResolutionMode::MATCH_GAME);
   if (!facts.match_game_readable && facts.match_game_at_dlss_stages) {
-    match_game = {.why = VULKAN_MATCH_GAME_REASON, .temporary = true};  // final review, minor 3: a DLSS stage here reads it
+    match_game = {.why = VULKAN_MATCH_GAME_REASON, .temporary = true};  // a DLSS stage here reads it
   } else if (!facts.match_game_readable) {
     match_game = {.why = "Match game needs the game's DLSS render size, which Uplift cannot read here"};
   } else if (!facts.dlss_seen) {
     match_game = {.why = DLSS_NOT_SEEN_REASON, .temporary = true};
   } else if (facts.dlss_off) {
-    match_game = {.why = DLSS_OFF_REASON, .temporary = true};  // Plan 18 Task 12 (fix round 1, M-1): it reads DLSS's render size, which is off too
+    match_game = {.why = DLSS_OFF_REASON, .temporary = true};  // it reads DLSS's render size, which is off too
   }
   if (!facts.below_full_fixed.empty()) {
     for (size_t index = 1u; index < view.resolution_options.size(); ++index) {
@@ -141,7 +146,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   at(view.motion_options, view.motion) = {};
   at(view.resolution_options, view.resolution) = {};
 
-  // Split chain (Task 3): passes 2..N's "Runs at" rows. Where each pass runs is the context's chain; without one, the stored picks from pass 1's highlight,
+  // Split chain: passes 2..N's "Runs at" rows. Where each pass runs is the context's chain; without one, the stored picks from pass 1's highlight,
   // raised to the pass before's stage (DecideChain's never-backwards rule; its fallbacks need the engine's facts).
   const uint32_t passes = std::clamp(facts.pass_count, 1u, MAX_PASSES);
   std::array<SourcePick, MAX_PASSES> runs = {};
@@ -187,8 +192,8 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     row.options[static_cast<size_t>(row.shown)] = {};  // what runs is possible by definition
   }
 
-  // Plan 15 fix round (minor 6): stopped for the session, nothing can run, the highlights included: every option of the three rows is greyed with the fixed
-  // reason (the card says it too), and there is no Why line. Split chain fix round 1 (M5): the Runs at rows' too.
+  // Stopped for the session, nothing can run, the highlights included: every option of the three rows is greyed with the fixed
+  // reason (the card says it too), and there is no Why line. The same holds for a split chain's Runs at rows.
   if (!facts.stopped.empty()) {
     view.stopped = true;
     const auto stop = [&facts](auto& options) {
@@ -199,14 +204,14 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     stop(view.stage_options);
     stop(view.motion_options);
     stop(view.resolution_options);
-    for (PassStageRow& row : view.pass_stages) {  // fix round 1 (M5): the Runs at rows too
+    for (PassStageRow& row : view.pass_stages) {  // the Runs at rows too
       for (PassStageOption& option : row.options) {
         option = {.why = std::string(facts.stopped)};
       }
     }
     return view;
   }
-  // Plan 15: while held, the card says why NR waits (CardFacts::held), and a held context's card is never the working one, which alone draws the Why line.
+  // While held, the card says why NR waits (CardFacts::held), and a held context's card is never the working one, which alone draws the Why line.
   if (!facts.held.empty()) return view;
 
   // The Why line: temporary fallbacks from the preference only (a fixed cause has its tooltip). The first sentence as written (it starts with a name),
@@ -225,7 +230,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   const bool motion_waits = (motion_falls_back
                              && (motion_wish.why == DLSS_NOT_SEEN_REASON || (selectable(motion_wish) && facts.dlss_motion_gap == MotionGap::NONE)));
   const std::string_view stage_name = StageLabel(facts.preferred_stage, facts.before_framegen);
-  // Plan 18 Task 12: the game switched its DLSS off: what fell back returns when it is on again.
+  // The game switched its DLSS off: what fell back returns when it is on again.
   const bool stage_off = (view.stage != facts.preferred_stage && facts.preferred_stage != SourcePick::PRESENT && stage_wish.why == DLSS_OFF_REASON);
   const bool motion_off = (motion_falls_back && motion_wish.why == DLSS_OFF_REASON);
   if (stage_off) {
@@ -276,7 +281,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     add("Match game applies when NR runs at After DLSS or Pre-DLSS.");
   } else if (view.resolution != facts.preferred_resolution && facts.preferred_resolution == ResolutionMode::MATCH_GAME
              && resolution_wish.why == DLSS_OFF_REASON) {
-    add("Match game applies when the game's DLSS is on again.");  // Plan 18 Task 12 (fix round 1, M-1)
+    add("Match game applies when the game's DLSS is on again.");
   }
   return view;
 }
@@ -325,7 +330,7 @@ LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
   }
   card.footer = std::format("{} · {}/{} {}", facts.api, facts.passes_run, facts.passes_requested, (facts.passes_requested == 1u ? "pass" : "passes"));
   if (facts.vram_bytes > 0u) {
-    card.footer += std::format(" · VRAM {:.0f} MiB", static_cast<double>(facts.vram_bytes) / (1024.0 * 1024.0));
+    card.footer += std::format(" · VRAM {:.0f} MiB", static_cast<double>(facts.vram_bytes) / BYTES_PER_MIB);
   }
   return card;
 }
@@ -363,7 +368,7 @@ SetupView SetupSettle::Update(SetupView resolved, std::chrono::steady_clock::tim
   resolved.stage = static_cast<SourcePick>(shown[0]);
   resolved.motion = static_cast<MotionPick>(shown[1]);
   resolved.resolution = static_cast<ResolutionMode>(shown[2]);
-  // What is shown is what ran a moment ago: never greyed, and the Why belongs to the resolved highlights. Plan 15 fix round: unless nothing can run again.
+  // What is shown is what ran a moment ago: never greyed, and the Why belongs to the resolved highlights. Unless nothing can run again.
   if (!resolved.stopped) {
     resolved.stage_options[shown[0]] = {};
     resolved.motion_options[shown[1]] = {};
@@ -453,22 +458,43 @@ std::string_view KeepFacesUnavailable(const KeepFacesFacts& facts) {
   return {};
 }
 
+std::string_view BeforeFgUnavailable(const BeforeFgFacts& facts) {
+  if (!facts.api_supported) return BEFORE_FG_API_REASON;
+  if (!facts.hooks_installed) return text::BeforeFgNoteInfo(text::BeforeFgNote::HOOKS_UNAVAILABLE).line;
+  if (!facts.streamline_loaded) return BEFORE_FG_NO_STREAMLINE_REASON;
+  return {};
+}
+
+std::string_view DiffuseWhiteUnavailable(std::optional<color::Encoding> encoding) {
+  return (encoding.has_value() && color::IsSdr(*encoding)) ? DIFFUSE_WHITE_SRGB_REASON : std::string_view();
+}
+
+std::string_view ColorFixUnavailable(std::string_view key, std::optional<color::Encoding> encoding) {
+  if (!encoding.has_value()) return {};
+  if (key == "LinearUnitNits") {
+    const bool linear = (*encoding == color::Encoding::LINEAR_BT709 || *encoding == color::Encoding::SCRGB || *encoding == color::Encoding::SCRGB_NL);
+    return (linear ? std::string_view() : LINEAR_UNIT_REASON);
+  }
+  if ((key == "SourcePrimaries" || key == "NeuralTransfer") && color::IsSdr(*encoding)) return SRGB_FIX_REASON;
+  return {};
+}
+
 StatusCard BuildStatusCard(const CardFacts& facts) {
-  const auto card = [](CardStage stage, std::string title, std::string_view reason, std::vector<std::string> fixes,
+  const auto card = [&facts](CardStage stage, std::string title, std::string_view reason, std::vector<std::string> fixes,
                        CardButton button) {
-    return StatusCard{.stage = stage, .working = false, .title = std::move(title), .reason = std::string(reason),
-                      .fixes = std::move(fixes), .button = button};
+    return StatusCard{.stage = stage, .working = stage == CardStage::WORKING, .title = std::move(title), .reason = std::string(reason),
+                      .before_fg_note = std::string(facts.before_fg_note), .fixes = std::move(fixes), .button = button};
   };
   if (!facts.device_problem.empty()) {
     return card(CardStage::DEVICE, "Uplift is not running on this device", facts.device_problem, {}, CardButton::NONE);
   }
   // Only while NR is on: a user who turned it off sees the normal off state, and the failure (remembered by the add-on) comes
   // back with Retry now when they turn it on again.
-  // Plan 17: the 2-strike rule's second stop, for a bridge's private device and the helper alike.
+  // The 2-strike rule's second stop, for a bridge's private device and the helper alike.
   if (facts.private_stops_final) {
     return card(CardStage::DEVICE, "NR stopped twice", PRIVATE_DEVICE_STOPPED_TWICE_REASON, {"Restart the game to use NR again."}, CardButton::NONE);
   }
-  // Test phase (review M-3): a stop on the adapter's shared device is final at once (no new device can be made while the game runs).
+  // A stop on the adapter's shared device is final at once (no new device can be made while the game runs).
   if (facts.private_stop_unretryable && !facts.private_stopped.empty()) {
     return card(CardStage::DEVICE, (facts.device_lost ? "The GPU device was removed" : "NR stopped"), facts.private_stopped,
                 {"Restart the game to use NR again."}, CardButton::NONE);
@@ -477,7 +503,7 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
     return card(CardStage::DEVICE, "Uplift's 64-bit helper stopped", facts.helper_problem, {"Retry now starts it again."},
                 CardButton::RETRY_NOW);
   }
-  // Plan 17: a bridge's private device stopped (the first time this session): Retry now builds a new one, as the helper's card restarts the helper.
+  // A bridge's private device stopped (the first time this session): Retry now builds a new one, as the helper's card restarts the helper.
   if (!facts.private_stopped.empty() && facts.enabled) {
     return card(CardStage::DEVICE, (facts.device_lost ? "The GPU device was removed" : "NR stopped"), facts.private_stopped,
                 {"Retry now starts NR again on a new device."}, CardButton::RETRY_NOW);
@@ -486,7 +512,7 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
     return card(CardStage::DEVICE, "The GPU device was removed", facts.output_problem, {"Restart the game to use NR again."},
                 CardButton::NONE);
   }
-  // Plan 15 fix round (minor 6): NR stopped on this device for the session (the game shut NVIDIA's NGX down while NR's work was still running).
+  // NR stopped on this device for the session (the game shut NVIDIA's NGX down while NR's work was still running).
   if (!facts.stopped.empty()) return card(CardStage::DEVICE, "NR stopped", facts.stopped, {"Restart the game to use NR again."}, CardButton::NONE);
   if (facts.claimed_elsewhere) {
     return card(CardStage::DEVICE, "NR runs on another device", "NR runs on another D3D12 device in this game.",
@@ -507,7 +533,7 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
                 CardButton::NONE);
   }
   if (!facts.enabled) return card(CardStage::SWITCH, "NR is off", "Neural rendering is switched off.", {}, CardButton::TURN_ON);
-  // Plan 15: after the game's NGX shutdown on Direct3D 12 NR waits for the game's DLSS, whatever the stage (a temporary cause; Setup greys with the same text).
+  // After the game's NGX shutdown on Direct3D 12 NR waits for the game's DLSS, whatever the stage (a temporary cause; Setup greys with the same text).
   if (!facts.held.empty()) return card(CardStage::PLACEMENT, "Waiting for the game's DLSS", facts.held, {}, CardButton::NONE);
   const nr::SessionStatus& session = facts.session;
   if (session.state == nr::SessionState::FAILED) {
@@ -516,7 +542,7 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
                                                     : std::string("Retry now, or change a setting."));
     return card(CardStage::SESSION, "NR failed", session.message, {std::move(next)}, CardButton::RETRY_NOW);
   }
-  // 2026-10-09 (owner): the video memory cards also offer the looser Video memory checks there are.
+  // The video memory cards also offer the looser Video memory checks there are.
   std::string_view looser_checks;
   switch (facts.vram_check) {
     case nr::VramCheck::CAREFUL: looser_checks = "Relaxed or Off"; break;
@@ -555,35 +581,34 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
   }
   if (!facts.nr_applied) {
     const std::string_view reason =
-        (facts.skip_from_session && !session.message.empty() ? std::string_view(session.message) : facts.skip_reason);
-    if (facts.skip_reason == "budget") {
+        (facts.skip_from_session && !session.message.empty() ? std::string_view(session.message) : nr::SkipReasonText(facts.skip_reason));
+    if (facts.skip_reason == nr::SkipReason::BUDGET) {
       std::string need_less =
           (looser_checks.empty() ? std::string("Lower Resolution or Pass count, or close other GPU programs.")
            : std::format("Lower Resolution or Pass count, close other GPU programs, or set Video memory check to {} (Advanced).", looser_checks));
       return card(CardStage::BUDGET, "Not enough video memory for NR", reason, {std::move(need_less)}, CardButton::NONE);
     }
-    if (facts.skip_reason == "frame too small" || facts.skip_reason == "resizing") {
+    if (facts.skip_reason == nr::SkipReason::FRAME_TOO_SMALL || facts.skip_reason == nr::SkipReason::RESIZING) {
       return card(CardStage::FRAME, "Waiting for a usable frame", reason, {"NR needs at least " UPLIFT_NR_FLOOR_TEXT "."}, CardButton::NONE);
     }
-    if (facts.skip_reason == "evaluate failed" || facts.skip_reason == "create failed") {
+    if (facts.skip_reason == nr::SkipReason::EVALUATE_FAILED || facts.skip_reason == nr::SkipReason::CREATE_FAILED) {
       return card(CardStage::EVALUATE, "NR's evaluate failed", reason, {}, CardButton::NONE);
     }
-    if (facts.skip_reason == "frame generation is on") {
+    if (facts.skip_reason == nr::SkipReason::FRAME_GENERATION_ON) {
       return card(CardStage::PLACEMENT, "NR skipped this frame", reason,
                   {"Choose After DLSS, or turn on Present with frame generation (Advanced)."}, CardButton::NONE);
     }
     if (reason.empty()) return card(CardStage::PLACEMENT, "Waiting for a frame", "NR has not run yet.", {}, CardButton::NONE);
     return card(CardStage::PLACEMENT, "NR skipped this frame", reason, {}, CardButton::NONE);
   }
-  StatusCard working = {.stage = CardStage::WORKING, .working = true, .title = "NR is working",
-                        .reason = std::string(facts.working_line)};
+  StatusCard working = card(CardStage::WORKING, WORKING_TITLE, facts.working_line, {}, CardButton::NONE);
   if (facts.passes_run < session.passes_requested) {
     working.fixes.push_back(session.message.empty()
                                 ? std::format("Running {} of {} passes.", facts.passes_run, session.passes_requested)
                                 : session.message);
   }
   if (!session.faces_note.empty()) {
-    working.fixes.emplace_back(session.faces_note);  // Keep faces fix round 1 (C2): paused or stopped while NR works
+    working.fixes.emplace_back(session.faces_note);  // Keep faces paused or stopped while NR works
   }
   return working;
 }

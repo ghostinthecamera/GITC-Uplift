@@ -8,10 +8,13 @@
 #include <optional>
 #include <string>
 
-// Plan 12 (OpenGL design §3.1, key decision b): the GL game side, ReShade-free, in both halves. Nothing here links opengl32.lib or imports
+// The GL game side, ReShade-free, in both halves. Nothing here links opengl32.lib or imports
 // opengl32.dll: the Windows SDK's GL/gl.h supplies the GL 1.1 types and macros, every function is resolved at run time, and the constants it lacks
 // are local. A struct member is never named like a GL 1.1 export (GetError, not glGetError), so nothing can call the import by mistake.
 namespace uplift::gl {
+
+// Bound import/query cleanup even when the error flag does not clear.
+inline constexpr uint32_t ERROR_DRAIN_LIMIT = 16u;
 
 using GLuint64 = uint64_t;
 struct SyncObject;  // the driver's GLsync
@@ -45,11 +48,11 @@ inline constexpr GLenum GL_HANDLE_TYPE_D3D12_FENCE_EXT = 0x9594;
 inline constexpr GLenum GL_D3D12_FENCE_VALUE_EXT = 0x9595;
 inline constexpr GLenum GL_DEVICE_LUID_EXT = 0x9599;
 
-// The native GL functions of the context that is current on the calling thread (key decision b): GL 1.1 and wglGetCurrentContext from the exports of
+// The native GL functions of the context that is current on the calling thread: GL 1.1 and wglGetCurrentContext from the exports of
 // the SYSTEM opengl32.dll (found with GetModuleHandleW, never loaded: ReShade's export hooks leave it unpatched), and everything later through that
 // module's wglGetProcAddress. Every call is made with the runtime's context current, in the present event or an effect event.
 //
-// Plan 12 Task 1 (design §8.1, G-EV): the functions resolved through wglGetProcAddress are the driver's, which ReShade has detoured, so a call to one
+// The functions resolved through wglGetProcAddress are the driver's, which ReShade has detoured, so a call to one
 // may raise ReShade events (init_resource, bind_render_targets_and_depth_stencil) into other add-ons, under Uplift's lock. The rule that follows:
 // Uplift registers no handler for such an event that takes its lock (it registers none).
 struct Functions {
@@ -97,7 +100,7 @@ struct Functions {
 
 // The system opengl32.dll's wglGetCurrentContext on its own: the HGLRC current on the calling thread, null when none is or the system module is not loaded.
 // It reads the thread's state and calls no GL function, so it is safe on a context that is not the runtime's; Functions::Load, which does call GL, runs only
-// after this has said the context is the runtime's (Plan 12 batch 2 review I-1).
+// after this has said the context is the runtime's.
 [[nodiscard]] HGLRC CurrentContext();
 
 }  // namespace uplift::gl

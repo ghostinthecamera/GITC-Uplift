@@ -15,10 +15,9 @@
 
 namespace uplift::bridge {
 
-// Plan 10 (design §3.1). Plan 8's relay D3D11 device and its keyed-mutex hand-offs (the D3D10 design §2 rules 2-5), moved out of
-// D3D10Bridge so the 64-bit D3D10 bridge and the 32-bit D3D10 client share them. ReShade-free; the CPU never waits for the GPU (an
-// acquire only waits for a release this thread made just before, capped at 2 s, and only S_OK counts). One latch. Not thread-safe:
-// the add-on's lock. Destroy it outside that lock: the relay is ReShade's proxy, whose last release raises destroy_device.
+// A relay D3D11 device and its keyed-mutex handoffs, shared by the D3D10 bridge and client.
+// Acquires follow a release on this thread, use a cap and succeed only on S_OK; every acquired key is returned, including on exceptions.
+// The caller holds the add-on lock, but destroys the relay outside it because ReShade's proxy raises destroy_device on its last release.
 class KeyedRelay {
  public:
   // A relay texture opened on the game's D3D10 device, with its keyed mutex on each side. Key 0 is the game's side, key 1 the relay's.
@@ -53,13 +52,13 @@ class KeyedRelay {
   // release raises destroy_device, so the caller releases it only outside its own lock.
   static std::unique_ptr<KeyedRelay> Create(ID3D10Device* game, Microsoft::WRL::ComPtr<ID3D11Device>* relay_created,
                                             std::string* error);
-  // One last Flush (Plan 8's final review C-1: D3D11 destroys a released object only at its context's next Flush, and the relay has
+  // One last Flush (D3D11 destroys a released object only at its context's next Flush, and the relay has
   // no Present), then the relay, its proxy last.
   ~KeyedRelay();
   KeyedRelay(const KeyedRelay&) = delete;
   KeyedRelay& operator=(const KeyedRelay&) = delete;
 
-  [[nodiscard]] ID3D11Device* Relay() const { return relay_.Get(); }  // native: a fence's GetDevice (the D3D11 design's §9 a)
+  [[nodiscard]] ID3D11Device* Relay() const { return relay_.Get(); }  // native: a fence's GetDevice
   [[nodiscard]] LUID Luid() const { return luid_; }
 
   // A keyed texture of `size` and `format`, made without initial data (the probe's lesson: an upload races the first key). The relay
@@ -86,8 +85,8 @@ class KeyedRelay {
   void Stop(std::string reason);
   [[nodiscard]] bool Stopped() const { return !latch_.empty(); }
   [[nodiscard]] std::string_view Reason() const { return latch_; }  // `what` of the Fail, or the owner's reason
-  void ClearLatch() { latch_.clear(); }  // Plan 17: the 32-bit D3D10 client's Retry now after the helper stopped
-  // "The Direct3D 10 bridge stopped: {what}": the owners' latch text and log line (Plan 17: the card offers Retry now, so no "restart the game").
+  void ClearLatch() { latch_.clear(); }  // the 32-bit D3D10 client's Retry now after the helper stopped
+  // "The Direct3D 10 bridge stopped: {what}": the owners' latch text and log line (the card offers Retry now, so no "restart the game").
   [[nodiscard]] static std::string Sentence(std::string_view what);
 
  private:

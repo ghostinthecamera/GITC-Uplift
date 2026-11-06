@@ -4,7 +4,7 @@
 
 namespace uplift::addon {
 
-// Plan 17 (1.0.1 design §3): the 2-strike rule for the private-device NR of one game device in one session (a bridge's private Direct3D 12 device, or the
+// The 2-strike rule for the private-device NR of one game device in one session (a bridge's private Direct3D 12 device, or the
 // 64-bit helper's). Its first stop (the device removed or hung, or the CPU-ordered timeouts) offers Retry now, which builds everything afresh; the second
 // is final until the game restarts. A stop that cannot be retried at all (a bridge on the adapter's shared device, without a device factory: no new device
 // can be made while the abandoned NR runtime holds the removed one) is final at once. Pure, so the unit tests drive it.

@@ -6,10 +6,9 @@
 
 namespace uplift::vk {
 
-// Plan 13 (key decision e): the device functions native NR work needs (VkHost's barrier, NrCompletion's semaphore and events, and, in later
-// batches, the colour pipeline's images, buffers, shaders and pipelines), resolved through the loader's vkGetDeviceProcAddr: the game's own chain,
-// so ReShade's layer sits in front of the ones it intercepts and the rest go straight to the driver. The same list serves the add-on and the smokes.
-// Plan 19: and native NR at Present's own command buffers (vk::CommandRing), its copies and blits, and its submissions to the effect queue.
+// Device functions for native NR barriers, completion, colour resources and pipelines, and CommandRing recording/submission.
+// Resolved through the loader's vkGetDeviceProcAddr: intercepted calls pass through ReShade's layer; the rest reach the driver.
+// The add-on and tests use the same function list.
 #define UPLIFT_VK_NR_FUNCTIONS(X)  \
   X(vkCreateImage)                 \
   X(vkDestroyImage)                \

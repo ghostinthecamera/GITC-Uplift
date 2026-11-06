@@ -25,7 +25,7 @@ using Microsoft::WRL::ComPtr;
 
 constexpr uint64_t BLOCK_ALIGN = 64ull * 1024ull;  // a heap opened from a file mapping is placed in 64 KiB units
 
-// Plan 12 (protocol 5): a shared texture's allocation size, which an OpenGL memory-object import needs (the texture's own size is not it).
+// A shared texture's allocation size, which an OpenGL memory-object import needs (the texture's own size is not it).
 uint64_t AllocationBytes(ID3D12Device* device, ID3D12Resource* resource) {
   const D3D12_RESOURCE_DESC description = resource->GetDesc();
   return device->GetResourceAllocationInfo(0u, 1u, &description).SizeInBytes;
@@ -135,7 +135,7 @@ struct BlockHandle {
   uint32_t row_pitch = 0u;
 };
 
-// BLOCK's recipe (design §4.2), one function for the frame and for the mask and motion: the texture, the footprint, the
+// BLOCK's recipe, one function for the frame and for the mask and motion: the texture, the footprint, the
 // mapping (64 KiB aligned), OpenExistingHeapFromFileMapping, and the placed buffer (ALLOW_CROSS_ADAPTER when the heap says
 // SHARED_CROSS_ADAPTER). `what` names the image in the texts. "" on success, else why not; the caller retires what was made
 // before a failure.
@@ -209,7 +209,7 @@ void BringIn(ID3D12GraphicsCommandList* list, const SharedImage& image, D3D12_RE
 
 // BLOCK and KMT: no GPU wait on anything the add-on signals (the add-on orders its own side on the CPU before it sends
 // RUN), so a RUN is one list, one `progress` signal, and a reply the helper sets when that signal is reached. The mask and the
-// motion ride along (design §4.2): KMT opens the add-on's shared textures, BLOCK makes a block for each.
+// motion ride along: KMT opens the add-on's shared textures, BLOCK makes a block for each.
 class CpuOrderedTransport : public Transport {
  public:
   void Run(const ipc::Run& run, addon::DeviceContext& context, ipc::Reply* reply, uint64_t* complete_at) override {
@@ -279,7 +279,7 @@ class CpuOrderedTransport : public Transport {
     if (latch_.empty()) latch_ = std::string(reason);
   }
 
-  // SHARE_MASK and SHARE_MOTION (design §4.2): replaces what was shared before. A latch, an empty size or a format NR cannot read
+  // SHARE_MASK and SHARE_MOTION: replaces what was shared before. A latch, an empty size or a format NR cannot read
   // replies `ok = 0` with the reason.
   void Share(ipc::RequestKind kind, const ipc::Share& share, ipc::Reply* reply) override {
     const bool is_mask = (kind == ipc::RequestKind::SHARE_MASK);
@@ -344,8 +344,8 @@ class CpuOrderedTransport : public Transport {
   bool motion_logged_ = false;
 };
 
-// Plain D3D9 (design §2.4): the add-on writes the frame into a shared-memory block; this side opens it as a D3D12 heap
-// (OpenExistingHeapFromFileMapping, measured bit-exact by the probe), places a buffer in it, and copies block -> texture,
+// Plain D3D9: the add-on writes the frame into a shared-memory block; this side opens it as a D3D12 heap
+// (OpenExistingHeapFromFileMapping, measured bit-exact by tools/xadapter_probe's FILE_MAPPING heap), places a buffer in it, and copies block -> texture,
 // NR, texture -> block on one list. The mask and the motion are blocks of their own (MakeBlock).
 class BlockTransport final : public CpuOrderedTransport {
  public:
@@ -436,7 +436,7 @@ class BlockTransport final : public CpuOrderedTransport {
   std::optional<Failure> failure_;
 };
 
-// D3D9Ex, and D3D11 without fences (design §2.3): the add-on's legacy shared texture, opened here by its KMT handle. The
+// D3D9Ex, and D3D11 without fences: the add-on's legacy shared texture, opened here by its KMT handle. The
 // add-on's event query orders its writes before RUN, and this side's reply is set when its GPU work is done. The mask and the motion
 // are shared textures of the add-on's too (`Share` names their handles).
 class KmtTransport final : public CpuOrderedTransport {
@@ -536,11 +536,11 @@ class KmtTransport final : public CpuOrderedTransport {
   std::optional<Failure> failure_;
 };
 
-// D3D11.4 (design §2.4): Plan 7's NT textures and two shared fences, split across the process boundary. The add-on's side
+// D3D11.4: NT textures and two shared fences, split across the process boundary. The add-on's side
 // runs RunBridgedFrame; this side is its D3D12 half: Wait(to12, in), NR on the shared colour, Signal(progress) and
-// Signal(to11, out) -- always, once the queue has waited, even when the ring was busy or the recording failed (R17: the
+// Signal(to11, out) -- always, once the queue has waited, even when the ring was busy or the recording failed (the
 // add-on queues its D3D11 wait only after this reply says the signal was submitted).
-// Plan 11 (Vulkan design §5): `cpu_ordered` (SHARED_CPU) is the same textures with no fences: no handle is made or handed out, the queue does not
+// `cpu_ordered` (SHARED_CPU) is the same textures with no fences: no handle is made or handed out, the queue does not
 // wait for the add-on, and the reply is set when the GPU has passed this recording's `progress` signal (BLOCK's and KMT's reply-at-completion),
 // because the add-on orders its own side on the CPU (it waited for its copy in before RUN, and waits for the reply before it copies out).
 class FencedTransport final : public Transport {
@@ -596,7 +596,7 @@ class FencedTransport final : public Transport {
     if (!color_.resource || color_.size != size || color_.format != format) {
       Retire(&color_);
       HANDLE handle = nullptr;
-      // Plan 7's flags (design §9 g): a committed texture on a shared heap, render-target-capable.
+      // A committed texture on a shared heap, render-target-capable.
       const HRESULT result =
           side_.CreateShared(size, format, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, L"Uplift shared back buffer", &color_.resource, &handle);
       if (FAILED(result)) {
@@ -679,7 +679,7 @@ class FencedTransport final : public Transport {
     const bool to11_signalled = SUCCEEDED(side_.Queue()->Signal(to11_.Get(), run.out));
     reply->signalled = (progress && to11_signalled) ? 1u : 0u;
     if (recorded.submitted) {
-      // Held until progress passes it, even when the signal above failed (Plan 7 final review C-1).
+      // Held until progress passes it, even when the signal above failed.
       color_.last_use = progress_value;
       if (mask != nullptr) {
         mask_.last_use = progress_value;
@@ -704,7 +704,7 @@ class FencedTransport final : public Transport {
     Surface& surface = (is_mask ? mask_ : motion_);
     const DXGI_FORMAT format = static_cast<DXGI_FORMAT>(share.dxgi_format);
     const nr::Size size = {share.width, share.height};
-    // Plan 7 §9 g: D3D11 opens a D3D12 shared texture only when it is render-target-capable, and outside R8, R16 and the
+    // D3D11 opens a D3D12 shared texture only when it is render-target-capable, and outside R8, R16 and the
     // display formats only when it is also simultaneous-access.
     const std::optional<color::MaskFormatInfo> mask_format = (is_mask ? color::DescribeMaskFormat(format) : std::nullopt);
     if (!latch_.empty() || size.Empty() || (is_mask ? !mask_format : format != DXGI_FORMAT_R16G16_FLOAT)) {
@@ -742,7 +742,7 @@ class FencedTransport final : public Transport {
     ReleaseWaits(waited11);
   }
   void Detach() override {
-    // The game's device is going: nothing will signal to12 again, and the queue may be waiting on it (Plan 7 final review I-2).
+    // The game's device is going: nothing will signal to12 again, and the queue may be waiting on it.
     ReleaseWaits(0u);
     Retire(&color_);
     Retire(&mask_);

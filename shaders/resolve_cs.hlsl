@@ -1,7 +1,7 @@
 #include "change_common.hlsli"
 #include "vk_common.hlsli"
 
-// v2 design §3.10: pass n's own Transfer and Colour strength, applied to its raw output in place.
+// Each pass's own Transfer and Colour strength, applied to its raw output in place.
 cbuffer ResolveConstants : register(b0) {
   uint width;
   uint height;

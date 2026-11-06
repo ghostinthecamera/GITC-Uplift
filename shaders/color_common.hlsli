@@ -11,8 +11,8 @@ static const uint ENCODING_PQ_BT2100 = 3u;
 static const uint ENCODING_SCRGB = 4u;
 static const uint ENCODING_SCRGB_NL = 5u;
 
-// Plan 5 (v2 design §3.14, F7): the source's primaries, the SourcePrimaries index (color::Primaries). AUTO resolves
-// per encoding (ResolvePrimaries), so options of 0 keep Plan 4's maths.
+// The source's primaries, the SourcePrimaries index (color::Primaries). AUTO resolves
+// per encoding through ResolvePrimaries; zero selects the automatic primaries.
 static const uint PRIMARIES_AUTO = 0u;
 static const uint PRIMARIES_BT709 = 1u;
 static const uint PRIMARIES_BT2020 = 2u;
@@ -48,7 +48,7 @@ static const float3x3 BT709_TO_AP1 = float3x3(
     0.0701937225f, 0.9163538791f, 0.0134523985f,
     0.0206155929f, 0.1095697729f, 0.8698146342f);
 
-// AUTO is BT.2020 for PQ (Plan 4's rule) and BT.709 otherwise (twin: color::ResolvePrimaries).
+// AUTO is BT.2020 for PQ and BT.709 otherwise (twin: color::ResolvePrimaries).
 uint ResolvePrimaries(uint encoding, uint primaries) {
   if (primaries != PRIMARIES_AUTO) return primaries;
   return (encoding == ENCODING_PQ_BT2100 ? PRIMARIES_BT2020 : PRIMARIES_BT709);
@@ -141,10 +141,10 @@ float3 OkLabToLinear(float3 lab) {
       dot(lms, float3(-0.0041960863f, -0.7034186147f, 1.7076147010f)));
 }
 
-// Plan 14 (R94): the model values NR is given round as Direct3D 12's do: toward zero. gpu_vk_look measured half of the model values one half above Direct3D
-// 12's when the SPIR-V build used f16tof32(f32tof16()) too (the driver may fold that pair, and its RGBA16F store rounds to nearest), so the SPIR-V build
-// quantizes with integer masks, which nothing can fold: the low 13 of float32's 23 mantissa bits go in half's normal range, a whole number of 2^-24 below
-// it, and a finite value above the largest half becomes the largest half.
+// The model values NR is given round as Direct3D 12's do: toward zero. The Vulkan look test (gpu_vk_look) measured half of the model values one half-step
+// above Direct3D 12's when the SPIR-V build used f16tof32(f32tof16()) too (the driver may fold that pair, and its RGBA16F store rounds to nearest), so the
+// SPIR-V build quantizes with integer masks, which nothing can fold: the low 13 of float32's 23 mantissa bits go in half's normal range, a whole number of
+// 2^-24 below it, and a finite value above the largest half becomes the largest half.
 float3 QuantizeHalf(float3 value) {
 #if defined(__spirv__)
   const float3 magnitude = abs(value);
@@ -173,14 +173,14 @@ float3 FromSceneLinear(uint encoding, uint primaries, float3 scene, float input_
   return scene;
 }
 
-// v2 design §3.4: the game's exposure on the After-DLSS path, ExposureTexture ÷ DLSS.Pre.Exposure ×
+// The game's exposure on the After-DLSS path, ExposureTexture ÷ DLSS.Pre.Exposure ×
 // DLSS.Exposure.Scale, where `factor` is the last two. 1 when missing, non-finite or not positive.
 float GameExposure(uint has_texture, float texture_value, float factor) {
   const float exposure = (has_texture != 0u ? texture_value : 1.f) * factor;
   return (isfinite(exposure) && exposure > 0.f ? exposure : 1.f);
 }
 
-// Model domain (spike E3): sRGB-encoded BT.709 in [0,1].
+// Model domain (tools/nrspike's e3): sRGB-encoded BT.709 in [0,1].
 float3 EncodeModel(uint encoding, uint primaries, float3 value, float input_scale) {
   if (encoding == ENCODING_AUTO || encoding == ENCODING_SRGB) return saturate(value);
   float3 scene = ToSceneLinear(encoding, primaries, value, input_scale);

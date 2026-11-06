@@ -4,7 +4,7 @@
 
 namespace uplift::addon {
 
-// Plan 17 (1.0.1 design §4): Device Removed Extended Data on Uplift's PRIVATE Direct3D 12 devices (the bridges' and the 64-bit helper's), never on a Direct3D
+// Device Removed Extended Data on Uplift's PRIVATE Direct3D 12 devices (the bridges' and the 64-bit helper's), never on a Direct3D
 // 12 game's own device, through the retail runtime's DRED settings, without the debug layer.
 enum class DredMode { OFF, PAGE_FAULTS, BREADCRUMBS_AND_PAGE_FAULTS };
 // The mode for this process's private devices. The first call decides (and logs it) and later ones change nothing: D3D12Side::Create decides before its

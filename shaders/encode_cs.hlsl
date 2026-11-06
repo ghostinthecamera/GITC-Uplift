@@ -16,11 +16,11 @@ cbuffer EncodeConstants : register(b0) {
   uint canvas_width;   // the model texture: the image plus mirrored padding
   uint canvas_height;
   uint change_mode;    // 0: encode; 1: extract changes with recomputed input; 2: extract changes with preserved FP16 input
-  uint options;        // Plan 5: OPTION_* (the primaries, the near-black guard)
+  uint options;        // OPTION_* (the primaries, the near-black guard)
   uint reserved0;
 };
 
-// Plan 13: on Vulkan's After DLSS the source is DLSS's output, read in place from its storage view (u2).
+// On Vulkan's After DLSS the source is DLSS's output, read in place from its storage view (u2).
 #if UPLIFT_VK_SOURCE_STORAGE
 UPLIFT_IMAGE_FORMAT(UPLIFT_VK_TARGET_FORMAT) RWTexture2D<float4> source_texture : register(u2);
 #define UPLIFT_LOAD_SOURCE(pixel) source_texture[uint2(pixel)]
@@ -36,7 +36,7 @@ UPLIFT_IMAGE_FORMAT("rg16f") RWTexture2D<float2> motion_texture : register(u1);
 
 static const int MAX_TAPS = 8;  // per side of one footprint: the floor keeps every downscale well below this
 
-// v2 design §3.8's downscale: the mean of the source under image pixel `pixel`'s footprint in linear
+// Downscale: the mean of the source under image pixel `pixel`'s footprint in linear
 // light, each source pixel weighted by the share of it the footprint covers.
 float3 AreaAverage(uint2 pixel, float scale) {
   const float2 ratio = float2(source_width, source_height) / float2(width, height);

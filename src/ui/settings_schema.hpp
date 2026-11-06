@@ -5,6 +5,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 #include "ui/settings.hpp"
 
@@ -19,17 +20,17 @@ enum class SettingKind : uint8_t {
   KEY,     // a Win32 virtual-key code in [min, max]; 0 = none
 };
 
-// The overlay's sections (v2 design §5); resets and "(changed)" act per section.
+// The overlay's sections; resets and "(changed)" act per section.
 enum class SettingSection : uint8_t {
   TOP,
   LOOK,
   RESULT,
   LIMITS,
-  PLACEMENT,  // ui-review.md §3: "What NR works on" -- was PERFORMANCE
+  PLACEMENT,  // "What NR works on"
   PASSES,
   FIXES_COLOR,
   FIXES_GUIDES,
-  MASK,  // ui-review.md §3: "Mask and HUD"
+  MASK,  // "Mask and HUD"
   ADVANCED,
   HOTKEYS,
   HIDDEN,  // written by Uplift, never drawn as a control
@@ -43,17 +44,17 @@ inline constexpr uint32_t GREYED = 1u << 3u;            // shown read-only: no e
 inline constexpr uint32_t PASS_SWITCH = 1u << 4u;       // a pass's look-sharing, stage or network selection: always written, shown while it follows pass 1
 inline constexpr uint32_t BOOKKEEPING = 1u << 5u;       // hidden state Uplift writes itself: Restore all keeps it
 inline constexpr uint32_t APPLY_ON_RELEASE = 1u << 6u;  // a SliderInt row: shows its value while held, applies it once on release
-// Split chain (2026-10-10): a pass's "Runs at". Never part of the Defaults view: moving a pass to another stage rebuilds NR's features.
+// Split chain: a pass's "Runs at". Never part of the Defaults view: moving a pass to another stage rebuilds NR's features.
 inline constexpr uint32_t PASS_STAGE = 1u << 7u;
-// 2026-10-17: a FLOAT whose slider's range is its meaning (a share of the output, a blend): Ctrl+click cannot type past the slider's end.
+// A FLOAT whose slider's range is its meaning (a share of the output, a blend): Ctrl+click cannot type past the slider's end.
 inline constexpr uint32_t SLIDER_RANGE_ONLY = 1u << 8u;
 inline constexpr uint32_t NETWORK_PRESET = 1u << 9u;  // creation configuration, independent of look sharing and Compare
 }  // namespace setting_flags
 
-// 2026-10-17: how far past its slider's end a FLOAT accepts a typed value (Ctrl+click), as a multiple of that end.
+// How far past its slider's end a FLOAT accepts a typed value (Ctrl+click), as a multiple of that end.
 inline constexpr double TYPED_PAST_SLIDER = 10.0;
 
-// One persisted setting (v2 design §3.16): the single description load, save, sanitising, resets
+// One persisted setting: the single description load, save, sanitising, resets
 // and the overlay rows all read.
 struct SettingDescriptor {
   std::string_view key;
@@ -75,23 +76,24 @@ struct SettingDescriptor {
   uint8_t pass = 0u;  // 2-10: a per-pass row (Settings::passes[pass - 2]); 0: none
 };
 
-// Every persisted setting once, in save order (spec §12 as amended by the v2 design §5).
+// Every persisted setting once, in save order.
 [[nodiscard]] std::span<const SettingDescriptor> SettingsSchema();
 [[nodiscard]] const SettingDescriptor* FindSetting(std::string_view key);
+// Invalid text or an out-of-range value leaves the current setting intact.
+std::errc ApplySettingText(Settings& settings, const SettingDescriptor& descriptor, std::string_view text);
 [[nodiscard]] const Settings& DefaultSettings();
 [[nodiscard]] bool IsDefault(const Settings& settings, const SettingDescriptor& descriptor);
 void ResetSetting(Settings* settings, const SettingDescriptor& descriptor);
 // True when a row of `section` differs from its default: the section header's "(changed)".
 [[nodiscard]] bool SectionChanged(const Settings& settings, SettingSection section);
 void ResetSection(Settings* settings, SettingSection section);
-// Plan 6 (v2 design §3.16, D6): the look group the Defaults view swaps -- the whole of LOOK (Intensity, the
+// The look group the Defaults view swaps -- the whole of LOOK (Intensity, the
 // Model rows, Pass Count and every pass's own rows included), RESULT, LIMITS and PASSES. Mask and UI
-// correction are not part of it: ui-review.md §3 moved them out of LOOK into their own MASK section. Nor is a
-// pass's "Runs at" or network selection (PASS_STAGE / NETWORK_PRESET).
+// correction belong to MASK and are excluded, as are a pass's "Runs at" or network selection (PASS_STAGE / NETWORK_PRESET).
 [[nodiscard]] bool InDefaultsView(const SettingDescriptor& descriptor);
 // `mine` with the look group at its built-in values. A view only: nothing ever saves it.
 [[nodiscard]] Settings DefaultsView(Settings mine);
-// G2: every row back to its default, the hotkey and the hidden DLSS-SR overrides included, except Enable and BOOKKEEPING rows.
+// Every row back to its default, the hotkey and the hidden DLSS-SR overrides included, except Enable and BOOKKEEPING rows.
 void RestoreAllDefaults(Settings* settings);
 // The value as the overlay shows it: "1.00", "on", "Model A", "automatic", "none", "empty".
 [[nodiscard]] std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settings& settings);
@@ -99,8 +101,11 @@ void RestoreAllDefaults(Settings* settings);
 [[nodiscard]] double DescriptorMax(const SettingDescriptor& descriptor);
 // A FLOAT slider's end: `ui_max` when set, else `max`.
 [[nodiscard]] double SliderMax(const SettingDescriptor& descriptor);
-// The colour fixes' exposure rows the overlay hides (ui-review.md §3 rule 1) while `settings`' Input exposure makes them moot: Adaptation and its rates unless
-// Metered or Auto; 2026-10-09: Auto exposure unless Auto, and Blend unless Auto's Blend.
+// The colour fixes' exposure rows the overlay hides while `settings`' Input exposure makes them moot: Adaptation and its rates unless
+// Metered or Auto; Auto exposure unless Auto, and Blend unless Auto's Blend.
 [[nodiscard]] bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings);
+// Manual exposure is Diffuse white alone, so the overlay shows the Diffuse white row in the Exposure group, under Input exposure, while
+// `settings` says Manual, and in the Colour group otherwise.
+[[nodiscard]] bool DiffuseWhiteInExposureGroup(const Settings& settings);
 
 }  // namespace uplift::ui

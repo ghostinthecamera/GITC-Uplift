@@ -14,6 +14,9 @@
 #include "bridge/bridge_sequence.hpp"
 #include "bridge/d3d11_bridge.hpp"
 #include "bridge/d3d12_side.hpp"
+#include "bridge/motion_share_keep.hpp"
+#include "bridge/private_device_bridge.hpp"
+#include "bridge/share_failure.hpp"
 #include "nr/types.hpp"
 #include "vk/frame.hpp"
 #include "vk/game_host.hpp"
@@ -22,23 +25,29 @@
 
 namespace uplift::bridge {
 
+// The game API's name in the Vulkan bridge's texts ("The Vulkan bridge stopped: ...").
+inline constexpr std::string_view VK_BRIDGE_LABEL = "Vulkan";
+
 // One Vulkan image as the host describes it (vk::ImageInfo, which the 32-bit client shares).
 using VkImageInfo = vk::ImageInfo;
 
-// Plan 11 (Vulkan design §4): a private D3D12 device on a Vulkan game device's adapter, the back buffer's shared copy, and the per-recording
+// A private D3D12 device on a Vulkan game device's adapter, the back buffer's shared copy, and the per-recording
 // hand-off NR runs inside. D3D11Bridge's shape with a Vulkan game side (src/vk/), on the same D3D12Side, RunBridgedFrame, BridgeWatchdog and
 // RecordNr.
-// - GPU-ordered (both Win32 extensions and timeline semaphores): the two shared D3D12 fences are imported as timeline semaphores and the frame is
-//   design §3.2's. CPU-ordered (a device without the semaphore extension): the copy in, a capped CPU wait, NR, a capped CPU wait, the copy out
-//   (§3.3); no fence exists and nothing waits on the GPU.
-// - Every Vulkan call goes through the GameHost (ReShade's API in the add-on) or the src/vk/ Interop; every CPU wait is capped at 2 s, and a
-//   timeout skips that frame. A single one never latches (Plan 9 M-2); three in a row stop the bridge for the session (batch 2 review, minor 4).
+// - GPU-ordered recording follows RunBridgedFrame using the shared D3D12 fences imported as timeline semaphores.
+//   CPU-ordered recording copies in, waits for that copy on the CPU, runs NR, waits for NR on the CPU, then copies out.
+//   Both CPU waits are capped; this path has no shared cross-API fence or cross-API GPU wait.
+// - Every Vulkan call goes through the GameHost (ReShade's API in the add-on) or the src/vk/ Interop; every CPU wait is capped, and a
+//   timeout skips that frame. MAX_CONSECUTIVE_TIMEOUTS in a row stop the bridge for the session.
 // - Not thread-safe: the add-on's lock.
-class VkBridge {
+class VkBridge final : public PrivateDeviceBridge {
  public:
+  // The cap on every CPU wait whose timeout NoteTimeout counts.
+  static constexpr uint32_t WAIT_CAP_MS = 2000u;
+
   // nullptr, with `error` set, when the adapter is not NVIDIA's, the LUID is unknown or the D3D12 side cannot be made. A device that cannot be
   // ordered on the GPU still gets a bridge: it builds CPU-ordered and StatusLine says why. `created` receives the private device as D3D12Side made
-  // it, whether or not this succeeds (on the fallback D3D12CreateDevice's, ReShade's proxy under the Vulkan layer, R56): release it only outside the
+  // it, whether or not this succeeds (on the fallback D3D12CreateDevice's, ReShade's proxy under the Vulkan layer): release it only outside the
   // add-on's lock.
   static std::unique_ptr<VkBridge> Create(vk::Device device, LUID luid, Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
   // Waits up to 2 s for the private queue, then releases the D3D12 side. It frees no Vulkan image: FreeVulkan first (destroy_device).
@@ -46,23 +55,23 @@ class VkBridge {
   VkBridge(const VkBridge&) = delete;
   VkBridge& operator=(const VkBridge&) = delete;
 
-  [[nodiscard]] ID3D12Device* Device() const { return side_->Device(); }
-  [[nodiscard]] ID3D12CommandQueue* Queue() const { return side_->Queue(); }
-  [[nodiscard]] bool Independent() const { return side_->Independent(); }  // D3D12Side::Independent: whether Retry now can replace it
+  [[nodiscard]] ID3D12Device* Device() const override { return side_->Device(); }
+  [[nodiscard]] ID3D12CommandQueue* Queue() const override { return side_->Queue(); }
+  [[nodiscard]] bool Independent() const override { return side_->Independent(); }  // D3D12Side::Independent: whether Retry now can replace it
   [[nodiscard]] const vk::Device& VulkanDevice() const { return interop_.Functions(); }
   // First thing at every present, as D3D11Bridge::BeginFrame: the watchdog (GPU-ordered), the frees of what the queues have passed (both
   // sides), and the description of `back_buffer`; while `running` also the shared copy sized like it. Otherwise, and after a latch, the shared
-  // surfaces are retired (Plan 7 C-1 and Minor 2). `enabled` false forgets failed shares.
-  // Batch 2 review I-1 (a): while `running` and the frame has no problem, the opening global barrier is recorded here, into the runtime queue's
+  // surfaces are retired. `enabled` false forgets failed shares.
+  // While `running` and the frame has no problem, the opening global barrier is recorded here, into the runtime queue's
   // immediate list, in the present event and so before ReShade records its effects: everything the game submitted on that queue finishes before
   // the effects (which Uplift's early flushes submit without the game's present semaphores) and before the copy in.
   BridgeFrame BeginFrame(vk::GameHost& host, const VkImageInfo& back_buffer, bool enabled, bool running, std::chrono::steady_clock::time_point now);
   // One bridged recording. True when NR's result reached `back_buffer`. Nothing runs after the latch, while the ring is busy (which includes a
   // CPU-ordered recording of an earlier frame still in flight after its 2 s wait ran out: both count in BusySkips), without a shared copy, or without an
   // immediate command list. `entry_state`: the back buffer's state in the calling event. `motion`: this frame's UPLIFT_MV (RG16F; image null: none), or,
-  // with `motion_is_dlss` (Plan 14, design §2.4), DLSS's vectors copied in the game's frame (RG16F at the motion region's own size, SHADER_READ_ONLY_OPTIMAL):
+  // with `motion_is_dlss`, DLSS's vectors copied in the game's frame (RG16F at the motion region's own size, SHADER_READ_ONLY_OPTIMAL):
   // the private device binds them as DLSS's copied vectors (the full subrect, a scale of (1, 1)).
-  // `present_host`: design §3.4 case 2, when the game presents from a queue other than the one Uplift records on: that queue is flushed and waited for
+  // `present_host`: when the game presents from a queue other than the one Uplift records on: that queue is flushed and waited for
   // on the CPU (2 s), once per frame (BeginFrame starts a frame), after the skip checks above and before the first thing that could submit work (the
   // copy in, or a motion share's retire fence, which flushes the immediate list); false (this frame goes without NR) when that timed out or failed.
   bool Run(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage entry_state, const VkImageInfo& motion, const Recorder& record,
@@ -70,27 +79,28 @@ class VkBridge {
   // At the end of the effects: UPLIFT_MASK into the shared mask, for the next Run's targets.mask.
   MaskCopy CopyMask(vk::GameHost& host, const VkImageInfo& mask);
   void ReleaseMask(vk::GameHost& host);
-  // Final review I-2 as D3D11Bridge::Stop: no new wait is ever queued again, and both fences are signalled from the CPU up to the highest value a
+  // As D3D11Bridge::Stop: no new wait is ever queued again, and both fences are signalled from the CPU up to the highest value a
   // wait was queued for (which also releases a Vulkan wait on the imported semaphore, the same kernel object). Before DeviceContext::Teardown.
   // Every latch ends here too (LatchVulkan), so a private queue never waits for a signal a lost device will not make.
-  void Stop(std::string reason);
-  // Plan 17: Retry now, after Stop, at a present (a host with the runtime's queue): the shared images and the two imported semaphores go behind fences
-  // submitted now (Plan 14's rule: the game's queue may still use them), and FreeRetired frees them once that queue has passed those fences. True from
+  void Stop(std::string reason) override;
+  // Retry now, after Stop, at a present (a host with the runtime's queue): the shared images and the two imported semaphores go behind fences
+  // submitted now (the game's queue may still use them), and FreeRetired frees them once that queue has passed those fences. True from
   // FreeRetired when nothing Vulkan is left (the wait fences went too): the bridge can then be destroyed.
   void RetireAll(vk::GameHost& host);
   bool FreeRetired(vk::GameHost& host);
-  // destroy_device, after Stop: every Vulkan object (key decision f, R62). `host` needs only the device; nothing here calls a Vulkan function that
+  // destroy_device, after Stop: every Vulkan object. `host` needs only the device; nothing here calls a Vulkan function that
   // ReShade's layer intercepts. The D3D12 resources stay for the destructor.
   void FreeVulkan(vk::GameHost& host);
   // The game presents from a second queue (logged and shown once by the caller).
   void NoteSecondQueue() { second_queue_ = true; }
   [[nodiscard]] bool GpuOrdered() const { return gpu_ordered_; }
-  [[nodiscard]] uint64_t SharedBytes() const;
-  // Plan 19: `route_reason`, why NR at Present runs here rather than natively on the game's device, follows "a private Direct3D 12 device: ".
+  [[nodiscard]] uint64_t SharedBytes() const override;
+  // `route_reason`, why NR at Present runs here rather than natively on the game's device, follows "a private Direct3D 12 device: ".
   [[nodiscard]] std::string StatusLine(std::string_view route_reason = {}) const;
-  [[nodiscard]] bool Stopped() const { return !latch_.empty(); }
-  [[nodiscard]] std::string_view Latch() const { return latch_; }  // Plan 17: the card's reason; empty while it runs
-  [[nodiscard]] uint64_t BusySkips() const { return busy_skips_; }
+  [[nodiscard]] bool Stopped() const override { return !latch_.empty(); }
+  [[nodiscard]] std::string_view Latch() const override { return latch_; }  // the card's reason; empty while it runs
+  [[nodiscard]] uint64_t BusySkips() const override { return busy_skips_; }
+  [[nodiscard]] std::string_view Label() const override { return VK_BRIDGE_LABEL; }
 
  private:
   explicit VkBridge(vk::Device device) : interop_(std::move(device)) {}
@@ -104,22 +114,18 @@ class VkBridge {
     uint64_t bytes = 0u;
     uint64_t last_use = 0u;  // the side's progress value after the newest submitted recording that used it
   };
-  // A share that failed: retried only for another size or format, or after NR is re-enabled (Plan 7 Minor 3).
-  struct ShareFailure {
-    nr::Size size;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    std::string what;  // the failing call: an HRESULT on the private device, or a Vulkan step and result
-    [[nodiscard]] bool Matches(nr::Size other_size, DXGI_FORMAT other_format) const { return size == other_size && format == other_format; }
-  };
+  // A share that failed, with the failing call: an HRESULT on the private device, or a Vulkan step and result. Retried only for another size or format,
+  // or after NR is re-enabled.
+  using ShareFailure = ShareFailureOf<std::string>;
 
   // Creates `shared` in COMMON on the private device and imports it. False, leaving `shared` untouched, on failure; `failure` says which call.
   bool CreateShared(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, uint32_t bytes_per_pixel, const wchar_t* name, Shared* shared,
                     std::string* failure);
   // Latches the bridge: "The Vulkan bridge stopped: <failure>" (a lost device says so
-  // instead), and Stops it (design §6: a device loss stops the bridge).
+  // instead), and Stops it (a device loss stops the bridge).
   void LatchVulkan(std::string_view failure);
-  // A capped wait ran its full 2 s: counted in `consecutive` (reset by the caller when that kind of wait finishes). At the third in a row the
-  // bridge latches, with `what` in its Details text, so a game whose queue work cannot finish does not pay 2 s for every frame.
+  // Count a capped wait timeout in consecutive; MAX_CONSECUTIVE_TIMEOUTS latches with the operation in Details, avoiding repeated stalls.
+  // Callers own the reset point.
   void NoteTimeout(uint32_t* consecutive, std::string_view what);
   // Retires both halves of `shared` (the D3D12 one by the side's progress, the Vulkan one behind a fence) and empties it.
   void Retire(vk::GameHost& host, Shared* shared);
@@ -138,8 +144,8 @@ class VkBridge {
   std::unique_ptr<D3D12Side> side_;
   vk::Interop interop_;
   bool gpu_ordered_ = false;
-  std::string cpu_reason_;  // why CPU-ordered (design §8's reason), when it is
-  // GPU-ordered only: one shared fence per direction, each signalled by one queue only, in increasing order (Plan 7 I-2), and each imported as a
+  std::string cpu_reason_;  // why CPU-ordered, when it is
+  // GPU-ordered only: one shared fence per direction, each signalled by one queue only, in increasing order, and each imported as a
   // timeline semaphore in the game's device.
   Microsoft::WRL::ComPtr<ID3D12Fence> to12_;  // Vulkan -> D3D12: odd values, the game's queue signals, the private queue waits
   Microsoft::WRL::ComPtr<ID3D12Fence> to11_;  // D3D12 -> Vulkan: even values, the private queue signals, the game's queue waits
@@ -148,10 +154,7 @@ class VkBridge {
   Shared color_;
   Shared mask_;
   Shared motion_;
-  // Flicker fix: recordings in a row that came without motion. The share is kept through a short gap (MOTION_KEEP_PRESENTS) instead of being retired and
-  // made again at every missed frame; it goes once the motion stops for longer, as before.
-  uint32_t motion_gap_presents_ = 0u;
-  static constexpr uint32_t MOTION_KEEP_PRESENTS = 30u;
+  MotionShareKeep motion_keep_;  // the run of recordings without motion while motion_ is held
   bool mask_fresh_ = false;  // CopyMask wrote mask_ since the last recording
   std::optional<ShareFailure> color_failure_;
   std::optional<ShareFailure> mask_failure_;
@@ -164,7 +167,7 @@ class VkBridge {
   uint32_t present_queue_timeouts_ = 0u;  // consecutive 2 s timeouts of the present-queue wait
   uint32_t cpu_timeouts_ = 0u;            // consecutive 2 s timeouts of the CPU-ordered path's waits, reset by a frame that got through
   bool second_queue_ = false;
-  bool present_synced_ = false;      // this frame's present-queue wait (design §3.4 case 2) is done; BeginFrame clears it
+  bool present_synced_ = false;      // this frame's present-queue wait is done; BeginFrame clears it
   bool ran_logged_ = false;          // "NR ran on the game's frame" was logged since NR was last off
   HANDLE progress_event_ = nullptr;  // CPU-ordered: the private queue's completion wait
   std::string problem_;              // the back buffer's problem, logged once per change

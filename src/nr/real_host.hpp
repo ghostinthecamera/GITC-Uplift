@@ -13,7 +13,7 @@ namespace uplift::nr {
 
 class RealHost final : public Host {
  public:
-  // Plan 9 (design §2.10): `game_memory`, when set and it returns a value, is the game process's own DXGI budget and
+  // `game_memory`, when set and it returns a value, is the game process's own DXGI budget and
   // usage. The 32-bit helper is a second process on the same adapter, so QueryMemory reports the tighter of the two.
   RealHost(ID3D12Device* device, SnippetConfig config, std::function<std::optional<MemoryInfo>()> game_memory = {});
   ~RealHost() override;

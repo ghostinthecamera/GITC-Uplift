@@ -18,13 +18,13 @@
 namespace uplift::color {
 
 // An image view read as a sampled image, and the layout the image is in for the read: GENERAL for Uplift's own images, SHADER_READ_ONLY_OPTIMAL for the
-// game's (design R79). A null view binds the placeholder.
+// game's. A null view binds the placeholder.
 struct VkSampledView {
   VkImageView view = VK_NULL_HANDLE;
   VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL;
 };
 
-// The encode (v2 design §3.4 step 3): the source region into the model texture A.
+// The encode: the source region into the model texture A.
 struct VkEncodePass {
   // After DLSS: DLSS's Output in place, a storage view in GENERAL of `source_format` (one of OutputVariantOf's); Before upscaling: the game's Color as a
   // sampled view (`source_format` VK_FORMAT_UNDEFINED, `source_layout` its layout).
@@ -66,11 +66,11 @@ struct VkDecodePass {
   uint32_t source_y = 0u;
   std::optional<Upsampling> upsampling;  // unset: direct change-field reads; set: resample from the work size
   uint32_t options = 0u;                 // shader_options (the primaries, Consistent)
-  float chroma_clamp = 0.f;              // Plan 14 (F14): stops; 0 = off
-  VkSampledView mask;                    // Plan 14 (§3.13): the mask copy, SHADER_READ_ONLY_OPTIMAL; null = none
+  float chroma_clamp = 0.f;              // stops; 0 = off
+  VkSampledView mask;                    // the mask copy, SHADER_READ_ONLY_OPTIMAL; null = none
 };
 
-// Amendment 7 and v2 design §3.9: the game's motion vectors into an Uplift RG16F image, in destination pixels (Before upscaling's canvas).
+// The game's motion vectors into an Uplift RG16F image, in destination pixels (Before upscaling's canvas).
 struct VkMotionPass {
   VkSampledView source;                 // the game's motion vectors
   nr::Rect region;                      // their region in `source`
@@ -81,10 +81,10 @@ struct VkMotionPass {
   float scale_y = 1.f;
   float offset_x = 0.f;  // added in destination pixels, before any vertical flip
   float offset_y = 0.f;
-  bool flip_y = false;                  // 1.1.6: `source` is upside down against `target` (motion_cs.hlsl)
+  bool flip_y = false;                  // `source` is upside down against `target` (motion_cs.hlsl)
 };
 
-// Plan 14 (v2 design §3.7): NR's change field at the work image size, from the model input recomputed exactly as `encode` computed it (a later pass may
+// NR's change field at the work image size, from the model input recomputed exactly as `encode` computed it (a later pass may
 // have overwritten A) and NR's output: the encode in its change mode.
 struct VkChangePass {
   VkEncodePass encode;                     // the encode that fed NR; its model and motion are not used
@@ -94,7 +94,7 @@ struct VkChangePass {
   VkImageView model_input = VK_NULL_HANDLE;  // preserved FP16 NR input when one pass ran; otherwise recompute from encode.source
 };
 
-// Plan 14 (v2 design §3.12): the Gaussian pyramid of C and the max pyramid of ℓ_M, levels 1..K, in two atlases. Every image GENERAL.
+// The Gaussian pyramid of C and the max pyramid of ℓ_M, levels 1..K, in two atlases. Every image GENERAL.
 struct VkPyramidPass {
   VkImageView change = VK_NULL_HANDLE;  // C, sampled
   VkImageView gauss = VK_NULL_HANDLE;   // RGBA16F storage atlas
@@ -110,7 +110,7 @@ struct VkStabilizeMotion {
   float scale_y = 1.f;
 };
 
-// Plan 14 (v2 design §3.12, amendment 4): RecordStabilize runs the scene cut and the two levels the low band reads; RecordDetail runs the fine band at the
+// RecordStabilize runs the scene cut and the two levels the low band reads; RecordDetail runs the fine band at the
 // work size. Every image GENERAL.
 struct VkStabilizePass {
   VkImageView gauss = VK_NULL_HANDLE;     // sampled
@@ -126,7 +126,7 @@ struct VkStabilizePass {
   VkStabilizeMotion motion;
 };
 
-// Plan 14 (v2 design §3.11/§3.12): C rewritten in place with the shaped change. Every image GENERAL.
+// C rewritten in place with the shaped change. Every image GENERAL.
 struct VkShapePass {
   VkImageView change = VK_NULL_HANDLE;   // C, RGBA16F storage
   VkImageView basis = VK_NULL_HANDLE;    // κ_M, sampled
@@ -140,7 +140,7 @@ struct VkShapePass {
   bool sdr = false;
 };
 
-// Plan 14 Task 10 (v2 design §3.14, amendment 2): the exposure meter and governor, one thread group before the encode. The state image's x is the encode's
+// The exposure meter and governor, one thread group before the encode. The state image's x is the encode's
 // and the decode's exposure multiplier.
 struct VkMeterPass {
   // Read as the encode reads its source: DLSS's Output in place (a storage view in GENERAL of `source_format`), or the game's Color as a sampled view
@@ -158,14 +158,14 @@ struct VkMeterPass {
   float brighter_rate = 2.f;
   float darker_rate = 0.7f;
   float frame_seconds = 1.f / 60.f;
-  // Plan 17: Input exposure = Auto's check, as Direct3D 12's MeterPass: the game's exposure (a sampled view, or none) and its target into texel (1, 0).
+  // Input exposure = Auto's check, as Direct3D 12's MeterPass: the game's exposure (a sampled view, or none) and its target into texel (1, 0).
   bool probe = false;
   VkSampledView game_exposure;
   float game_exposure_factor = 1.f;
-  float game_weight = 0.f;  // 2026-10-09, Auto's Blend (with `probe`), as Direct3D 12's MeterPass
+  float game_weight = 0.f;  // Auto's Blend (with `probe`), as Direct3D 12's MeterPass
 };
 
-// Plan 14 Task 10 (v2 design §3.10): pass n's own Transfer and Colour strength, applied to its raw output in place. Every image GENERAL.
+// Each pass's own Transfer and Colour strength, applied to its raw output in place. Every image GENERAL.
 struct VkResolvePass {
   VkImageView given = VK_NULL_HANDLE;     // what the pass was given: RGBA16F, sampled
   VkImageView returned = VK_NULL_HANDLE;  // what it returned: RGBA16F storage, rewritten
@@ -174,31 +174,32 @@ struct VkResolvePass {
   float color_strength = 1.f;
 };
 
-// Keep faces (2026-10-08): ColorPipeline's FacesPass on Vulkan (shaders/faces_cs.hlsl). Every image RGBA16F in GENERAL, at the canvas (the atlas:
+// Keep faces: ColorPipeline's FacesPass on Vulkan (shaders/faces_cs.hlsl). Every image RGBA16F in GENERAL, at the canvas (the atlas:
 // look::MakeAtlas of it).
 struct VkFacesPass {
   VkImageView changed = VK_NULL_HANDLE;    // pass 1's raw output, or a later pass's: sampled by the pyramid, rewritten (storage) by the combine
   VkImageView reference = VK_NULL_HANDLE;  // the twin's output (pass 1: rewritten by the combine with the face mask), or a later pass's input
   VkImageView mask = VK_NULL_HANDLE;       // a later pass: pass 1's face mask (the twin's image); null: pass 1
   VkImageView atlas = VK_NULL_HANDLE;      // the pyramid: storage for RecordFacesPyramid, sampled by RecordFacesCombine
-  VkImageView detail = VK_NULL_HANDLE;     // fix round 4: the despiked difference: storage for RecordFacesDespike, sampled by RecordFacesCombine
-  VkImageView fill = VK_NULL_HANDLE;       // round 5: the fill's atlas (pass 1 with parameters.fill): storage for the pyramid, sampled by the combine
+  VkImageView detail = VK_NULL_HANDLE;     // the despiked difference: storage for RecordFacesDespike, sampled by RecordFacesCombine
+  VkImageView fill = VK_NULL_HANDLE;       // the fill's atlas (pass 1 with parameters.fill): storage for the pyramid, sampled by the combine
   look::Atlas layout;
   look::FacesParameters parameters;
 };
 
-// The SPIR-V twin of ColorPipeline's compute side (design §4.2): one push-descriptor set layout (sampled images 0-4, storage images 16-18, a uniform
-// buffer 32), one pipeline layout, compute pipelines made per variant on first use, a host-visible coherent constants ring (RING_SLOTS recordings x 94
-// slots x 256 B: Plan 14's look, meter and resolve passes, one slot per dispatch, and Keep faces' 52), and two 1x1 placeholders (RGBA16F sampled + storage, RG16F storage) for the bindings a
-// pass leaves empty. ReShade-free: raw Vulkan through vk::NrFunctions. Never blocks. Not thread-safe: the caller's lock.
+// The SPIR-V compute implementation of ColorPipeline: one push-descriptor layout (sampled images 0-4, storage images 16-18, a uniform buffer 32),
+// one pipeline layout and lazily built variant pipelines.
+// A host-visible coherent constants ring gives every dispatch its own slot (RING_BYTES in vk_color_pipeline.cpp: RING_SLOTS recordings x
+// PASSES_PER_RECORDING slots x CONSTANTS_STRIDE). Unused image bindings use RGBA16F sampled/storage and RG16F storage placeholders.
+// ReShade-free: raw Vulkan through vk::NrFunctions. Never blocks. Not thread-safe: the caller's lock.
 class VkColorPipeline {
  public:
   // As ColorPipeline: reused only after the slot's mark completed.
   static constexpr uint32_t RING_SLOTS = 128u;
   // The output formats a DLSS Output can have here (an sRGB-typed or BGRA view cannot be a storage image of these).
   static constexpr uint32_t OUTPUT_VARIANTS = 5u;
-  // Passes 2..10 each have one resolve (the Session's passes are at most MAX_PASSES = 10).
-  static constexpr uint32_t RESOLVE_PASSES = 9u;
+  // Every pass after the first has one resolve.
+  static constexpr uint32_t RESOLVE_PASSES = nr::MAX_PASSES - 1u;
 
   VkColorPipeline() = default;
   ~VkColorPipeline();
@@ -211,40 +212,40 @@ class VkColorPipeline {
   void Destroy();
   // Once per recording, before its first pass: moves the placeholders UNDEFINED -> GENERAL (their contents are never read).
   void PrepareRecording(VkCommandBuffer buffer);
-  // Batch 2 review (minor 3): builds every pipeline an in-place recording of `output_format` needs, the encode, the decode and (Plan 14) the three look
+  // Builds every pipeline an in-place recording of `output_format` needs, the encode, the decode and the three look
   // passes, so a variant that cannot be built is known before anything is recorded (and the ms-scale first compile can run outside the hooked evaluate:
   // the caller warms it at enable). True when all exist. False for a format without a variant, or when one could not be built (logged once, never
   // retried).
   bool Prepare(VkFormat output_format);
-  // Batch 3 review, minor 5: all of `output_format`'s pipelines exist already (Prepare would build nothing). Never builds.
+  // All of `output_format`'s pipelines exist already (Prepare would build nothing). Never builds.
   [[nodiscard]] bool Prepared(VkFormat output_format) const;
-  // Task 10: the same for Before upscaling, which needs the sampled encode, the private-colour decode, the motion copy, the sampled meter and the look
+  // The same for Before upscaling, which needs the sampled encode, the private-colour decode, the motion copy, the sampled meter and the look
   // passes whatever the game's formats are.
   bool PreparePreSr();
-  // Plan 14: the motion copy alone (DLSS's vectors copied for the Present path), built now so its first compile stays out of the hooked evaluate.
+  // The motion copy alone (DLSS's vectors copied for the Present path), built now so its first compile stays out of the hooked evaluate.
   bool PrepareMotion();
   [[nodiscard]] bool Initialized() const { return ring_ != nullptr; }
   // Each: false (logged once) when `slot` is out of range or the variant's pipeline could not be made; nothing is recorded then.
   bool RecordEncode(VkCommandBuffer buffer, uint32_t slot, const VkEncodePass& pass);  // After DLSS (storage source) or Before upscaling (sampled)
   bool RecordDecode(VkCommandBuffer buffer, uint32_t slot, const VkDecodePass& pass);  // in place, or into the private colour
   bool RecordMotion(VkCommandBuffer buffer, uint32_t slot, const VkMotionPass& pass);  // Before upscaling's canvas motion
-  // Plan 14, Direct3D 12's look passes with their constants verbatim. A global barrier comes between the dispatches inside one call (a pyramid level
+  // Direct3D 12's look passes with their constants verbatim. A global barrier comes between the dispatches inside one call (a pyramid level
   // reads the one before; the levels read the scene cut); the caller orders one call after another.
   bool RecordChange(VkCommandBuffer buffer, uint32_t slot, const VkChangePass& pass);
   bool RecordPyramid(VkCommandBuffer buffer, uint32_t slot, const VkPyramidPass& pass);  // one dispatch per level
   bool RecordStabilize(VkCommandBuffer buffer, uint32_t slot, const VkStabilizePass& pass);
   bool RecordDetail(VkCommandBuffer buffer, uint32_t slot, const VkStabilizePass& pass);
   bool RecordShape(VkCommandBuffer buffer, uint32_t slot, const VkShapePass& pass);
-  // Plan 14 Task 10: the meter before the encode; and pass `index`'s (1..RESOLVE_PASSES: passes 2..10) own strengths between NR's passes.
+  // The meter before the encode; and pass `index`'s (1..RESOLVE_PASSES: passes 2..10) own strengths between NR's passes.
   bool RecordMeter(VkCommandBuffer buffer, uint32_t slot, const VkMeterPass& pass);
   bool RecordResolve(VkCommandBuffer buffer, uint32_t slot, uint32_t index, const VkResolvePass& pass);
   // Keep faces: the pyramid of a pass's weighted change (one dispatch per level, a barrier between them), the combine, and Show the face mask's tint of
   // `mask` into `target` at `size`. The later passes of one recording share their constants' ring slots: theirs are the same.
   [[nodiscard]] bool FacesReady() const;  // the Keep faces pipeline exists (Prepare, PreparePreSr build it); never builds
-  [[nodiscard]] bool FacesFailed() const;  // fix round 1 (M2): building it was tried and failed: Keep faces is unavailable on this device
+  [[nodiscard]] bool FacesFailed() const;  // building it was tried and failed: Keep faces is unavailable on this device
   bool RecordFacesPyramid(VkCommandBuffer buffer, uint32_t slot, const VkFacesPass& pass);
   bool RecordFacesCombine(VkCommandBuffer buffer, uint32_t slot, const VkFacesPass& pass);
-  bool RecordFacesDespike(VkCommandBuffer buffer, uint32_t slot, const VkFacesPass& pass);  // fix round 4: `changed` - `reference` into `detail`
+  bool RecordFacesDespike(VkCommandBuffer buffer, uint32_t slot, const VkFacesPass& pass);  // `changed` - `reference` into `detail`
   bool RecordFacesShow(VkCommandBuffer buffer, uint32_t slot, VkImageView target, VkImageView mask, nr::Size size);
   // The variant for a DLSS Output view format; nullopt: "unsupported format".
   [[nodiscard]] static std::optional<uint32_t> OutputVariantOf(VkFormat format);
@@ -263,7 +264,7 @@ class VkColorPipeline {
   // The encode's pipeline for `pass` (its in-place variant, or the sampled one); VK_NULL_HANDLE when there is none.
   VkPipeline EncodePipelineFor(const VkEncodePass& pass);
   // Writes `constants` into the ring slot of (`slot`, `pass`), binds `pipeline`, pushes the set, and dispatches width x height in 8x8 groups.
-  void Dispatch(VkCommandBuffer buffer, VkPipeline pipeline, uint32_t slot, uint32_t pass, std::span<const uint32_t> constants, const Bindings& bindings,
+  void Dispatch(VkCommandBuffer buffer, VkPipeline pipeline, uint32_t slot, uint32_t pass, std::span<const std::byte> constants, const Bindings& bindings,
                 uint32_t width, uint32_t height);
   // Compute writes so far are visible to the compute reads and writes after.
   void ComputeBarrier(VkCommandBuffer buffer) const;

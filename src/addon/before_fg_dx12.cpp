@@ -1,10 +1,14 @@
 #include "addon/before_fg_dx12.hpp"
 #include <algorithm>
+#include "text/before_fg_messages.hpp"
 
 namespace uplift::addon {
 namespace {
 using Microsoft::WRL::ComPtr;
+// Identifies the BeforeFgDx12 route stored on the game-facing swapchain by Attach() and read by Find().
 constexpr GUID ROUTE_ID = {0xfe799951,0xa813,0x4df1,{0xa9,0x0f,0xab,0x91,0xf2,0x11,0xcc,0x7a}};
+// Requests the underlying COM object from a ReShade wrapper. If unsupported, Native() silently queries the original
+// object for the requested interface instead, retaining the proxy when one was supplied.
 constexpr GUID RESHADE_UNWRAP = {0x7f2c9a11,0x3b4e,0x4d6a,{0x81,0x2f,0x5e,0x9c,0xd3,0x7a,0x1b,0x42}};
 
 template<class T>
@@ -98,34 +102,34 @@ void BeforeFgDx12::ColorSpace(DXGI_COLOR_SPACE_TYPE space) {
 }
 
 BeforeFgDx12::Result BeforeFgDx12::Record(IDXGISwapChain* chain, ID3D12Device* device, DeviceContext& context,
-                                           const FrameConfig& config, std::chrono::steady_clock::time_point now) {
+                                           const FrameSettings& settings, const FrameFacts& facts, std::chrono::steady_clock::time_point now) {
   std::lock_guard lock(mutex_);
-  if (retry_.exchange(false)) return {.reason = "Waiting for a successful Present after a failed or occluded frame"};
-  if (!supported_space_ && config.encoding == color::Encoding::AUTO) return {.reason = "Unsupported outer swapchain color space"};
+  if (retry_.exchange(false)) return {.reason = uplift::text::WAIT_SUCCESSFUL_PRESENT_LINE};
+  if (!supported_space_ && settings.encoding == color::Encoding::AUTO) return {.reason = uplift::text::OUTER_COLOR_SPACE_LINE};
   ComPtr<IDXGISwapChain3> chain3;
-  if (FAILED(chain->QueryInterface(IID_PPV_ARGS(&chain3)))) return {.reason = "Cannot identify the real backbuffer"};
+  if (FAILED(chain->QueryInterface(IID_PPV_ARGS(&chain3)))) return {.reason = uplift::text::REAL_BACKBUFFER_UNKNOWN_LINE};
   const UINT index = chain3->GetCurrentBackBufferIndex();
   const size_t slot = queues_.size() == 1u ? 0u : index;
-  if (slot >= queues_.size() || !queues_[slot].native) return {.reason = "No queue for the real backbuffer"};
+  if (slot >= queues_.size() || !queues_[slot].native) return {.reason = uplift::text::REAL_BACKBUFFER_QUEUE_LINE};
   auto& queue = queues_[slot];
   ComPtr<ID3D12Device> queue_device;
-  if (FAILED(queue.native->GetDevice(IID_PPV_ARGS(&queue_device))) || Native<ID3D12Device>(queue_device.Get()).Get() != device) return {.reason = "Outer queue belongs to a different device"};
+  if (FAILED(queue.native->GetDevice(IID_PPV_ARGS(&queue_device))) || Native<ID3D12Device>(queue_device.Get()).Get() != device) return {.reason = uplift::text::OUTER_QUEUE_DEVICE_LINE};
   ComPtr<ID3D12Resource> backbuffer;
-  if (FAILED(chain3->GetBuffer(index, IID_PPV_ARGS(&backbuffer)))) return {.reason = "Could not get the real backbuffer"};
+  if (FAILED(chain3->GetBuffer(index, IID_PPV_ARGS(&backbuffer)))) return {.reason = uplift::text::REAL_BACKBUFFER_UNAVAILABLE_LINE};
   ComPtr<ID3D12Resource> native = Native<ID3D12Resource>(backbuffer.Get());
   ComPtr<ID3D12Device> buffer_device;
-  if (!native || FAILED(native->GetDevice(IID_PPV_ARGS(&buffer_device))) || Native<ID3D12Device>(buffer_device.Get()).Get() != device) return {.reason = "Outer image belongs to a different device"};
-  const auto trigger = context.BeginFrame(queue.native.Get(), config, {.resource = native.Get(), .color_space = space_}, false, now);
+  if (!native || FAILED(native->GetDevice(IID_PPV_ARGS(&buffer_device))) || Native<ID3D12Device>(buffer_device.Get()).Get() != device) return {.reason = uplift::text::OUTER_IMAGE_DEVICE_LINE};
+  const auto trigger = context.BeginFrame(queue.native.Get(), settings, facts, {.resource = native.Get(), .color_space = space_}, false, now);
   if (trigger == TriggerPoint::NONE || context.NrState() != nr::SessionState::ACTIVE) return {};
   if (!queue.ring) queue.ring = bridge::D3D12Side::OnGameQueue(queue.native.Get());
-  if (!queue.ring) return {.reason = "Could not create the real-frame command list"};
+  if (!queue.ring) return {.reason = uplift::text::REAL_FRAME_COMMAND_LIST_LINE};
   auto* list = queue.ring->BeginList();
-  if (!list) return {.reason = "Real-frame recording still in use"};
+  if (!list) return {.reason = uplift::text::REAL_FRAME_RECORDING_BUSY_LINE};
   GameList host(list, native.Get());
   struct Close { bridge::D3D12Side& ring; ~Close() { ring.CloseList(); } } close{*queue.ring};
   const auto result = context.Run(&host, D3D12_RESOURCE_STATE_PRESENT, trigger);
-  if (host.touched && (!queue.ring->ExecuteList() || !queue.ring->SignalProgress(queue.ring->LastSignalled() + 1u))) return {.reason = "Real-frame command submission failed"};
-  return {.passes = result.nr_applied ? result.passes_run : 0u, .reason = result.reason};
+  if (host.touched && (!queue.ring->ExecuteList() || !queue.ring->SignalProgress(queue.ring->LastSignalled() + 1u))) return {.reason = uplift::text::REAL_FRAME_SUBMISSION_LINE};
+  return {.passes = result.nr_applied ? result.passes_run : 0u, .reason = nr::SkipReasonText(result.reason)};
 }
 
 }  // namespace uplift::addon

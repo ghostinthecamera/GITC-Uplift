@@ -6,11 +6,23 @@
 #include <cstdint>
 
 #include "addon/environment.hpp"
+#include "text/nr_messages.hpp"
 
 namespace uplift::addon {
 namespace {
 
 namespace api = reshade::api;
+
+// ReShade 6.8 added adapter_luid immediately after shader_group_handle_alignment; the pinned headers predate it.
+constexpr api::device_properties ADAPTER_LUID_PROPERTY = static_cast<api::device_properties>(9);
+
+template <class Properties>
+concept HasNamedAdapterLuid = requires { Properties::adapter_luid; };
+
+static_assert(static_cast<uint32_t>(api::device_properties::shader_group_handle_alignment) == 8u,
+              "Recheck the adapter-LUID property mapping against the updated ReShade headers.");
+static_assert(!HasNamedAdapterLuid<api::device_properties>,
+              "Replace the cast with api::device_properties::adapter_luid and remove this compatibility guard.");
 
 // vk::Usage is ReShade's api::resource_usage, numbered the same (reshade_api_resource.hpp).
 static_assert(static_cast<uint32_t>(vk::Usage::UNDEFINED) == static_cast<uint32_t>(api::resource_usage::undefined));
@@ -43,10 +55,10 @@ vk::ImageInfo VulkanImageInfo(api::device* device, api::resource resource) {
 bool VulkanAdapterLuid(api::device* device, LUID* luid, std::string* error) {
   uint32_t vendor_id = 0u;
   if (!device->get_property(api::device_properties::vendor_id, &vendor_id) || vendor_id != NVIDIA_VENDOR_ID) {
-    *error = "Uplift needs an NVIDIA GPU; this game renders on another adapter";
+    *error = uplift::text::NVIDIA_GPU_REQUIRED_LINE;
     return false;
   }
-  bool found = device->get_property(static_cast<api::device_properties>(9), luid);
+  bool found = device->get_property(ADAPTER_LUID_PROPERTY, luid);
   if (!found) {
     Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
     Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;

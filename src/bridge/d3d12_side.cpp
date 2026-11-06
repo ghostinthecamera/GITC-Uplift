@@ -10,6 +10,7 @@
 #include "addon/dred.hpp"
 #include "addon/environment.hpp"
 #include "nr/log.hpp"
+#include "text/nr_messages.hpp"
 
 namespace uplift::bridge {
 namespace {
@@ -17,9 +18,9 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr DWORD DRAIN_WAIT_MS = 2000u;  // as DeviceContext::Teardown's cap
-// Plan 17 (1.0.1 design §4): DRED's auto-breadcrumbs on Uplift's private devices; page-fault reporting is always on.
+// DRED's auto-breadcrumbs on Uplift's private devices; page-fault reporting is always on.
 constexpr bool DRED_BREADCRUMBS = true;
-// Plan 17: CLSID_D3D12DeviceFactory (d3d12.h declares it; no import library defines it).
+// CLSID_D3D12DeviceFactory (d3d12.h declares it; no import library defines it).
 constexpr GUID DEVICE_FACTORY = {0x114863bfu, 0xc386u, 0x4aeeu, {0xb3u, 0x9du, 0x8fu, 0x0bu, 0xbbu, 0x06u, 0x29u, 0x55u}};
 
 using GetInterfaceFunction = HRESULT(WINAPI*)(REFCLSID, REFIID, void**);
@@ -60,14 +61,14 @@ std::unique_ptr<D3D12Side> D3D12Side::Create(LUID luid, ComPtr<ID3D12Device>* cr
   }
   // WARP and other vendors are refused, as on D3D12 (addon::IsNvidiaDevice); cross-adapter sharing is out of scope.
   if (adapter_description.VendorId != addon::NVIDIA_VENDOR_ID) {
-    return fail("Uplift needs an NVIDIA GPU; this game renders on another adapter");
+    return fail(uplift::text::NVIDIA_GPU_REQUIRED_LINE);
   }
-  // Plan 17: DRED on Uplift's private devices (this is the only place they are made), decided before the first one exists (the DRED cost case's control
+  // DRED on Uplift's private devices (this is the only place they are made), decided before the first one exists (the DRED cost case's control
   // has decided it off already). The settings are written below, on the factory, or process-wide only on the fallback.
   addon::DecideDred(DRED_BREADCRUMBS ? addon::DredMode::BREADCRUMBS_AND_PAGE_FAULTS : addon::DredMode::PAGE_FAULTS);
-  // Plan 17 (Retry now), test phase: every private device is an independent one from the device factory where the D3D12 runtime and the driver have
+  // Every private device is an independent one from the device factory where the D3D12 runtime and the driver have
   // independent devices (Windows 11 24H2's inbox runtime, or a game's newer Agility SDK), never the adapter's singleton. A removed singleton lives on while
-  // the NR runtime abandoned on it holds it (spec §13: nothing of it is called again), and while it does the runtime refuses EVERY new device on that adapter
+  // the NR runtime abandoned on it holds it (nothing of it is called again), and while it does the runtime refuses EVERY new device on that adapter
   // with DXGI_ERROR_DEVICE_REMOVED, D3D12CreateDevice and the device factory alike (whatever its flags, measured on 617.14). A removed independent device
   // blocks nothing. Not a ReShade proxy either (ReShade does not wrap the factory): the native device is used for all work anyway.
   HRESULT factory_result = E_NOINTERFACE;
@@ -111,7 +112,7 @@ std::unique_ptr<D3D12Side> D3D12Side::Create(LUID luid, ComPtr<ID3D12Device>* cr
              "({:#010x}), so a stop of NR on it is final until the game restarts", static_cast<uint32_t>(factory_result));
   }
   side->created_ = *created;
-  // Key decision a: ReShade forwards CreateFence unwrapped, so the fence's own device is the native one.
+  // ReShade forwards CreateFence unwrapped, so the fence's own device is the native one.
   if (FAILED((*created)->CreateFence(0u, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&side->progress_)))
       || FAILED(side->progress_->GetDevice(IID_PPV_ARGS(&side->device_)))) {
     return fail("the progress fence could not be created");
@@ -138,7 +139,7 @@ std::unique_ptr<D3D12Side> D3D12Side::OnGameQueue(ID3D12CommandQueue* native_que
 
 bool D3D12Side::CreateListRing() {
   ID3D12Device* const native = device_.Get();
-  progress_->SetName(L"Uplift progress fence");  // Plan 17: names DRED's breadcrumbs and page faults can show
+  progress_->SetName(L"Uplift progress fence");  // names DRED's breadcrumbs and page faults can show
   for (size_t index = 0u; index < RING; ++index) {
     Slot& slot = ring_[index];
     if (FAILED(native->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator)))) {

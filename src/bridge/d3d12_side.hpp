@@ -13,14 +13,14 @@
 
 namespace uplift::bridge {
 
-// Plan 9 (design §2.5): a private D3D12 device on one adapter, its direct queue, a ring of allocators with a busy skip,
-// one list, the `progress` fence, and the retire rule for surfaces the queue may still read. From Plan 7's D3D11Bridge,
-// which now composes it; the helper's transports sit on it too. ReShade-free; not thread-safe.
+// A private D3D12 device, direct queue, allocator ring, command list, progress fence and retirement list.
+// Bridges and helper transports compose this state. A busy allocator skips NR; retired surfaces remain alive until their queue progress completes.
+// ReShade-free; not thread-safe.
 class D3D12Side {
  public:
   // nullptr + error when the adapter is not NVIDIA's or a D3D12 object cannot be made. `created` receives the device as made:
   // an independent one from the device factory, or without one D3D12CreateDevice's (ReShade's proxy in a game): release it
-  // only outside the add-on's lock. The native device comes from the progress fence's GetDevice (Plan 7 key decision a).
+  // only outside the add-on's lock. The native device comes from the progress fence's GetDevice.
   static std::unique_ptr<D3D12Side> Create(LUID luid, Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
   static std::unique_ptr<D3D12Side> OnGameQueue(ID3D12CommandQueue* native_queue);
   ~D3D12Side();  // waits up to 2 s for the last signalled progress value, then releases, the created device last
@@ -40,17 +40,17 @@ class D3D12Side {
                        Microsoft::WRL::ComPtr<ID3D12Resource>* resource, HANDLE* handle);
   HRESULT CreateSharedFence(Microsoft::WRL::ComPtr<ID3D12Fence>* fence, HANDLE* handle);
   [[nodiscard]] bool SlotFree() const;     // the next allocator's last list finished (else: skip this frame)
-  // Split chain (fix round 2, I2): the ring grows to `slots` allocators (at most RING_MAX), never shrinks. The new ones are made beside the old ones, so no
+  // Split chain: the ring grows to `slots` allocators (at most RING_MAX), never shrinks. The new ones are made beside the old ones, so no
   // allocator in use moves. False when one could not be made (the ring stays as it was). Its size now: RingSize().
   bool GrowRing(size_t slots);
   [[nodiscard]] size_t RingSize() const { return ring_size_; }
-  static constexpr size_t RING = 8u;       // Plan 7 key decision c: the CPU runs up to DXGI's frame latency ahead; a busy ring skips NR for that frame
-  static constexpr size_t RING_MAX = 12u;  // fix round 2 (I2): a three-stage split makes three private lists per frame
+  static constexpr size_t RING = 8u;       // the CPU runs up to DXGI's frame latency ahead; a busy ring skips NR for that frame
+  static constexpr size_t RING_MAX = 12u;  // a three-stage split makes three private lists per frame
   ID3D12GraphicsCommandList* BeginList();  // resets the next allocator and the list; null on failure
   bool ExecuteList();                      // closes and executes it; false (nothing submitted) when Close fails
   void CloseList();                        // closes an open list without executing it (a recording that threw)
   // Signals `progress` to `value` on the queue and marks the slot used up to it. False when the queue refused. The slot
-  // is marked whenever a list was submitted since the last call, even when the signal failed (Plan 7 final review C-1):
+  // is marked whenever a list was submitted since the last call, even when the signal failed:
   // its surfaces are then held until `progress` passes `value`, for good if it never does.
   bool SignalProgress(uint64_t value);
   [[nodiscard]] uint64_t Completed() const;

@@ -9,14 +9,14 @@
 
 #include "color/encoding.hpp"
 #include "ipc/control_block.hpp"
+#include "memory_units.hpp"
 #include "nr/log.hpp"
+#include "text/effect_names.hpp"
+#include "text/helper_messages.hpp"
+#include "text/timeout_messages.hpp"
 
 namespace uplift::client {
 namespace {
-
-constexpr uint32_t WAIT_CAP_MS = 2000u;  // the design's R29 cap on the game thread's waits
-constexpr uint32_t MAX_CONSECUTIVE_TIMEOUTS = 3u;
-constexpr double MIB = 1024.0 * 1024.0;
 
 std::string ShareFailureText(const char* what, DXGI_FORMAT format, std::string_view failure) {
   return std::format("{} could not be shared with Uplift's helper (DXGI_FORMAT {}, {})", what, static_cast<int>(format), failure);
@@ -26,7 +26,7 @@ std::string ShareFailureText(const char* what, DXGI_FORMAT format, std::string_v
 
 GlClient::GlClient(gl::Functions functions, LUID luid, bool allow_fences) : interop_(std::move(functions)), luid_(luid) {
   const gl::Functions& gl = interop_.Gl();
-  // Design §5: GPU-ordered needs GL_EXT_semaphore_win32 (Functions::Load decided it from the driver's list); without it the frame crosses through shared
+  // GPU-ordered needs GL_EXT_semaphore_win32 (Functions::Load decided it from the driver's list); without it the frame crosses through shared
   // textures, ordered on the CPU.
   fenced_ = (allow_fences && gl.semaphores);
   if (!fenced_) {
@@ -108,8 +108,8 @@ void GlClient::Stop(std::string_view reason, NrLink& link, gl::GameHost& host) {
 }
 
 void GlClient::NoteTimeout(uint32_t* consecutive, std::string_view what, NrLink& link, gl::GameHost& host) {
-  if (++*consecutive >= MAX_CONSECUTIVE_TIMEOUTS) {
-    Stop(std::format("{} did not finish within 2 s, {} times in a row", what, MAX_CONSECUTIVE_TIMEOUTS), link, host);
+  if (++*consecutive >= bridge::MAX_CONSECUTIVE_TIMEOUTS) {
+    Stop(uplift::text::ConsecutiveTimeoutsText(what, std::chrono::milliseconds{WAIT_CAP_MS}, bridge::MAX_CONSECUTIVE_TIMEOUTS), link, host);
   }
 }
 
@@ -138,7 +138,7 @@ ipc::Target GlClient::Describe(gl::GameHost& host, const gl::ImageInfo& back_buf
   ipc::Target target;
   target.width = back_buffer.size.width;
   target.height = back_buffer.size.height;
-  target.dxgi_format = static_cast<uint32_t>(gl::SharedFormatOf(back_buffer.format));  // the helper makes the shared colour in it (R66: not ReShade's label)
+  target.dxgi_format = static_cast<uint32_t>(gl::SharedFormatOf(back_buffer.format));  // the helper makes the shared colour in it (the memory format, independent of ReShade's label)
   if (!enabled) {
     color_failure_.reset();
     mask_failure_.reset();
@@ -153,10 +153,10 @@ ipc::Target GlClient::Describe(gl::GameHost& host, const gl::ImageInfo& back_buf
     problem = gl::BackBufferProblem(back_buffer, at_present);
   }
   if (problem.empty() && host.WrongContext()) {
-    problem = gl::WRONG_CONTEXT_PROBLEM;  // R63: the present is not on the runtime's context, so nothing runs
+    problem = gl::WRONG_CONTEXT_PROBLEM;  // the present is not on the runtime's context, so nothing runs
   }
   if (!running || !problem.empty()) {
-    ReleaseShared(host);  // NR is off, or this image cannot go: the shared surfaces go with it (Plan 7's final review C-1)
+    ReleaseShared(host);  // NR is off, or this image cannot go: the shared surfaces go with it
   }
   if (problem.empty() && color_failure_ && color_failure_->Matches(back_buffer.size, back_buffer.format)) {
     problem = ShareFailureText("The back buffer", back_buffer.format, color_failure_->what);
@@ -214,7 +214,7 @@ bool GlClient::Apply(const ipc::Reply& reply, NrLink& link, gl::GameHost& host) 
     CloseHeldFences();  // the imported semaphores keep the fences alive
     if (second != GL_NO_ERROR) {
       // An unusual driver refuses the import: no restart would help, so the frame crosses through shared textures, ordered on the CPU, which need no fences.
-      // The caller re-attaches the helper with SHARED_CPU (Plan 9 M-4's lesson).
+      // The caller re-attaches the helper with SHARED_CPU.
       interop_.DeleteSemaphore(&to12_gl_);
       interop_.DeleteSemaphore(&to11_gl_);
       cpu_reason_ = std::format("the driver refused the fence import (glImportSemaphoreWin32HandleEXT set GL error {:#06x})", second);
@@ -246,13 +246,13 @@ bool GlClient::Apply(const ipc::Reply& reply, NrLink& link, gl::GameHost& host) 
         mask_failure_.reset();
       } else {
         mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .what = failure};
-        nr::Log(nr::LogLevel::WARN, ShareFailureText("UPLIFT_MASK", mask_ask_.format, failure));
+        nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MASK_TEXTURE, mask_ask_.format, failure));
       }
     }
     if (motion != nullptr && latch_.empty()) {
       if (!Import(host, motion, handles.motion_bytes, motion_ask_size_, DXGI_FORMAT_R16G16_FLOAT, 4u, &motion_, &failure)) {
         motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .what = failure};
-        nr::Log(nr::LogLevel::WARN, ShareFailureText("UPLIFT_MV", DXGI_FORMAT_R16G16_FLOAT, failure));
+        nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MOTION_TEXTURE, DXGI_FORMAT_R16G16_FLOAT, failure));
       }
     }
   }
@@ -277,7 +277,7 @@ bool GlClient::Apply(const ipc::Reply& reply, NrLink& link, gl::GameHost& host) 
 }
 
 gl::ImageInfo GlClient::PrepareMotion(gl::GameHost& host, const gl::ImageInfo& motion, NrLink& link) {
-  // Plan 7 decision 3: LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
+  // LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
   if (motion.handle == 0u || motion.format != DXGI_FORMAT_R16G16_FLOAT || motion.samples != 1u) {
     // 1.1.2 (a player's freeze, NFS Underground 2): a frame without LaunchPad's motion (the Uplift technique skipped a frame) keeps the share; it goes
     // with NR (Release), at a new size, or when the helper says so. Releasing and re-sharing it around one such frame coincided with a GPU fault.
@@ -301,7 +301,7 @@ gl::ImageInfo GlClient::PrepareMotion(gl::GameHost& host, const gl::ImageInfo& m
         CloseHandle(handle);
       }
       if (!opened) {
-        // Logged once: not retried for this size (Plan 7's final review Minor 3).
+        // Logged once: not retried for this size.
         motion_failure_ = ShareFailure{.size = motion.size, .format = DXGI_FORMAT_R16G16_FLOAT, .what = failure};
         nr::Logf(nr::LogLevel::WARN, "UPLIFT_MV could not be shared with Uplift's helper ({}); NR runs without LaunchPad's motion", failure);
       }
@@ -399,7 +399,7 @@ bool GlClient::RunFenced(gl::GameHost& host, const gl::ImageInfo& frame, const g
       return reply.submitted != 0u;
     }
     bool SignalD3D12(uint64_t /*value*/) override { return reply.signalled != 0u; }
-    // R17: only after the reply said the signal was submitted (RunBridgedFrame calls this after SignalD3D12 returned true).
+    // Only after the reply said the signal was submitted (RunBridgedFrame calls this after SignalD3D12 returned true).
     bool WaitD3D11(uint64_t value) override {
       client_.waited11_ = value;  // for Stop, whether or not the context took it
       const GLuint color = client_.color_.gl.texture;
@@ -423,13 +423,13 @@ bool GlClient::RunFenced(gl::GameHost& host, const gl::ImageInfo& frame, const g
   const bridge::BridgedFrame result = bridge::RunBridgedFrame(steps, in, out);
   run_sent_ = steps.sent;
   if (steps.timed_out) {
-    // No reply in 2 s (or the helper is gone, which the launcher shows next frame). Nothing was queued on this side's GPU after the copy in, and no GL wait
+    // No reply within RUN_REPLY_CAP (or the helper is gone, which the launcher shows next frame). Nothing was queued on this side's GPU after the copy in, and no GL wait
     // ever will be for `out`; the helper's list may still run, so until its to11 shows its signal (or a late reply says there is none) nothing touches the
     // shared textures. A RUN the link refused never reached the helper.
     if (steps.sent) {
       pending_out_ = out;
       in_flight_ = true;
-      nr::Log(nr::LogLevel::WARN, "Uplift's 64-bit helper did not answer within 2 s; frames go without NR until it does");
+      nr::Logf(nr::LogLevel::WARN, uplift::text::RUN_REPLY_TIMEOUT_LINE, std::chrono::duration<double>(RUN_REPLY_CAP).count());
     }
     return false;
   }
@@ -449,8 +449,9 @@ bool GlClient::RunFenced(gl::GameHost& host, const gl::ImageInfo& frame, const g
 }
 
 bool GlClient::RunCpuOrdered(gl::GameHost& host, const gl::ImageInfo& frame, const gl::ImageInfo& motion, ipc::Run run, NrLink& link) {
-  // Design §5, in this order: the copy in, its completion on the CPU (a capped GLsync wait), RUN (whose reply comes when the helper's GPU work is done), the
-  // copy out. Nothing waits on the GPU, so there is no fence to strand; a timeout skips this frame and three in a row stop the client.
+  // In this order: the copy in, its completion on the CPU (a capped GLsync wait), RUN (whose reply comes when the helper's GPU work is done), the
+  // copy out. Nothing waits on the GPU, so there is no fence to strand;
+  // a timeout skips this frame and bridge::MAX_CONSECUTIVE_TIMEOUTS in a row stop the client.
   if (interop_.Busy()) {
     // An earlier wait's 2 s ran out and its sync has not signalled: nothing is queued behind a stuck context.
     ++busy_skips_;
@@ -521,7 +522,7 @@ MaskCopy GlClient::CopyMask(gl::GameHost& host, const gl::ImageInfo& mask, NrLin
       CloseHandle(handle);
     }
     if (!opened) {
-      // Logged once: not retried for this size and format (final review Minor 3).
+      // Logged once: not retried for this size and format.
       mask_failure_ = ShareFailure{.size = mask.size, .format = format->view_format, .what = failure};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, {})", static_cast<int>(format->view_format), failure);
       return {};
@@ -534,7 +535,7 @@ MaskCopy GlClient::CopyMask(gl::GameHost& host, const gl::ImageInfo& mask, NrLin
 }
 
 std::string GlClient::Line() const {
-  const double mib = static_cast<double>(ImportedBytes()) / MIB;
+  const double mib = static_cast<double>(ImportedBytes()) / BYTES_PER_MIB;
   return (fenced_ ? std::format("OpenGL ({}): NR runs in Uplift's 64-bit helper (shared textures and fences, {:.1f} MiB)", BITNESS, mib)
                   : std::format("OpenGL ({}): NR runs in Uplift's 64-bit helper (shared textures, CPU-ordered, {:.1f} MiB): {}", BITNESS, mib, cpu_reason_));
 }

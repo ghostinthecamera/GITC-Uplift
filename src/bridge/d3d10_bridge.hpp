@@ -15,20 +15,22 @@
 
 #include "bridge/d3d11_bridge.hpp"
 #include "bridge/keyed_relay.hpp"
+#include "bridge/private_device_bridge.hpp"
+#include "bridge/share_failure.hpp"
 #include "nr/types.hpp"
 
 namespace uplift::bridge {
 
-// Plan 8 (D3D10 design §2): a D3D10 device's frames reach NR through a relay D3D11 device on its adapter and Plan 7's
+// A D3D10 device's frames reach NR through a relay D3D11 device on its adapter and the
 // D3D11Bridge on that relay. The relay makes keyed-mutex textures the D3D10 device opens by their legacy (KMT) handles;
 // D3D10 copies in and out under the keyed mutex (key 0: the game's side, key 1: the relay's), and the relay drives the
-// D3D11 bridge's fences. Plan 10 (design §3.1): the relay and its hand-offs are KeyedRelay's, which the 32-bit D3D10 client shares.
+// D3D11 bridge's fences. The relay and its hand-offs are KeyedRelay's, which the 32-bit D3D10 client shares.
 // - ReShade-free, with D3D11Bridge's public face over the game's D3D10 resources.
 // - The CPU never waits for the GPU: a keyed-mutex acquire only waits for a release this same thread made just before
 //   (capped all the same), and only the D3D11 bridge's destructor waits (2 s cap per queue).
 // - One latch: the D3D11 bridge's. A key that did not come (KeyedRelay's latch) is passed into it before the call that saw it
 //   returns, and a stopped D3D11 bridge stops the relay's operations too. Not thread-safe: the add-on's lock.
-class D3D10Bridge {
+class D3D10Bridge final : public PrivateDeviceBridge {
  public:
   // nullptr, with `error` set, when the adapter is not NVIDIA's, or the relay or the D3D11 bridge cannot be made.
   // `relay_created` and `created` receive the relay as D3D11CreateDevice returned it and the private D3D12 device as D3D12Side made it,
@@ -43,46 +45,44 @@ class D3D10Bridge {
   D3D10Bridge(const D3D10Bridge&) = delete;
   D3D10Bridge& operator=(const D3D10Bridge&) = delete;
 
-  [[nodiscard]] ID3D12Device* Device() const { return bridge_->Device(); }  // native: NGX and every Uplift object use it
-  [[nodiscard]] ID3D12CommandQueue* Queue() const { return bridge_->Queue(); }
-  [[nodiscard]] bool Independent() const { return bridge_->Independent(); }  // D3D12Side::Independent: whether Retry now can replace it
+  [[nodiscard]] ID3D12Device* Device() const override { return bridge_->Device(); }  // native: NGX and every Uplift object use it
+  [[nodiscard]] ID3D12CommandQueue* Queue() const override { return bridge_->Queue(); }
+  [[nodiscard]] bool Independent() const override { return bridge_->Independent(); }  // D3D12Side::Independent: whether Retry now can replace it
   // As D3D11Bridge::BeginFrame, for the game's D3D10 back buffer. The keyed colour exists only while `running` on a
-  // usable image and no bridge stopped; otherwise it, the keyed mask and the keyed motion are retired (Plan 7 C-1). The
-  // relay has no Present, so a frame that released anything on it also flushes it, whether or not NR runs (Plan 8 final
-  // review C-1: D3D11 destroys a released object only at its context's next Flush).
+  // usable image and no bridge stopped; otherwise it, the keyed mask and the keyed motion are retired. The
+  // relay has no Present, so a frame that released anything on it also flushes it, whether or not NR runs: D3D11
+  // destroys a released object only at its context's next Flush.
   BridgeFrame BeginFrame(ID3D10Resource* back_buffer, bool enabled, bool running, std::chrono::steady_clock::time_point now);
-  // One bridged recording (design §2). True when NR's result reached `back_buffer`. `motion`: this frame's UPLIFT_MV
+  // One bridged recording. True when NR's result reached `back_buffer`. `motion`: this frame's UPLIFT_MV
   // (RG16F); null without LaunchPad.
   bool Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, const Recorder& record);
   // At the end of the effects: UPLIFT_MASK through a keyed mask into the D3D11 bridge's shared mask.
   MaskCopy CopyMask(ID3D10Resource* mask);
   void ReleaseMask();
   // Stops the bridge for the session and releases every queued fence wait (D3D11Bridge::Stop).
-  void Stop(std::string reason);
-  [[nodiscard]] uint64_t SharedBytes() const;
+  void Stop(std::string reason) override;
+  [[nodiscard]] uint64_t SharedBytes() const override;
   [[nodiscard]] std::string StatusLine() const;
-  [[nodiscard]] bool Stopped() const { return bridge_->Stopped() || relay_->Stopped(); }
-  [[nodiscard]] std::string_view Latch() const { return bridge_->Latch(); }  // Plan 17: the card's reason (the relay's reaches it at the next BeginFrame)
+  [[nodiscard]] bool Stopped() const override { return bridge_->Stopped() || relay_->Stopped(); }
+  [[nodiscard]] std::string_view Latch() const override { return bridge_->Latch(); }  // the card's reason (the relay's reaches it at the next BeginFrame)
+  [[nodiscard]] uint64_t BusySkips() const override { return bridge_->BusySkips(); }  // the D3D11 bridge's, which StatusLine prints
+  [[nodiscard]] std::string_view Label() const override { return bridge_->Label(); }  // the relay's D3D11 bridge is made with its label
 
  private:
   D3D10Bridge() = default;
 
   using Keyed = KeyedRelay::Keyed;
-  // A keyed texture that could not be made or opened: retried only for another size or format, or after a re-enable
-  // (Plan 7 final review Minor 3).
-  struct ShareFailure {
-    nr::Size size;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+  // Why a keyed texture could not be made or opened.
+  struct RelayShareCause {
     HRESULT result = S_OK;
     bool bridge = false;  // the mask only: the D3D11 bridge's share with the private device failed, not the relay's own
-    [[nodiscard]] bool Matches(nr::Size other_size, DXGI_FORMAT other_format) const {
-      return size == other_size && format == other_format;
-    }
   };
+  // A keyed texture that could not be made or opened: retried only for another size or format, or after a re-enable.
+  using ShareFailure = ShareFailureOf<RelayShareCause>;
 
   // The D3D11 bridge's own verdict on the keyed colour (its share with the private device failed). It sees a back buffer
-  // only while NR runs, so the verdict is kept here, per size and format, and reported while NR is off too (Plan 8
-  // batch 2 review I-1); it goes with the other failure caches when NR is disabled.
+  // only while NR runs, so the verdict is kept here, per size and format, and reported while NR is off too; it goes
+  // with the other failure caches when NR is disabled.
   struct BridgeProblem {
     nr::Size size;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;

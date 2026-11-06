@@ -6,17 +6,14 @@
 #include <utility>
 
 #include "color/encoding.hpp"
+#include "memory_units.hpp"
 #include "nr/log.hpp"
+#include "text/timeout_messages.hpp"
 
 namespace uplift::bridge {
 namespace {
 
 using Microsoft::WRL::ComPtr;
-
-// Key decision h: every CPU wait on this path is capped, and a timeout skips that frame; a single one never latches (Plan 9 M-2), and
-// MAX_CONSECUTIVE_TIMEOUTS in a row do.
-constexpr uint32_t WAIT_CAP_MS = 2000u;
-constexpr uint32_t MAX_CONSECUTIVE_TIMEOUTS = 3u;
 
 }  // namespace
 
@@ -27,7 +24,7 @@ std::unique_ptr<GlBridge> GlBridge::Create(gl::Functions functions, LUID luid, C
   bridge->side_ = D3D12Side::Create(luid, created, error);
   if (bridge->side_ == nullptr) return nullptr;
   if (semaphores) {
-    // GPU-ordered: the two shared D3D12 fences, imported as GL semaphores. A refused import builds CPU-ordered and says why (Plan 9 M-4's lesson: the fallback
+    // GPU-ordered: the two shared D3D12 fences, imported as GL semaphores. A refused import builds CPU-ordered and says why (the fallback
     // is decided here, before any frame). The context is current: the caller made it so for Functions::Load.
     ComPtr<ID3D12Fence>* const fences[] = {&bridge->to12_, &bridge->to11_};
     GLuint* const semaphore_names[] = {&bridge->to12_gl_, &bridge->to11_gl_};
@@ -119,7 +116,7 @@ void GlBridge::LatchGl(std::string_view failure) {
 
 void GlBridge::NoteTimeout(uint32_t* consecutive, std::string_view what) {
   if (++*consecutive >= MAX_CONSECUTIVE_TIMEOUTS) {
-    LatchGl(std::format("{} did not finish within 2 s, {} times in a row", what, MAX_CONSECUTIVE_TIMEOUTS));
+    LatchGl(uplift::text::ConsecutiveTimeoutsText(what, std::chrono::milliseconds{WAIT_CAP_MS}, MAX_CONSECUTIVE_TIMEOUTS));
   }
 }
 
@@ -142,7 +139,7 @@ BridgeFrame GlBridge::BeginFrame(gl::GameHost& host, const gl::ImageInfo& back_b
     motion_failure_.reset();
   }
   if (!running || !latch_.empty()) {
-    // NR is off, or the bridge stopped (Plan 7 C-1, above the latch return): the shared surfaces go with NR's own (the stutter fix). Retire keeps each D3D12
+    // NR is off, or the bridge stopped (before the latch return): the shared surfaces go with NR's own. Retire keeps each D3D12
     // one until the queue has passed its last use, deletes the GL one at once (or at the next valid frame), and never waits.
     Retire(host, &color_);
     Retire(host, &mask_);
@@ -153,9 +150,9 @@ BridgeFrame GlBridge::BeginFrame(gl::GameHost& host, const gl::ImageInfo& back_b
   if (!latch_.empty()) return {.problem = latch_};
   if (back_buffer.handle == 0u) return {};
   std::string problem = gl::BackBufferProblem(back_buffer, at_present);
-  const DXGI_FORMAT shared_format = gl::SharedFormatOf(back_buffer.format);  // ReShade's label is not the memory layout (R66)
+  const DXGI_FORMAT shared_format = gl::SharedFormatOf(back_buffer.format);  // ReShade's label is not the memory layout
   if (problem.empty() && host.WrongContext()) {
-    problem = gl::WRONG_CONTEXT_PROBLEM;  // R63: the present is not on the runtime's context, so nothing runs
+    problem = gl::WRONG_CONTEXT_PROBLEM;  // the present is not on the runtime's context, so nothing runs
   }
   if (problem.empty()) {
     const std::optional<color::FormatInfo> format = color::DescribeFormat(shared_format);  // BackBufferProblem found the format usable
@@ -167,13 +164,13 @@ BridgeFrame GlBridge::BeginFrame(gl::GameHost& host, const gl::ImageInfo& back_b
                        &color_, &failure)) {
         color_failure_.reset();
       } else {
-        color_failure_ = ShareFailure{.size = back_buffer.size, .format = back_buffer.format, .what = std::move(failure)};
+        color_failure_ = ShareFailure{.size = back_buffer.size, .format = back_buffer.format, .cause = std::move(failure)};
       }
     }
     // Reported while NR is off too, so the Session does not load for a back buffer the bridge cannot share.
     if (color_failure_ && color_failure_->Matches(back_buffer.size, back_buffer.format)) {
       problem = std::format("The back buffer could not be shared with the private Direct3D 12 device (DXGI_FORMAT {}, {})",
-                            static_cast<int>(back_buffer.format), color_failure_->what);
+                            static_cast<int>(back_buffer.format), color_failure_->cause);
     }
   }
   if (problem != problem_) {
@@ -236,7 +233,7 @@ void GlBridge::StampUsed(uint64_t value, bool used_mask, bool used_motion) {
 }
 
 bool GlBridge::Run(gl::GameHost& host, const gl::ImageInfo& frame, const gl::ImageInfo& motion, const Recorder& record) {
-  // The frame's format family must be the shared colour's too (R66: FB0's label and ReShade's intermediate share a family today): a copy between two formats
+  // The frame's format family must be the shared colour's too (FB0's label and ReShade's intermediate share a family today): a copy between two formats
   // that are not compatible would raise GL_INVALID_OPERATION in the game's own error flag.
   if (!latch_.empty() || !color_.d3d12 || frame.handle == 0u || frame.size != color_.size || frame.samples != 1u || gl::SharedFormatOf(frame.format) != color_.format
       || !host.Valid()) {
@@ -249,7 +246,8 @@ bool GlBridge::Run(gl::GameHost& host, const gl::ImageInfo& frame, const gl::Ima
     ++busy_skips_;
     return false;
   }
-  // LaunchPad's UPLIFT_MV, shared like the mask (Plan 7 §9 g's flags). Retired when a recording comes without one.
+  // LaunchPad's UPLIFT_MV, shared like the mask (the shared-texture flags). Kept through a run of up to MOTION_KEEP_PRESENTS recordings without one, and
+  // retired past it; a kept share is not copied into, listed in a semaphore operation, bound or stamped, so it holds only its last use.
   ID3D12Resource* motion12 = nullptr;
   if (motion.handle != 0u && motion.format == DXGI_FORMAT_R16G16_FLOAT && motion.samples == 1u) {
     if (!motion_.d3d12 || motion_.size != motion.size) {
@@ -260,15 +258,16 @@ bool GlBridge::Run(gl::GameHost& host, const gl::ImageInfo& frame, const gl::Ima
                          L"Uplift shared motion", &motion_, &failure)) {
           motion_failure_.reset();
         } else {
-          // Logged once: not retried for this size (Plan 7 Minor 3).
-          motion_failure_ = ShareFailure{.size = motion.size, .format = DXGI_FORMAT_R16G16_FLOAT, .what = failure};
+          // Logged once: not retried for this size.
+          motion_failure_ = ShareFailure{.size = motion.size, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = failure};
           nr::Logf(nr::LogLevel::WARN, "UPLIFT_MV could not be shared with the private Direct3D 12 device ({}); NR runs without LaunchPad's motion", failure);
         }
       }
     }
     motion12 = motion_.d3d12.Get();  // null when the share failed: NR runs without motion
-  } else if (motion_.d3d12) {
-    Retire(host, &motion_);
+    motion_keep_.Arrived();
+  } else if (motion_.d3d12 && motion_keep_.RetireOnMiss()) {
+    Retire(host, &motion_);  // the motion stopped (LaunchPad off): the share goes
   }
   const gl::ImageInfo motion_source = (motion12 != nullptr ? motion : gl::ImageInfo{});
   const bool wrote =
@@ -282,7 +281,7 @@ bool GlBridge::Run(gl::GameHost& host, const gl::ImageInfo& frame, const gl::Ima
 }
 
 bool GlBridge::RunGpuOrdered(gl::GameHost& host, const gl::ImageInfo& frame, const gl::ImageInfo& motion, ID3D12Resource* motion12, const Recorder& record) {
-  // The steps on this bridge's objects; RunBridgedFrame owns their order (R17: the GL wait is queued only for a signal that was submitted).
+  // The steps on this bridge's objects; RunBridgedFrame owns their order (the GL wait is queued only for a signal that was submitted).
   class Steps final : public BridgeSteps {
    public:
     Steps(GlBridge& bridge, gl::GameHost& host, const gl::ImageInfo& frame, const gl::ImageInfo& motion, ID3D12Resource* motion12, const Recorder& record)
@@ -297,6 +296,7 @@ bool GlBridge::RunGpuOrdered(gl::GameHost& host, const gl::ImageInfo& frame, con
       }
     }
     bool SignalD3D11(uint64_t value) override {
+      // GL semaphore calls return no status; the shared-fence watchdog detects stalled progress without consuming the GL error flag every frame.
       // What the GL context wrote since the last signal, and the D3D12 side is about to read: the colour, the motion when copied, the mask when fresh.
       std::array<GLuint, 3> textures = {bridge_.color_.gl.texture};
       size_t count = 1u;
@@ -341,13 +341,13 @@ bool GlBridge::RunGpuOrdered(gl::GameHost& host, const gl::ImageInfo& frame, con
   const uint64_t in = ++last_value_;  // monotonic even when a step fails
   const uint64_t out = ++last_value_;
   const BridgedFrame result = RunBridgedFrame(steps, in, out);
-  // Plan 7 C-1: stamped whenever the list was submitted, even when the D3D12 signal then failed: its surfaces are then held until the side's progress passes
+  // Stamped whenever the list was submitted, even when the D3D12 signal then failed: its surfaces are then held until the side's progress passes
   // `out` (for good, if that signal never comes), never freed under the list.
   if (steps.executed || result.d3d12_signalled) {
     StampUsed(out, steps.used_mask, motion12 != nullptr);
   }
   if (result.d3d12_signalled) {
-    watchdog_.Submitted(out, std::chrono::steady_clock::now());  // Plan 7 I-2: from submission, after recording
+    watchdog_.Submitted(out, std::chrono::steady_clock::now());  // from submission, after recording
   }
   if (!result.failure.empty()) {
     LatchGl(result.failure);
@@ -356,9 +356,10 @@ bool GlBridge::RunGpuOrdered(gl::GameHost& host, const gl::ImageInfo& frame, con
 }
 
 bool GlBridge::RunCpuOrdered(gl::GameHost& host, const gl::ImageInfo& frame, const gl::ImageInfo& motion, ID3D12Resource* motion12, const Recorder& record) {
-  // Design §3.4, in this order: the copy in, the copy's completion on the CPU (a GLsync), NR, NR's completion on the CPU, the copy out. Nothing waits on the
-  // GPU, so there is no fence to strand and no watchdog; a timeout skips this frame, and three in a row stop the bridge. Run has skipped the frames on which
-  // an earlier recording is still in flight. This path is unmeasured on GL (R69): the smoke's CPU-ordered case decides whether it stays.
+  // In this order: the copy in, the copy's completion on the CPU (a GLsync), NR, NR's completion on the CPU, the copy out. Nothing waits on
+  // the GPU, so there is no fence to strand and no watchdog; a timeout skips this frame, and MAX_CONSECUTIVE_TIMEOUTS in a row stop the bridge. Run has
+  // skipped the frames on which an earlier recording is still in flight. This path is unmeasured on GL: the smoke's CPU-ordered case decides whether
+  // it stays.
   host.Copy(frame, color_.Image());
   if (motion.handle != 0u) {
     host.Copy(motion, motion_.Image());
@@ -422,8 +423,8 @@ MaskCopy GlBridge::CopyMask(gl::GameHost& host, const gl::ImageInfo& mask) {
     std::string failure;
     if (!CreateShared(mask.size, format->view_format, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
                       format->bytes_per_pixel, L"Uplift shared mask", &mask_, &failure)) {
-      // Logged once: not retried for this size and format (Plan 7 Minor 3).
-      mask_failure_ = ShareFailure{.size = mask.size, .format = format->view_format, .what = failure};
+      // Logged once: not retried for this size and format.
+      mask_failure_ = ShareFailure{.size = mask.size, .format = format->view_format, .cause = failure};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with the private Direct3D 12 device (DXGI_FORMAT {}, {})",
                static_cast<int>(format->view_format), failure);
       return {};
@@ -477,7 +478,7 @@ uint64_t GlBridge::SharedBytes() const {
 }
 
 std::string GlBridge::StatusLine() const {
-  const double mib = static_cast<double>(SharedBytes()) / (1024.0 * 1024.0);
+  const double mib = static_cast<double>(SharedBytes()) / BYTES_PER_MIB;
   std::string line = (gpu_ordered_ ? std::format("OpenGL: NR runs on a private Direct3D 12 device (shared textures and fences, {:.1f} MiB)", mib)
                                    : std::format("OpenGL: NR runs on a private Direct3D 12 device (shared textures, CPU-ordered, {:.1f} MiB): {}", mib,
                                                  cpu_reason_));

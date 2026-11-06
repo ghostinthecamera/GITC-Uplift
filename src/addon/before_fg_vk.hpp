@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 #include <unordered_map>
 #include <vector>
 #include "addon/streamline_present.hpp"
@@ -26,9 +27,11 @@ class BeforeFgVk {
     std::string_view reason;
   };
   Frame Prepare(VkQueue queue, const VkPresentInfoKHR& app, color::Encoding encoding);
-  vk::PresentRelayHost* BridgeHost(VkQueue queue, const Frame& frame);
+  // The reason is owned by this device's queue entry, until its next attempt or destruction.
+  struct HostResult { vk::PresentRelayHost* host = nullptr; std::string_view reason; };
+  HostResult BridgeHost(VkQueue queue, const Frame& frame);
   Result Record(VkQueue queue, void* queue_identity, const VkPresentInfoKHR& app, VkDlssContext& context,
-                const FrameConfig& config, bool holds_nr, std::chrono::steady_clock::time_point now);
+                const FrameSettings& settings, const FrameFacts& facts, bool holds_nr, bool& outer_ticked, std::chrono::steady_clock::time_point now);
  private:
   struct Image { VkImage resource{}; bool acquired = false; };
   struct Chain {
@@ -43,7 +46,12 @@ class BeforeFgVk {
     std::vector<Image> images;
   };
   std::unordered_map<VkSwapchainKHR, Chain> chains_;
-  struct QueueHost { VkDevice device{}; std::unique_ptr<vk::PresentRelayHost> host; };
+  struct QueueHost {
+    VkDevice device{};
+    std::unique_ptr<vk::PresentRelayHost> host;
+    std::string creation_error;
+    bool warned = false;
+  };
   std::unordered_map<VkQueue, QueueHost> hosts_;
 };
 

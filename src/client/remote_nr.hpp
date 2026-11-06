@@ -24,14 +24,13 @@ struct RemoteNrConfig {
   ipc::Attach attach;                // LUID, API, transport, snippet path, NGX data folder, add-on file name
 };
 
-// Plan 9 (design §2.2, §2.7): the helper's lifetime and the per-present exchange. Not thread-safe: the add-on's lock.
+// The helper's lifetime and the per-present exchange. Not thread-safe: the add-on's lock.
 //
-// Every CPU wait here is capped (FRAME 100 ms, RUN 2 s, the rest 100 ms or 2 s), so the game thread is never blocked
-// for long. One request is outstanding at a time: a reply that lands late is taken at the next present, and until then nothing
+// Every CPU wait has a cap. RUN and SHARE_* use RUN_REPLY_CAP; the other requests use the shorter control-request cap. One request is outstanding at a time: a reply that lands late is taken at the next present, and until then nothing
 // else is sent (and the clients touch no shared memory).
 //
 // The helper never restarts by itself after a failure: Failure() stays until RetryNow(). It restarts after a normal exit (a
-// QUIT, or its 30 s idle exit), when NR is turned on again.
+// QUIT or its idle exit), when NR is turned on again.
 class RemoteNr final : public NrLink {
  public:
   explicit RemoteNr(RemoteNrConfig config);
@@ -57,7 +56,7 @@ class RemoteNr final : public NrLink {
   [[nodiscard]] bool FrameSent() const { return frame_sent_; }
   void Detach();                                                       // DETACH (destroy_device, D3D9 Reset); the next Present re-ATTACHes
   void RetryNow();                                                     // after a failure: forget it, so the next Present starts a fresh helper
-  // Plan 17: ends the helper as a failure with `text` for the card (its log drained first): its own Direct3D 12 device was removed, so a fresh helper is
+  // Ends the helper as a failure with `text` for the card (its log drained first): its own Direct3D 12 device was removed, so a fresh helper is
   // the only way NR runs again (Retry now).
   void Abort(std::string text) { Fail(std::move(text)); }
   void Quit();                                                         // AddonUninit: QUIT, then close (kill-on-close ends a helper that does not exit)
@@ -65,7 +64,7 @@ class RemoteNr final : public NrLink {
   [[nodiscard]] bool Attached() const { return attached_; }
   [[nodiscard]] std::string_view Failure() const { return failure_; }  // "It exited with code 0x...", ...; empty while healthy
   [[nodiscard]] const ipc::Status& LastStatus() const { return last_status_; }
-  // Helper hand-over round: the helper's NR may be loaded. True from the first FRAME sent with nr_allowed until a FRAME sent without it is answered with
+  // The helper's NR may be loaded. True from the first FRAME sent with nr_allowed until a FRAME sent without it is answered with
   // its Session OFF (no FRAME since could load it again), or the helper process is gone. A status that is stale, missing or still pending never clears it.
   [[nodiscard]] bool NrMayRun() const { return nr_may_run_; }
   // The helper's PID: the current one, else the last (0 before the first start).

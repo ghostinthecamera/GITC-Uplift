@@ -1,7 +1,8 @@
+#include "../src/color/shader_values.h"
 #include "look_common.hlsli"
 #include "vk_common.hlsli"
 
-// v2 design §3.12's stabiliser (amendment 4). Three modes over one set of constants:
+// Temporal stabilisation. Three modes over one set of constants:
 // - CUT, one thread: the top level's mean ℓ_M against last frame's (a scene cut: more than 1.5 stops);
 // - LEVELS: the moving average of the two levels the low band reads;
 // - DETAIL: the same at the work size, on the fine band (a − a_low, δ − δ_low), for Stabilize detail.
@@ -24,12 +25,12 @@ cbuffer StabilizeConstants : register(b0) {
   uint reserved1;
 };
 
-static const uint STABILIZE_CUT = 0u;
-static const uint STABILIZE_LEVELS = 1u;
-static const uint STABILIZE_DETAIL = 2u;
-static const uint STABILIZE_FLAG_RESET = 1u;    // this frame starts the history afresh
-static const uint STABILIZE_FLAG_MOTION = 2u;   // Motion: reproject, and drop history where the image changed
-static const uint STABILIZE_FLAG_VECTORS = 4u;  // t2 holds motion vectors; without them Motion is change-gated static
+static const uint STABILIZE_CUT = UPLIFT_STABILIZE_CUT;
+static const uint STABILIZE_LEVELS = UPLIFT_STABILIZE_LEVELS;
+static const uint STABILIZE_DETAIL = UPLIFT_STABILIZE_DETAIL;
+static const uint STABILIZE_FLAG_RESET = UPLIFT_STABILIZE_FLAG_RESET;    // this frame starts the history afresh
+static const uint STABILIZE_FLAG_MOTION = UPLIFT_STABILIZE_FLAG_MOTION;   // Motion: reproject, and drop history where the image changed
+static const uint STABILIZE_FLAG_VECTORS = UPLIFT_STABILIZE_FLAG_VECTORS;  // t2 holds motion vectors; without them Motion is change-gated static
 static const float SCENE_CUT_STOPS = 1.5f;
 
 Texture2D<float4> gauss_atlas : register(t0);
@@ -39,7 +40,8 @@ Texture2D<float4> change_texture : register(t3);    // DETAIL: C
 UPLIFT_IMAGE_FORMAT("rgba16f") RWTexture2D<float4> current_texture : register(u0);  // this frame's history
 UPLIFT_IMAGE_FORMAT("rgba32f") RWTexture2D<float4> state_texture : register(u1);    // 1x1: (the top level's mean ℓ_M, scene cut, set, 0)
 
-// u(p) in UV, current -> previous: E9's rule, the vectors times their scale over their rect. Zero without vectors.
+// u(p) in UV, current -> previous: the vectors times their scale over their rect (tools/nrspike's e9).
+// Zero without vectors.
 float2 MotionAt(float2 uv) {
   if ((flags & STABILIZE_FLAG_VECTORS) == 0u) return float2(0.f, 0.f);
   const uint2 rect = uint2(motion_width, motion_height);

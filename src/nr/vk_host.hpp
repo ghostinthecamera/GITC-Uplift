@@ -13,10 +13,10 @@
 
 namespace uplift::nr {
 
-// Plan 13 (design §3.2): the Session's Host on the game's Vulkan device. The snippet is bound with VULKAN_Init_Ext2 on the GAME's device; the
+// The Session's Host on the game's Vulkan device. The snippet is bound with VULKAN_Init_Ext2 on the GAME's device; the
 // budget reads the DXGI adapter with the device's LUID (VidMm counts every API's allocations, so the process's local usage is what the game
-// uses). The Session that owns a VkHost is built with SessionConfig{.budget = {.first_use_bytes = 640 MiB}} (key decision h): the per-device
-// reservation NGX keeps on a Vulkan device (design §1.2). The Session passes the command list and the pass textures through as the opaque
+// uses). The Session that owns a VkHost is built with SessionConfig{.budget = {.first_use_bytes = 640 MiB}}: the per-device
+// reservation NGX keeps on a Vulkan device. The Session passes the command list and the pass textures through as the opaque
 // handles nr/vk_handles.hpp defines; only VkHost, VkFeature and the pipelines turn them back.
 class VkHost final : public Host {
  public:
@@ -39,7 +39,7 @@ class VkHost final : public Host {
 
   [[nodiscard]] const Snippet& GetSnippet() const { return snippet_; }
   [[nodiscard]] bool LegacyRuntime() const override { return snippet_.LegacyRuntime(); }
-  // Plan 19: SnippetConfig::initialize_core_for_device for the next LoadRuntime. The owner decides it at each present (the game created no DLSS on the device
+  // SnippetConfig::initialize_core_for_device for the next LoadRuntime. The owner decides it at each present (the game created no DLSS on the device
   // yet, so an NGX core already loaded in the process is initialised for it too), not once at creation, which may come before the game's own DLSS.
   void SetInitializeCoreForDevice(bool initialize) { config_.initialize_core_for_device = initialize; }
 

@@ -11,20 +11,22 @@
 
 #include "addon/environment.hpp"
 #include "ipc/control_block.hpp"
+#include "memory_units.hpp"
 #include "nr/log.hpp"
 #include "nr/types.hpp"
+#include "text/effect_names.hpp"
+#include "text/nr_messages.hpp"
 
 namespace uplift::client {
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr auto GPU_CAP = std::chrono::seconds(2);  // the design's R29 cap on the game thread's waits
-constexpr double MIB = 1024.0 * 1024.0;
+constexpr auto GPU_CAP = std::chrono::seconds(2);  // the cap on the game thread's waits
 
 using FormatMap = D3D9FormatMap;
 
-// Design §2.8: what each back-buffer format crosses as.
+// What each back-buffer format crosses as.
 constexpr FormatMap FORMATS[] = {
     {D3DFMT_A8R8G8B8, D3DFMT_A8R8G8B8, DXGI_FORMAT_B8G8R8A8_UNORM, 4u},
     {D3DFMT_X8R8G8B8, D3DFMT_A8R8G8B8, DXGI_FORMAT_B8G8R8A8_UNORM, 4u},
@@ -32,7 +34,7 @@ constexpr FormatMap FORMATS[] = {
     {D3DFMT_A2R10G10B10, D3DFMT_A2B10G10R10, DXGI_FORMAT_R10G10B10A2_UNORM, 4u},
     {D3DFMT_A16B16G16R16F, D3DFMT_A16B16G16R16F, DXGI_FORMAT_R16G16B16A16_FLOAT, 8u},
 };
-// Design §4.1: UPLIFT_MASK. ReShade makes an R8 texture X8R8G8B8 on D3D9 (its own override), so the mask crosses as 4-byte BGRA and NR
+// UPLIFT_MASK. ReShade makes an R8 texture X8R8G8B8 on D3D9 (its own override), so the mask crosses as 4-byte BGRA and NR
 // reads the red channel. Every DXGI format here is one color::DescribeMaskFormat accepts. BLOCK reads back in the source's own format.
 constexpr FormatMap MASK_FORMATS[] = {
     {D3DFMT_X8R8G8B8, D3DFMT_A8R8G8B8, DXGI_FORMAT_B8G8R8A8_UNORM, 4u},
@@ -55,8 +57,8 @@ void CopyRows(void* to, size_t to_pitch, const void* from, size_t from_pitch, si
   }
 }
 
-// The frame copy that could not be made for lack of memory: a 32-bit game runs out of address space first (its Plan 9 text, byte for
-// byte), a 64-bit one out of memory. `failed_call` names what failed.
+// The frame copy that could not be made for lack of memory: a 32-bit game runs out of address space first, a 64-bit one out of memory.
+// `failed_call` names what failed. The format string is a localisation key (localization.cpp), so it stays byte for byte.
 std::string NotEnoughMemory(std::string_view failed_call, uint32_t code) {
   const std::string_view lacking = (IS_32_BIT ? "address space in this 32-bit game" : "memory");
   return std::format("Not enough {} for the frame copy ({} {:#010x})", lacking, failed_call, code);
@@ -95,7 +97,7 @@ std::unique_ptr<D3D9Client> D3D9Client::Create(IDirect3DDevice9* device, std::st
   }
   // WARP and other vendors are refused, as on D3D12 (addon::IsNvidiaDevice); cross-adapter sharing is out of scope.
   if (identifier.VendorId != addon::NVIDIA_VENDOR_ID) {
-    return fail("Uplift needs an NVIDIA GPU; this game renders on another adapter");
+    return fail(uplift::text::NVIDIA_GPU_REQUIRED_LINE);
   }
   std::unique_ptr<D3D9Client> client(new D3D9Client());
   client->device_ = device;
@@ -321,7 +323,7 @@ D3D9Client::Ensure D3D9Client::EnsureImage(Image* image, ipc::RequestKind kind, 
   ReleaseImage(image);
   if (*failure && (*failure)->width == width && (*failure)->height == height && (*failure)->format == map.source) return Ensure::FAILED;
   const bool is_mask = (kind == ipc::RequestKind::SHARE_MASK);
-  const std::string_view name = (is_mask ? "UPLIFT_MASK" : "UPLIFT_MV");
+  const std::string_view name = (is_mask ? uplift::text::UPLIFT_MASK_TEXTURE : uplift::text::UPLIFT_MOTION_TEXTURE);
   // KMT: the add-on's own shared render-target twin, which the helper opens by its handle. BLOCK: the SYSTEMMEM surface the readback
   // fills (the source's format); the helper makes the block.
   ipc::Share share = {.width = width, .height = height, .dxgi_format = static_cast<uint32_t>(map.dxgi)};
@@ -350,7 +352,7 @@ D3D9Client::Ensure D3D9Client::EnsureImage(Image* image, ipc::RequestKind kind, 
     const std::optional<ipc::Reply> reply = link.Share(kind, share);
     if (!reply) {
       // Late: the helper may still be making it. Nothing is touched until a FRAME reply says every request has replied, and Apply
-      // then closes the mapping that reply may carry and forgets the ask (key decision h); the next copy asks again.
+      // then closes the mapping that reply may carry and forgets the ask; the next copy asks again.
       image->late = true;
       in_flight_ = true;
       return Ensure::LATE;
@@ -371,7 +373,7 @@ D3D9Client::Ensure D3D9Client::EnsureImage(Image* image, ipc::RequestKind kind, 
     }
   }
   if (!problem.empty()) {
-    // Logged once: not retried for this size and format until NR is re-enabled (Plan 7's Minor 3).
+    // Logged once: not retried for this size and format until NR is re-enabled.
     *failure = Failure{.width = width, .height = height, .format = map.source, .text = problem};
     nr::Log(nr::LogLevel::WARN, problem);
     ReleaseImage(image);
@@ -442,7 +444,7 @@ bool D3D9Client::Run(IDirect3DSurface9* source, IDirect3DTexture9* motion, addon
     if (query_ != nullptr && query_->GetData(nullptr, 0u, D3DGETDATA_FLUSH) == S_FALSE) return false;
     gpu_pending_ = false;
   }
-  // LaunchPad's motion (design §4.3): shared on demand, as the mask. A frame without one, or with one NR cannot take, lets it go; the
+  // LaunchPad's motion: shared on demand, as the mask. A frame without one, or with one NR cannot take, lets it go; the
   // RUN then carries `motion` = 0, which retires the helper's. A RUN that goes out with `motion` = 0 for any reason (a failed copy too)
   // drops the add-on's image as well, so the next frame shares it again.
   Microsoft::WRL::ComPtr<IDirect3DSurface9> motion_source;
@@ -484,7 +486,7 @@ bool D3D9Client::Run(IDirect3DSurface9* source, IDirect3DTexture9* motion, addon
            && SUCCEEDED(device_->StretchRect(shared_surface_.Get(), nullptr, source, nullptr, D3DTEXF_NONE));
   }
   if (view_ == nullptr || sysmem_ == nullptr || plain_ == nullptr) return false;
-  // BLOCK (design §2.4): out through GetRenderTargetData and a locked SYSTEMMEM surface, into the helper's block.
+  // BLOCK: out through GetRenderTargetData and a locked SYSTEMMEM surface, into the helper's block.
   IDirect3DSurface9* readable = source;
   if (description.Format != twin_format_) {
     if (twin_ == nullptr || FAILED(device_->StretchRect(source, nullptr, twin_.Get(), nullptr, D3DTEXF_NONE))) return false;
@@ -538,10 +540,10 @@ bool D3D9Client::Run(IDirect3DSurface9* source, IDirect3DTexture9* motion, addon
 std::string D3D9Client::Line() const {
   if (ex_) {
     return std::format("Direct3D 9 ({}): NR runs in Uplift's 64-bit helper (Direct3D 9Ex shared texture, {:.1f} MiB)", BITNESS,
-                       static_cast<double>(vram_bytes_) / MIB);
+                       static_cast<double>(vram_bytes_) / BYTES_PER_MIB);
   }
   return std::format("Direct3D 9 ({}): NR runs in Uplift's 64-bit helper (frames cross through shared memory, {:.1f} MiB)", BITNESS,
-                     static_cast<double>(view_bytes_) / MIB);
+                     static_cast<double>(view_bytes_) / BYTES_PER_MIB);
 }
 
 }  // namespace uplift::client

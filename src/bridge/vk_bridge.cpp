@@ -4,19 +4,16 @@
 #include <utility>
 
 #include "color/encoding.hpp"
+#include "memory_units.hpp"
 #include "nr/log.hpp"
+#include "text/effect_names.hpp"
+#include "text/timeout_messages.hpp"
 #include "vk/format.hpp"
 
 namespace uplift::bridge {
 namespace {
 
 using Microsoft::WRL::ComPtr;
-
-// Key decision h: every CPU wait on this path is capped, and a timeout skips that frame; a single one never latches (Plan 9 M-2), and
-// MAX_CONSECUTIVE_TIMEOUTS in a row do.
-constexpr uint32_t WAIT_CAP_MS = 2000u;
-// Batch 2 review, minor 4: this many 2 s timeouts of one kind of wait in a row stop the bridge for the session (6 s of stalls), instead of 2 s per frame.
-constexpr uint32_t MAX_CONSECUTIVE_TIMEOUTS = 3u;
 
 }  // namespace
 
@@ -26,8 +23,8 @@ std::unique_ptr<VkBridge> VkBridge::Create(vk::Device device, LUID luid, ComPtr<
   if (bridge->side_ == nullptr) return nullptr;
   const vk::DeviceRecord& record = bridge->interop_.Functions().record;
   if (record.semaphore_win32 && record.timeline && record.memory_win32) {
-    // GPU-ordered: the two shared D3D12 fences, imported as timeline semaphores. A refused import builds CPU-ordered and says why (Plan 9 M-4's
-    // lesson: the fallback is decided here, before any frame).
+    // GPU-ordered: the two shared D3D12 fences, imported as timeline semaphores. A refused import builds CPU-ordered and says why
+    // (the fallback is decided here, before any frame).
     ComPtr<ID3D12Fence>* const fences[] = {&bridge->to12_, &bridge->to11_};
     VkSemaphore* const semaphores[] = {&bridge->to12_vk_, &bridge->to11_vk_};
     for (size_t index = 0u; index < 2u && bridge->cpu_reason_.empty(); ++index) {
@@ -108,19 +105,19 @@ void VkBridge::LatchVulkan(std::string_view failure) {
   std::string reason = std::format("The Vulkan bridge stopped: {}",
                                    (interop_.DeviceLost() ? std::string_view("the game's Vulkan device was lost") : failure));
   nr::Log(nr::LogLevel::ERR, reason);
-  // Batch 2 review, minor 1: after a failed Vulkan wait on a lost device the private queue would otherwise wait on `to12` until destroy_device.
+  // After a failed Vulkan wait on a lost device the private queue would otherwise wait on `to12` until destroy_device.
   Stop(std::move(reason));
 }
 
 void VkBridge::NoteTimeout(uint32_t* consecutive, std::string_view what) {
   if (++*consecutive >= MAX_CONSECUTIVE_TIMEOUTS) {
-    LatchVulkan(std::format("{} did not finish within 2 s, {} times in a row", what, MAX_CONSECUTIVE_TIMEOUTS));
+    LatchVulkan(uplift::text::ConsecutiveTimeoutsText(what, std::chrono::milliseconds{WAIT_CAP_MS}, MAX_CONSECUTIVE_TIMEOUTS));
   }
 }
 
 BridgeFrame VkBridge::BeginFrame(vk::GameHost& host, const VkImageInfo& back_buffer, bool enabled, bool running,
                                  std::chrono::steady_clock::time_point now) {
-  present_synced_ = false;  // a new frame: its present-queue wait (design §3.4 case 2) is still to do
+  present_synced_ = false;  // a new frame: its present-queue wait is still to do
   side_->FreeFinished();
   interop_.FreeFinished(host);
   if (latch_.empty() && gpu_ordered_) {
@@ -138,7 +135,7 @@ BridgeFrame VkBridge::BeginFrame(vk::GameHost& host, const VkImageInfo& back_buf
     motion_failure_.reset();
   }
   if (!running || !latch_.empty()) {
-    // NR is off, or the bridge stopped (Plan 7 C-1, above the latch return): the shared surfaces go with NR's own (the stutter fix). Retire keeps
+    // NR is off, or the bridge stopped (before the latch return): the shared surfaces go with NR's own. Retire keeps
     // each one until the queues have passed its last use, so nothing still in flight is freed, and it never waits.
     Retire(host, &color_);
     Retire(host, &mask_);
@@ -160,13 +157,13 @@ BridgeFrame VkBridge::BeginFrame(vk::GameHost& host, const VkImageInfo& back_buf
                        L"Uplift shared back buffer", &color_, &failure)) {
         color_failure_.reset();
       } else {
-        color_failure_ = ShareFailure{.size = back_buffer.size, .format = back_buffer.format, .what = std::move(failure)};
+        color_failure_ = ShareFailure{.size = back_buffer.size, .format = back_buffer.format, .cause = std::move(failure)};
       }
     }
     // Reported while NR is off too, so the Session does not load for a back buffer the bridge cannot share.
     if (color_failure_ && color_failure_->Matches(back_buffer.size, back_buffer.format)) {
       problem = std::format("The back buffer could not be shared with the private Direct3D 12 device (DXGI_FORMAT {}, {})",
-                            static_cast<int>(back_buffer.format), color_failure_->what);
+                            static_cast<int>(back_buffer.format), color_failure_->cause);
     }
   }
   if (problem != problem_) {
@@ -177,7 +174,7 @@ BridgeFrame VkBridge::BeginFrame(vk::GameHost& host, const VkImageInfo& back_buf
   }
   if (!problem_.empty()) return {.size = back_buffer.size, .format = back_buffer.format, .problem = problem_};
   if (running && host.Valid()) {
-    // Batch 2 review I-1 (a): the present event comes before ReShade records its effects, so this barrier leads the immediate list. It orders
+    // The present event comes before ReShade records its effects, so this barrier leads the immediate list. It orders
     // the game's whole frame on this queue before the effects (Uplift's Signal flushes them without the game's present semaphores) and before
     // the copy in, at every trigger point.
     vk::RecordOpeningBarrier(host);
@@ -238,14 +235,14 @@ void VkBridge::StampUsed(uint64_t value, bool used_mask, bool used_motion) {
 bool VkBridge::Run(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage entry_state, const VkImageInfo& motion, const Recorder& record,
                    vk::GameHost* present_host, bool motion_is_dlss) {
   if (!latch_.empty() || !color_.d3d12 || back_buffer.image == VK_NULL_HANDLE || !host.Valid()) return false;
-  // Batch 2 re-review, minors 3 and 4. A full ring, or, CPU-ordered, an earlier recording still in flight (its 2 s wait ran out): this frame goes
+  // A full ring, or, CPU-ordered, an earlier recording still in flight (its 2 s wait ran out): this frame goes
   // without NR rather than waiting, and it is counted. While a recording is in flight nothing is copied in: the copy in would write the shared colour
   // under an NR that still reads and writes it, and the stale completion of that recording would end this frame's wait before its own NR finished.
   if (!side_->SlotFree() || (!gpu_ordered_ && side_->Completed() < side_->LastSignalled())) {
     ++busy_skips_;
     return false;
   }
-  // Design §3.4 case 2 (final review, minor 4): only for a frame that will go on, and before anything below can submit (a motion share's retire fence
+  // Only for a frame that will go on, and before anything below can submit (a motion share's retire fence
   // flushes the immediate list, which at the technique holds the effects before the marker: they must not reach the queue ahead of the game's frame).
   if (present_host != nullptr && !present_synced_) {
     switch (interop_.FlushAndWait(vk::WaitSlot::PRESENT_QUEUE, *present_host, WAIT_CAP_MS)) {
@@ -262,8 +259,8 @@ bool VkBridge::Run(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage
         return false;
     }
   }
-  // LaunchPad's UPLIFT_MV, or (Plan 14) DLSS's copied vectors, shared like the mask (Plan 7 §9 g's flags). Retired once recordings come without one for
-  // longer than a short gap (flicker fix: a present with no copy at all is rare now, PresentMotion binding an older copy, and it never remakes the share).
+  // LaunchPad's UPLIFT_MV, or DLSS's copied vectors, shared like the mask (the shared-texture flags). Kept through a run of up to MOTION_KEEP_PRESENTS
+  // recordings without one, and retired past it; a kept share is not copied into, bound or stamped, so it holds only its last use.
   ID3D12Resource* motion12 = nullptr;
   if (motion.image != VK_NULL_HANDLE && motion.format == DXGI_FORMAT_R16G16_FLOAT && motion.samples == 1u) {
     if (!motion_.d3d12 || motion_.size != motion.size) {
@@ -274,18 +271,17 @@ bool VkBridge::Run(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage
                          4u, L"Uplift shared motion", &motion_, &failure)) {
           motion_failure_.reset();
         } else {
-          // Logged once: not retried for this size (Plan 7 Minor 3).
-          motion_failure_ = ShareFailure{.size = motion.size, .format = DXGI_FORMAT_R16G16_FLOAT, .what = failure};
+          // Logged once: not retried for this size.
+          motion_failure_ = ShareFailure{.size = motion.size, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = failure};
           nr::Logf(nr::LogLevel::WARN, "{} could not be shared with the private Direct3D 12 device ({}); NR runs without {} motion",
-                   (motion_is_dlss ? "DLSS's motion vectors" : "UPLIFT_MV"), failure, (motion_is_dlss ? "DLSS's" : "LaunchPad's"));
+                   (motion_is_dlss ? "DLSS's motion vectors" : uplift::text::UPLIFT_MOTION_TEXTURE), failure, (motion_is_dlss ? "DLSS's" : "LaunchPad's"));
         }
       }
     }
     motion12 = motion_.d3d12.Get();  // null when the share failed: NR runs without motion
-    motion_gap_presents_ = 0u;
-  } else if (motion_.d3d12 && ++motion_gap_presents_ > MOTION_KEEP_PRESENTS) {
+    motion_keep_.Arrived();
+  } else if (motion_.d3d12 && motion_keep_.RetireOnMiss()) {
     Retire(host, &motion_);  // the motion stopped (Launchpad off, DLSS's copies no longer asked for): the share goes
-    motion_gap_presents_ = 0u;
   }
   const VkImageInfo motion_source = (motion12 != nullptr ? motion : VkImageInfo{});
   const bool wrote = (gpu_ordered_ ? RunGpuOrdered(host, back_buffer, entry_state, motion_source, motion12, motion_is_dlss, record)
@@ -300,7 +296,7 @@ bool VkBridge::Run(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage
 
 bool VkBridge::RunGpuOrdered(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage entry_state, const VkImageInfo& motion,
                              ID3D12Resource* motion12, bool motion_is_dlss, const Recorder& record) {
-  // The steps on this bridge's objects; RunBridgedFrame owns their order (R17: the Vulkan wait is queued only for a signal that was submitted).
+  // The steps on this bridge's objects; RunBridgedFrame owns their order (the Vulkan wait is queued only for a signal that was submitted).
   class Steps final : public BridgeSteps {
    public:
     Steps(VkBridge& bridge, vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage entry_state, const VkImageInfo& motion,
@@ -361,13 +357,13 @@ bool VkBridge::RunGpuOrdered(vk::GameHost& host, const VkImageInfo& back_buffer,
   const uint64_t in = ++last_value_;  // monotonic even when a step fails
   const uint64_t out = ++last_value_;
   const BridgedFrame frame = RunBridgedFrame(steps, in, out);
-  // Plan 7 C-1: stamped whenever the list was submitted, even when the D3D12 signal then failed: its surfaces are then held until the side's
+  // Stamped whenever the list was submitted, even when the D3D12 signal then failed: its surfaces are then held until the side's
   // progress passes `out` (for good, if that signal never comes), never freed under the list.
   if (steps.executed || frame.d3d12_signalled) {
     StampUsed(out, steps.used_mask, motion12 != nullptr);
   }
   if (frame.d3d12_signalled) {
-    watchdog_.Submitted(out, std::chrono::steady_clock::now());  // Plan 7 I-2: from submission, after recording
+    watchdog_.Submitted(out, std::chrono::steady_clock::now());  // from submission, after recording
   }
   if (!frame.failure.empty()) {
     LatchVulkan(steps.vulkan_failure.empty() ? frame.failure : std::string_view(steps.vulkan_failure));
@@ -377,9 +373,9 @@ bool VkBridge::RunGpuOrdered(vk::GameHost& host, const VkImageInfo& back_buffer,
 
 bool VkBridge::RunCpuOrdered(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage entry_state, const VkImageInfo& motion,
                              ID3D12Resource* motion12, bool motion_is_dlss, const Recorder& record) {
-  // Design §3.3, in this order: the copy in, the copy's completion on the CPU, NR, NR's completion on the CPU, the copy out. Nothing waits on the
-  // GPU, so there is no fence to strand and no watchdog; a timeout skips this frame, and three in a row stop the bridge (minor 4). Run has skipped
-  // the frames on which an earlier recording is still in flight (batch 2 review I-2).
+  // In this order: the copy in, the copy's completion on the CPU, NR, NR's completion on the CPU, the copy out. Nothing waits on the
+  // GPU, so there is no fence to strand and no watchdog; a timeout skips this frame, and MAX_CONSECUTIVE_TIMEOUTS in a row stop the bridge. Run has skipped
+  // the frames on which an earlier recording is still in flight.
   vk::RecordCopyIn(host, back_buffer.image, entry_state, color_.vulkan.image, motion.image, motion_.vulkan.image);
   switch (interop_.FlushAndWait(vk::WaitSlot::CPU_ORDER, host, WAIT_CAP_MS)) {
     case vk::WaitResult::DONE: break;
@@ -413,7 +409,7 @@ bool VkBridge::RunCpuOrdered(vk::GameHost& host, const VkImageInfo& back_buffer,
     LatchVulkan("the private Direct3D 12 queue's completion could not be waited for");
     return false;
   }
-  // Batch 2 re-review, minor 3: the event is set later (from the interrupt path) than the fence's value reaches the GPU, so a stale completion of an
+  // The event is set later (from the interrupt path) than the fence's value reaches the GPU, so a stale completion of an
   // older recording could still end this wait early; the fence's own value, which only `value` reaching it can satisfy, decides.
   if (WaitForSingleObject(progress_event_, WAIT_CAP_MS) != WAIT_OBJECT_0 || side_->Completed() < value) {
     NoteTimeout(&cpu_timeouts_, "NR on the private Direct3D 12 queue");  // the surfaces stay stamped; Run skips frames until it ends
@@ -441,8 +437,8 @@ MaskCopy VkBridge::CopyMask(vk::GameHost& host, const VkImageInfo& mask) {
     std::string failure;
     if (!CreateShared(mask.size, format->view_format, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
                       format->bytes_per_pixel, L"Uplift shared mask", &mask_, &failure)) {
-      // Logged once: not retried for this size and format (Plan 7 Minor 3).
-      mask_failure_ = ShareFailure{.size = mask.size, .format = format->view_format, .what = failure};
+      // Logged once: not retried for this size and format.
+      mask_failure_ = ShareFailure{.size = mask.size, .format = format->view_format, .cause = failure};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with the private Direct3D 12 device (DXGI_FORMAT {}, {})",
                static_cast<int>(format->view_format), failure);
       return {};
@@ -465,7 +461,7 @@ void VkBridge::Stop(std::string reason) {
   }
   // Each fence up to the highest value a wait on it was queued for; nothing waits beyond those. A refused signal (a removed private device) needs
   // no retry: that fence already reads UINT64_MAX, above every wait. CPU-ordered has no fence, so nothing to release.
-  // Batch 2 review, minor 6: `to12` is the fence the game's Vulkan queue signals (imported as a timeline semaphore), so a Vulkan signal of
+  // `to12` is the fence the game's Vulkan queue signals (imported as a timeline semaphore), so a Vulkan signal of
   // `waited12_` that is still pending then finds the value reached already, while Vulkan wants a timeline signal to exceed the current value
   // (VUID-VkSubmitInfo-pSignalSemaphores-03242). With a D3D12 fence underneath that is benign on NVIDIA's driver, and it only happens here, after a
   // latch, a device loss or destroy_device; the alternative is a private queue that waits for a signal that never comes.
@@ -508,7 +504,7 @@ uint64_t VkBridge::SharedBytes() const {
 }
 
 std::string VkBridge::StatusLine(std::string_view route_reason) const {
-  const double mib = static_cast<double>(SharedBytes()) / (1024.0 * 1024.0);
+  const double mib = static_cast<double>(SharedBytes()) / BYTES_PER_MIB;
   const std::string device = (route_reason.empty() ? std::string("a private Direct3D 12 device")
                                                    : std::format("a private Direct3D 12 device: {}", route_reason));
   std::string line = (gpu_ordered_ ? std::format("Vulkan: NR runs on {} (shared textures and fences, {:.1f} MiB)", device, mib)

@@ -39,7 +39,7 @@ ImportResult Interop::ImportImage(HANDLE nt_handle, DXGI_FORMAT format, nr::Size
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
   };
   SharedImage image = {.size = size, .format = format};
-  // Through the device's own chain, so ReShade registers the image (key decision e).
+  // Through the device's own chain, so ReShade registers the image.
   out.step = "vkCreateImage(external)";
   out.result = device_.vkCreateImage(device_.handle, &create, nullptr, &image.image);
   if (out.result != VK_SUCCESS) return out;
@@ -62,7 +62,7 @@ ImportResult Interop::ImportImage(HANDLE nt_handle, DXGI_FORMAT format, nr::Size
   }
   const uint32_t allowed = requirements.memoryTypeBits & properties.memoryTypeBits;
   if (allowed == 0u) return fail(VK_ERROR_FEATURE_NOT_PRESENT, "the memory type");
-  // Key decision e: the device-local type among the handle's and the image's bits when the record has the physical device, else the lowest.
+  // The device-local type among the handle's and the image's bits when the record has the physical device, else the lowest.
   uint32_t memory_type = static_cast<uint32_t>(std::countr_zero(allowed));
   if (device_.record.physical != VK_NULL_HANDLE) {
     if (const Loader* const loader = Loader::Get()) {
@@ -157,7 +157,7 @@ bool Interop::Seal(Retired* retired, GameHost& host) {
   VkFence fence = VK_NULL_HANDLE;
   if (device_.vkCreateFence(device_.handle, &create, nullptr, &fence) != VK_SUCCESS) return false;
   if (!host.FlushWithFence(fence)) {
-    Note(device_.vkGetFenceStatus(device_.handle, fence));  // batch 3 review, minor 3: the host's bool hides a VK_ERROR_DEVICE_LOST of the submit
+    Note(device_.vkGetFenceStatus(device_.handle, fence));  // the host's bool hides a VK_ERROR_DEVICE_LOST of the submit
     device_.vkDestroyFence(device_.handle, fence, nullptr);
     return false;
   }
@@ -268,7 +268,7 @@ WaitResult Interop::FlushAndWait(WaitSlot slot, GameHost& host, uint32_t timeout
     return WaitResult::FAILED;
   }
   if (!host.FlushWithFence(wait.fence)) {
-    // Batch 3 review, minor 3: the host's bool hides the VkResult of the submit. A lost device answers the fence's status with VK_ERROR_DEVICE_LOST
+    // The host's bool hides the VkResult of the submit. A lost device answers the fence's status with VK_ERROR_DEVICE_LOST
     // (an unsignalled fence of a healthy one says VK_NOT_READY, which Note ignores), so the latch can say so instead of "a submission failed".
     Note(device_.vkGetFenceStatus(device_.handle, wait.fence));
     return WaitResult::FAILED;

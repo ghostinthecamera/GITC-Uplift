@@ -100,7 +100,7 @@ std::optional<Device> Device::Open(VkDevice device) {
     opened.record = std::move(*record);
     opened.seen = true;
   } else {
-    // Design §2.5: a device the hook never saw can only run CPU-ordered, and only when it can import memory at all.
+    // A device the hook never saw can only run CPU-ordered, and only when it can import memory at all.
     opened.record = {
         .memory_win32 = (opened.vkGetMemoryWin32HandlePropertiesKHR != nullptr),
         .not_adjusted = "Uplift did not see this device being created",

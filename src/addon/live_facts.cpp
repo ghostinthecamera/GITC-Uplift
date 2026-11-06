@@ -34,7 +34,7 @@ void FillStageAndMotion(ui::SetupFacts* facts, Placement placement, sources::Mot
       facts->motion = ui::MotionPick::DLSS;
       facts->motion_copied = true;
       break;
-    case sources::MotionSource::LAUNCHPAD:  // UPLIFT_MV: Launchpad's, or (2026-10-08) Lumenite's while Uplift.fx is compiled for it
+    case sources::MotionSource::LAUNCHPAD:  // UPLIFT_MV: Launchpad's, or Lumenite's while Uplift.fx is compiled for it
       facts->motion = (facts->uplift_mv_lumenite ? ui::MotionPick::LUMENITE : ui::MotionPick::LAUNCHPAD);
       break;
   }
@@ -56,10 +56,17 @@ void FillPreference(ui::SetupFacts* facts, const ui::Settings& settings, bool ex
 }
 
 #if defined(_WIN64)
+bool SetupRayReconstruction(const ngx_hooks::FeatureRegistry& registry, const void* device, nr::Size swapchain,
+                            ngx_hooks::NgxApi api, std::optional<NVSDK_NGX_Feature> observed) {
+  if (observed) return *observed == NVSDK_NGX_Feature_RayReconstruction;
+  const auto* main = registry.MainHandle(device, swapchain, api);
+  const auto record = registry.Find(main);
+  return record && record->feature == NVSDK_NGX_Feature_RayReconstruction;
+}
+
 void FillRunning(ui::SetupFacts* facts, const ContextStatus& status, bool working) {
   FillStageAndMotion(facts, status.placement, status.motion_source, working);
   facts->game_passes_motion = status.game_passes_motion;
-  facts->ray_reconstruction = facts->ray_reconstruction || status.ray_reconstruction;
   facts->dlss_motion_gap = status.dlss_motion_gap;
   facts->launchpad_gap = status.launchpad_gap;
   facts->resolution = status.resolution_applied;
@@ -69,7 +76,7 @@ void FillRunning(ui::SetupFacts* facts, const ContextStatus& status, bool workin
   facts->frame = status.frame;
   facts->passes_run = status.passes_run;
   facts->passes_requested = status.session.passes_requested;
-  // Split chain (Task 3): where each pass runs, from the context's chain (Stage and SourcePick are both in chain order).
+  // Where each pass runs, from the context's chain (Stage and SourcePick are both in chain order).
   facts->chain.reset();
   if (status.group_count > 0u) {
     std::array<ui::SourcePick, ui::MAX_PASSES> chain = {};

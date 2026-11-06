@@ -15,6 +15,7 @@
 #include "ipc/control_block.hpp"
 #include "ipc/settings_text.hpp"
 #include "nr/session_status.hpp"
+#include "text/helper_messages.hpp"
 #include "ui/status_text.hpp"
 
 #ifdef UPLIFT_HELPER_IDENTITY_NR
@@ -24,10 +25,9 @@
 namespace uplift::helper {
 namespace {
 
-constexpr std::chrono::seconds IDLE_EXIT{30};  // design §2.2: no request at all for this long ends the helper
+constexpr std::chrono::seconds IDLE_EXIT{30};
 constexpr DWORD LOOP_WAIT_MS = 100u;           // the request wait, and the heartbeat's period
-// How long after it began a handler that can enter NR's runtime keeps the heartbeat moving: far above a cold NGX load, and
-// what bounds finding a helper stuck inside one (this plus the add-on's 20 s).
+// Long NR handlers refresh the heartbeat only up to this limit; the add-on then applies ipc::HelperLauncher::HUNG_AFTER.
 constexpr std::chrono::seconds LONG_HANDLER_BEAT{120};
 
 void RingSink(nr::LogLevel level, std::string_view message, void* user) {
@@ -105,7 +105,7 @@ int Helper::Loop() {
     }
     if (waited == WAIT_TIMEOUT) {
       if (std::chrono::steady_clock::now() - last_request >= IDLE_EXIT) {
-        nr::Log(nr::LogLevel::INFO, "no request for 30 s; the helper exits");
+        nr::Logf(nr::LogLevel::INFO, uplift::text::IDLE_EXIT_LINE, IDLE_EXIT.count());
         Teardown();
         return 0;
       }
@@ -121,7 +121,7 @@ int Helper::Loop() {
     bool deferred = false;
     if (request.kind == ipc::RequestKind::ATTACH || request.kind == ipc::RequestKind::FRAME
         || request.kind == ipc::RequestKind::RUN) {
-      heartbeat_.BeginLongHandler(LONG_HANDLER_BEAT);  // these can enter NR's runtime, whose cold load takes more than 20 s
+      heartbeat_.BeginLongHandler(LONG_HANDLER_BEAT);  // these can enter NR's runtime, whose cold load can take longer than ipc::HelperLauncher::HUNG_AFTER
     }
     try {
       switch (request.kind) {
@@ -283,7 +283,7 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
   }
   const bool running = (context_->NrState() != nr::SessionState::OFF);
   const auto now = std::chrono::steady_clock::now();
-  // 1.0.1 (F2): a line a minute while NR runs here, from the context's count of NR recordings (cheap accessors, no Status), and the figures once more
+  // 1.0.1: a line a minute while NR runs here, from the context's count of NR recordings (cheap accessors, no Status), and the figures once more
   // when this helper's device is found removed (by BeginFrame below, or earlier). The memory is the helper's own: NR lives in this process.
   const auto log_figures = [this](std::string_view lead, const addon::NrHeartbeat::Figures& figures) {
     nr::Log(nr::LogLevel::INFO, addon::HeartbeatLine(lead, figures, addon::ProcessPrivateMiB(), nr_vram_.MiB(side_->Device()->GetAdapterLuid())));
@@ -292,23 +292,19 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
     log_figures("NR running:", *figures);
   }
   const addon::TargetInfo target = transport_->Describe(frame.target, settings_.enabled, running, &reply->handles);
-  addon::FrameConfig config = addon::BuildFrameConfig(
-      {
-          .settings = &settings_,
-          .drag = ipc::DragFrom(frame.drag_bits),
-          .defaults_view = (frame.defaults_view != 0u),
-          .ngx_frame_generation = 0u,
-          .nr_allowed = (frame.nr_allowed != 0u),
-          .settings_generation = settings_generation_,
-          .game_facing_present = frame.game_facing_present != 0u,
-          .uplift_mv_lumenite = (frame.uplift_mv_lumenite != 0u),  // 2026-10-08: the readouts name UPLIFT_MV's source
-      },
+  addon::FrameSettings frame_settings = addon::BuildFrameSettings(
+      {.settings = &settings_, .drag = ipc::DragFrom(frame.drag_bits), .defaults_view = (frame.defaults_view != 0u), .settings_generation = settings_generation_},
       &coalescer_, now);
-  config.early_motion_extent = {frame.early_motion_width, frame.early_motion_height};
-  if (frame.drain_now != 0u) {
-    config.session.grace = std::chrono::milliseconds(0);  // transitions: NR's owner moved away from the helper: it drains at once, never after the grace
+  addon::FrameFacts frame_facts = addon::BuildFrameFacts(
+      settings_, {.nr_allowed = (frame.nr_allowed != 0u), .uplift_mv_lumenite = (frame.uplift_mv_lumenite != 0u)});  // the readouts name UPLIFT_MV's source
+  if (frame.game_facing_present != 0u) {
+    addon::ApplyGameFacingPresent(frame_settings, frame_facts, settings_);
   }
-  context_->BeginFrame(side_->Queue(), config, target, frame.marker_expected != 0u, now);
+  frame_facts.early_motion_extent = {frame.early_motion_width, frame.early_motion_height};
+  if (frame.drain_now != 0u) {
+    frame_settings.session.grace = addon::NO_GRACE;  // transitions: NR's owner moved away from the helper: it drains at once, never after the grace
+  }
+  context_->BeginFrame(side_->Queue(), frame_settings, frame_facts, target, frame.marker_expected != 0u, now);
   if (context_->DeviceLost()) {
     if (const std::optional<addon::NrHeartbeat::Figures> figures = nr_heartbeat_.Stop(now)) {
       log_figures("NR stopped after", *figures);
@@ -363,7 +359,7 @@ void Helper::FillStatus(ipc::Status* out) const {
   out->blocked_stage = static_cast<uint32_t>(snippet_found_ ? ui::CardStage::CONFLICTS : ui::CardStage::RUNTIME);
   out->trigger = static_cast<uint32_t>(status.trigger);
   out->diffuse_white_nits = status.diffuse_white_nits;
-  // Plan 14 (protocol 6): what the add-on's Setup and status card read about the helper's context.
+  // What the add-on's Setup and status card read about the helper's context.
   out->placement = static_cast<uint32_t>(status.placement);
   out->motion_source = static_cast<uint32_t>(status.motion_source);
   out->dlss_motion_gap = static_cast<uint32_t>(status.dlss_motion_gap);
@@ -384,7 +380,7 @@ void Helper::FillStatus(ipc::Status* out) const {
   ipc::CopyText(out->blocked, status.blocked);
   ipc::CopyText(out->output_problem, status.output_problem);
   ipc::CopyText(out->placement_note, status.placement_note);
-  ipc::CopyText(out->skip_reason, status.skip_reason);
+  ipc::CopyText(out->skip_reason, nr::SkipReasonText(status.skip_reason));
   // As addon.cpp's OnDrawOverlay builds it, so the card's "working" line and the overlay's status line are the 64-bit ones.
   ipc::CopyText(out->status_line,
                 ui::FormatStatusLine({
@@ -402,7 +398,7 @@ void Helper::FillStatus(ipc::Status* out) const {
   ipc::CopyText(out->placement_line, status.placement_line);
   ipc::CopyText(out->motion_line, status.motion_line);
   ipc::CopyText(out->work_line, status.work_line);
-  ipc::CopyText(out->exposure_line, status.exposure_line);  // Plan 17
+  ipc::CopyText(out->exposure_line, status.exposure_line);
   ipc::CopyText(out->ui_correction_note, status.ui_correction_note);
   ipc::CopyText(out->transport_line, transport_->Line());
 }

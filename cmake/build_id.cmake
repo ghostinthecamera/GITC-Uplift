@@ -1,4 +1,4 @@
-# Plan 9 (design §2.2): writes UPLIFT_BUILD_ID = "<version>+<git short hash>[-dirty]" into ${UPLIFT_OUTPUT}, only when the
+# Writes UPLIFT_BUILD_ID = "<version>+<git short hash>[-dirty]" into ${UPLIFT_OUTPUT}, only when the
 # text changed. Run at every build by the uplift_build_id target (cmake -P), not at configure time, so the two halves built
 # from one tree always agree and halves from different trees are refused.
 # A tree that is not a git checkout (a source archive such as GitHub's "Download ZIP") is "<version>+source"; without a

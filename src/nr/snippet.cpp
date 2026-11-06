@@ -47,8 +47,7 @@ using PopulateParametersFn = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter*)
 // block, or FAIL_NotInitialized when it finds no initialised instance.
 using StatsCallbackFn = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter*);
 
-// Plan 13: the Vulkan exports of the snippet and of the core. Both Init_Ext2 take the same nine arguments (the research probe, Plan 11's
-// case 1): the core's last one is never read when it is null, as the snippet's.
+// The snippet and core Vulkan Init_Ext2 exports take the same arguments; both accept a null final parameter block.
 using VulkanInitExt2 = NVSDK_NGX_Result(NVSDK_CONV*)(unsigned long long, const wchar_t*, VkInstance, VkPhysicalDevice, VkDevice,
                                                      PFN_vkGetInstanceProcAddr, PFN_vkGetDeviceProcAddr, NVSDK_NGX_Version,
                                                      const NVSDK_NGX_Parameter*);
@@ -102,7 +101,7 @@ LogHook log_hook;
 // Created-feature messages are emitted on the calling thread; worker logs cannot overwrite this call's evidence.
 thread_local std::string* created_network = nullptr;
 
-// The runtime modules this Uplift module mapped (M9): the loaded Snippet's, and every module a
+// The runtime modules this Uplift module mapped: the loaded Snippet's, and every module a
 // device loss abandoned. Read by IsUpliftRuntimeModule from game threads, hence the lock.
 struct OwnRuntimeModules {
   std::shared_mutex mutex;
@@ -111,7 +110,7 @@ struct OwnRuntimeModules {
 };
 OwnRuntimeModules own_runtime_modules;
 
-// The Vulkan devices the NGX core was initialised for by Uplift (Plan 13), so a core is never initialised twice for one VkDevice.
+// The Vulkan devices the NGX core was initialised for by Uplift, so a core is never initialised twice for one VkDevice.
 // A device that the vkDestroyDevice detour saw destroyed is forgotten: a new VkDevice at its address is a new device.
 struct VulkanCoreDevices {
   std::mutex mutex;
@@ -173,7 +172,7 @@ void* SafeOriginal(void* candidate, HMODULE uplift_module) {
 // calls Uplift makes. It must never let a C++ exception unwind into NVIDIA
 // frames: on a snippet thread that reaches std::terminate with no useful
 // trail, and mid-unwind through a foreign frame it can leave a lock held or
-// state corrupted. Sinks may allocate (the default sink and Plan 2's ReShade
+// state corrupted. Sinks may allocate (the default sink and ReShade
 // bridge both do), so std::bad_alloc alone is reachable here.
 void NVSDK_CONV SnippetLog(
     const char* message, NVSDK_NGX_Logging_Level /*level*/, NVSDK_NGX_Feature /*source*/) noexcept {
@@ -314,7 +313,7 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
     Logf(LogLevel::ERR, "{} lacks a required NVSDK_NGX_D3D12 export", ToUtf8(snippet_path));
     return NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
   }
-  // Plan 13: the Vulkan exports are optional here (null when absent); only BindVulkan requires them.
+  // The Vulkan exports are optional here (null when absent); only BindVulkan requires them.
   void* const vk_init_ext2 = ResolveExport(module.get(), "NVSDK_NGX_VULKAN_Init_Ext2");
   void* const vk_create_feature = ResolveExport(module.get(), "NVSDK_NGX_VULKAN_CreateFeature");
   void* const vk_evaluate_feature = ResolveExport(module.get(), "NVSDK_NGX_VULKAN_EvaluateFeature");
@@ -791,7 +790,7 @@ bool Snippet::AttachCore(ID3D12Device* device) {
   }
 
   if (core_module_ != nullptr && config_.initialize_core_for_device) {
-    // Plan 7 (D3D11 design R15): a D3D11 game's core was initialised for its own D3D11 device only.
+    // A D3D11 game's core was initialised for its own D3D11 device only.
     const auto initialize = reinterpret_cast<CoreInit>(ResolveExport(core_module_, "NVSDK_NGX_D3D12_Init"));
     if (initialize == nullptr || !initialize_once(initialize)) {
       Log(LogLevel::ERR, "the game's NGX core could not be initialised for Uplift's private Direct3D 12 device");
@@ -922,7 +921,7 @@ bool Snippet::AttachVulkanCore(const VulkanBinding& binding) {
       return false;
     }
     if (!initialize_once(initialize)) return false;
-    // Never FreeLibrary this core or call its Shutdown1 (spec §6.1; Shutdown1 after the snippet's teardown crashed on D3D12, driver 617.14):
+    // Never FreeLibrary this core or call its Shutdown1 (Shutdown1 after the snippet's teardown crashed on D3D12, driver 617.14):
     // it stays initialised for the device's lifetime, as a game would leave it.
     core_module_ = core.release();
     allocate_parameters_ = allocate;

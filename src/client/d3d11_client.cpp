@@ -10,15 +10,18 @@
 #include "addon/environment.hpp"
 #include "color/encoding.hpp"
 #include "ipc/control_block.hpp"
+#include "memory_units.hpp"
 #include "nr/log.hpp"
+#include "text/effect_names.hpp"
+#include "text/helper_messages.hpp"
+#include "text/nr_messages.hpp"
 
 namespace uplift::client {
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr auto GPU_CAP = std::chrono::seconds(2);  // the design's R29 cap on the game thread's waits
-constexpr double MIB = 1024.0 * 1024.0;
+constexpr auto GPU_CAP = std::chrono::seconds(2);  // the cap on the game thread's waits
 
 // The description behind a D3D11 resource; nullopt for anything that is not a 2D texture.
 std::optional<D3D11_TEXTURE2D_DESC> TextureDesc(ID3D11Resource* resource) {
@@ -50,14 +53,14 @@ std::unique_ptr<D3D11Client> D3D11Client::Create(ID3D11Device* device, bool allo
   }
   // WARP and other vendors are refused, as on D3D12 (addon::IsNvidiaDevice); cross-adapter sharing is out of scope.
   if (adapter_description.VendorId != addon::NVIDIA_VENDOR_ID) {
-    return fail("Uplift needs an NVIDIA GPU; this game renders on another adapter");
+    return fail(uplift::text::NVIDIA_GPU_REQUIRED_LINE);
   }
   std::unique_ptr<D3D11Client> client(new D3D11Client());
   client->label_ = label;
   client->device_ = device;
   device->GetImmediateContext(&client->context_);
   client->luid_ = adapter_description.AdapterLuid;
-  // Design §2.3: D3D11 fences need ID3D11Device5 and ID3D11DeviceContext4 (Windows 10 1703); without them the frame crosses
+  // D3D11 fences need ID3D11Device5 and ID3D11DeviceContext4 (Windows 10 1703); without them the frame crosses
   // through a legacy shared texture, ordered on the CPU.
   client->fenced_ = (allow_fences && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&client->device5_)))
                      && SUCCEEDED(client->context_.As(&client->context4_)));
@@ -163,13 +166,13 @@ ipc::Target D3D11Client::Describe(const std::optional<D3D11_TEXTURE2D_DESC>& des
     problem = std::format("Unsupported back-buffer format (DXGI_FORMAT {})", static_cast<int>(format));
   }
   if (!running || !problem.empty()) {
-    ReleaseShared();  // NR is off, or this image cannot go: the shared surfaces go with it (Plan 7's final review C-1)
+    ReleaseShared();  // NR is off, or this image cannot go: the shared surfaces go with it
   }
   if (problem.empty() && color_failure_ && color_failure_->Matches(size, format)) {
     problem = ShareFailureText("The back buffer", format, color_failure_->result);
   }
   if (problem.empty() && running && !fenced_ && (!kmt_texture_ || kmt_size_ != size || kmt_format_ != format)) {
-    // KMT: this side makes the shared texture (design §2.3); the helper opens it by its global handle.
+    // KMT: this side makes the shared texture; the helper opens it by its global handle.
     ReleaseShared();
     const D3D11_TEXTURE2D_DESC shared = {
         .Width = size.width,
@@ -244,7 +247,7 @@ bool D3D11Client::Apply(const ipc::Reply& reply, NrLink& link) {
     const HRESULT second = device5_->OpenSharedFence(to11, IID_PPV_ARGS(&to11_11_));
     if (FAILED(first) || FAILED(second)) {
       // An unusual device (a wrapper such as dgVoodoo2 can refuse): no restart would help, so the frame crosses through the legacy
-      // shared texture, ordered on the CPU, which needs no fences (design §2.3). The caller re-attaches the helper with KMT.
+      // shared texture, ordered on the CPU, which needs no fences. The caller re-attaches the helper with KMT.
       nr::Logf(nr::LogLevel::WARN,
                "The Direct3D 11 device could not open the helper's shared fences (HRESULT {:#010x}); frames cross through a "
                "CPU-ordered shared texture instead",
@@ -273,13 +276,13 @@ bool D3D11Client::Apply(const ipc::Reply& reply, NrLink& link) {
       } else {
         // The texture is the one the last SHARE_MASK asked for (this reply landed late), not the back buffer's size and format.
         mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .result = result};
-        nr::Log(nr::LogLevel::WARN, ShareFailureText("UPLIFT_MASK", mask_ask_.format, result));
+        nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MASK_TEXTURE, mask_ask_.format, result));
       }
     }
     if (motion != nullptr && latch_.empty()) {
       if (!Open(motion, &motion_, &result)) {
         motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
-        nr::Log(nr::LogLevel::WARN, ShareFailureText("UPLIFT_MV", DXGI_FORMAT_R16G16_FLOAT, result));
+        nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MOTION_TEXTURE, DXGI_FORMAT_R16G16_FLOAT, result));
       }
     }
   }
@@ -312,7 +315,7 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
   ipc::Run run = {.point = static_cast<uint32_t>(point)};
 
   if (!fenced_) {
-    // KMT (design §2.4): CopyResource into the shared texture, an event query (capped), RUN, and back.
+    // KMT: CopyResource into the shared texture, an event query (capped), RUN, and back.
     if (!kmt_texture_ || kmt_size_ != size || kmt_format_ != description->Format) return false;
     if (!nr::MeetsNrFloor(size)) {
       // Below NR's floor nothing can come back: after the first RUN at this size (whose reply's status says why) no RUN at all.
@@ -359,7 +362,7 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
     return true;
   }
 
-  // FENCED: Plan 7's hand-off, split across the IPC. RunBridgedFrame owns the order of the steps.
+  // FENCED: The shared-texture handoff, split across the IPC. RunBridgedFrame owns the order of the steps.
   if (!color_.texture || color_.size != size || color_.format != description->Format || to12_11_ == nullptr || to11_11_ == nullptr) {
     return false;
   }
@@ -381,7 +384,7 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
     }
     pending_out_ = 0u;
   }
-  // Plan 7 decision 3: LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
+  // LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
   const std::optional<D3D11_TEXTURE2D_DESC> motion_description = TextureDesc(motion);
   ID3D11Resource* shared_motion_source = nullptr;
   if (motion_description && motion_description->Format == DXGI_FORMAT_R16G16_FLOAT && motion_description->SampleDesc.Count == 1u) {
@@ -406,7 +409,7 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
         if (opened) {
           motion_failure_.reset();
         } else {
-          // Logged once: not retried for this size (Plan 7's final review Minor 3).
+          // Logged once: not retried for this size.
           motion_failure_ = ShareFailure{.size = motion_size, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
           nr::Logf(nr::LogLevel::WARN, "UPLIFT_MV could not be shared with Uplift's helper (HRESULT {:#010x}); NR runs without LaunchPad's motion",
                    static_cast<uint32_t>(result));
@@ -458,7 +461,7 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
       return reply.submitted != 0u;
     }
     bool SignalD3D12(uint64_t /*value*/) override { return reply.signalled != 0u; }
-    // R17: only after the reply said the signal was submitted (RunBridgedFrame calls this after SignalD3D12 returned true).
+    // Only after the reply said the signal was submitted (RunBridgedFrame calls this after SignalD3D12 returned true).
     bool WaitD3D11(uint64_t value) override {
       client_.waited11_ = value;  // for Stop, whether or not the context took it
       return SUCCEEDED(client_.context4_->Wait(client_.to11_11_.Get(), value));
@@ -479,13 +482,13 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
   const bridge::BridgedFrame frame = bridge::RunBridgedFrame(steps, in, out);
   run_sent_ = steps.sent;
   if (steps.timed_out) {
-    // No reply in 2 s (or the helper is gone, which the launcher shows next frame). Nothing was queued on this side's GPU after
+    // No reply within RUN_REPLY_CAP (or the helper is gone, which the launcher shows next frame). Nothing was queued on this side's GPU after
     // the copy-in, and no D3D11 wait ever will be for `out`; the helper's list may still run, so until to11 shows its signal
     // (or a late reply says there is none) nothing touches the shared textures. A RUN the link refused never reached the helper.
     if (steps.sent) {
       pending_out_ = out;
       in_flight_ = true;
-      nr::Log(nr::LogLevel::WARN, "Uplift's 64-bit helper did not answer within 2 s; frames go without NR until it does");
+      nr::Logf(nr::LogLevel::WARN, uplift::text::RUN_REPLY_TIMEOUT_LINE, std::chrono::duration<double>(RUN_REPLY_CAP).count());
     }
     return false;
   }
@@ -535,7 +538,7 @@ MaskCopy D3D11Client::CopyMask(ID3D11Resource* mask, NrLink& link) {
       CloseHandle(handle);
     }
     if (!opened) {
-      // Logged once: not retried for this size and format (final review Minor 3).
+      // Logged once: not retried for this size and format.
       mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .result = result};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, HRESULT {:#010x})",
                static_cast<int>(format->view_format), static_cast<uint32_t>(result));
@@ -551,10 +554,10 @@ MaskCopy D3D11Client::CopyMask(ID3D11Resource* mask, NrLink& link) {
 std::string D3D11Client::Line() const {
   if (fenced_) {
     return std::format("Direct3D 11 ({}): NR runs in Uplift's 64-bit helper (shared textures and fences, {:.1f} MiB)", BITNESS,
-                       static_cast<double>(color_.bytes + mask_.bytes + motion_.bytes) / MIB);
+                       static_cast<double>(color_.bytes + mask_.bytes + motion_.bytes) / BYTES_PER_MIB);
   }
   return std::format("Direct3D 11 ({}): NR runs in Uplift's 64-bit helper (shared texture, CPU-ordered, {:.1f} MiB)", BITNESS,
-                     static_cast<double>(kmt_bytes_) / MIB);
+                     static_cast<double>(kmt_bytes_) / BYTES_PER_MIB);
 }
 
 }  // namespace uplift::client

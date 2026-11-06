@@ -19,7 +19,7 @@
 
 namespace uplift::nr {
 
-// A point in GPU progress (v2 design §3.3): a present-queue frame, plus every completion token
+// A point in GPU progress: a present-queue frame, plus every completion token
 // issued before the mark was taken. It is complete once both are.
 struct Mark {
   uint64_t frame = 0u;
@@ -47,10 +47,10 @@ class QueueFences {
 // signals n on the queue, so IsComplete(n) means everything submitted for
 // frame n, including work flushed at its present, has finished.
 //
-// Completion tokens cover Uplift's recordings on command lists the game submits, on any queue
-// (v2 design §3.3 and this plan's amendment 1). A token is issued when Uplift records, submitted
+// Completion tokens cover Uplift's recordings on command lists the game submits, on any queue.
+// A token is issued when Uplift records, submitted
 // with its list, stamped by a Signal on that queue's own fence from the thread that submitted it
-// (or, after 250 ms and two frames, from any present), and complete once that fence passes the
+// (or after AGED_SUBMISSION_TIME and AGED_SUBMISSION_FRAMES, from any present), and complete once that fence passes the
 // stamp. The token methods are thread-safe; the frame methods run on one thread at a time.
 class Timeline {
  public:
@@ -68,19 +68,18 @@ class Timeline {
 
   // Installs the fences tokens are stamped with. Tokens stay outstanding until fences exist.
   void SetQueueFences(std::unique_ptr<QueueFences> fences);
-  // Plan 13 (design §3.3): Vulkan's tokens are VkEvents set at the end of each hooked evaluate. With a probe, TokensComplete asks it for
-  // every outstanding token, whatever its state; Poll prunes the tokens it says are complete; a teardown Flush polls it until the deadline
-  // (a host cannot wait on an event); Resubmit's fresh token stays RECORDED (nothing stamps it). The D3D12 path never sets one and behaves
-  // exactly as before. The probe is called under the token lock (shared by TokensComplete, exclusive by Poll): it must be thread-safe, and
-  // it must never call back into this Timeline.
+  // Vulkan tokens are VkEvents set at the end of each hooked evaluate. The probe checks every outstanding token, whatever its state.
+  // Poll prunes completed tokens; teardown polls until its deadline because a host cannot wait on a VkEvent.
+  // Resubmit's fresh token stays RECORDED because nothing stamps it. Direct3D 12 uses queue fences instead.
+  // The probe runs under the token lock (shared for TokensComplete, exclusive for Poll); it must be thread-safe and never call back into this Timeline.
   void SetTokenProbe(std::function<bool(uint64_t token)> probe);
 
   uint64_t BeginFrame(ID3D12CommandQueue* queue);
   [[nodiscard]] uint64_t CurrentFrame() const { return current_frame_.load(std::memory_order_acquire); }
-  // Present-motion flicker fix: the newest frame the GPU has passed (the instrumentation's lag is CurrentFrame minus this).
+  // The newest frame the GPU has passed (the instrumentation's lag is CurrentFrame minus this).
   [[nodiscard]] uint64_t CompletedFrame() const { return completed_(); }
   [[nodiscard]] bool IsComplete(uint64_t frame) const;
-  // Fix round 1, Important 1: a mark taken at or before the latest present-queue switch's frame also
+  // A mark taken at or before the latest present-queue switch's frame also
   // needs that switch's barrier token complete, whatever `mark.token` itself is -- the switch means
   // the shared frame fence no longer proves the old queue's work is done. Token completion is
   // cumulative, so requiring only the latest switch's barrier also covers every earlier one.
@@ -95,7 +94,7 @@ class Timeline {
   // Device teardown only: signal the current frame on the last queue, stamp every submitted token,
   // wait for all of it within `timeout` in total, then run every pending release regardless.
   void Flush(std::chrono::milliseconds timeout);
-  // Plan 15: Flush's wait alone (the frame signal, every submitted token stamped, the waits within `timeout` in total), with nothing released and no
+  // Flush's wait alone (the frame signal, every submitted token stamped, the waits within `timeout` in total), with nothing released and no
   // token forgotten. Empty when everything finished in time; otherwise what did not ("Timeline flush timed out", ...). The same stamping caveat as Flush:
   // only while no game thread is between its execute_command_list event and its native call (the game's own NGX shutdown, at the device's teardown).
   [[nodiscard]] std::string_view WaitIdle(std::chrono::milliseconds timeout);
@@ -109,11 +108,10 @@ class Timeline {
   // execute_command_list before the native ExecuteCommandLists, so nothing is signalled yet.
   void Submit(std::span<const uint64_t> tokens, ID3D12CommandQueue* queue, uint32_t thread_id,
               std::chrono::steady_clock::time_point now);
-  // N12 (Plan 3's deferred full fix): a closed list whose Uplift work was first recorded with token
-  // `first_token` was submitted to `queue` again without a Reset. A fresh token covers this execution,
-  // and every mark taken since `first_token` was issued also waits for it: the resources those marks
-  // guard may be read again.
-  // Returns the fresh token's id (Plan 13: a Vulkan caller maps it to the list's event).
+  // A closed list whose Uplift work was first recorded with token `first_token` was submitted to
+  // `queue` again without a Reset. A fresh token covers this execution, and every mark taken since
+  // `first_token` was issued also waits for it: the resources those marks guard may be read again.
+  // Returns the fresh token's id (a Vulkan caller maps it to the list's event).
   uint64_t Resubmit(uint64_t first_token, ID3D12CommandQueue* queue, uint32_t thread_id, std::chrono::steady_clock::time_point now);
   // `tokens`' list was reset or destroyed without being submitted: those tokens are complete.
   void Drop(std::span<const uint64_t> tokens);
@@ -123,16 +121,15 @@ class Timeline {
   // call before the single native call, so a Signal there could precede the batch's own submission.
   // Stamps that thread's submitted tokens.
   void StampThread(uint32_t thread_id);
-  // At a present, from any thread: stamps submissions still unstamped after 250 ms and two frames.
+  // At a present, from any thread: stamps submissions older than both AGED_SUBMISSION_TIME and AGED_SUBMISSION_FRAMES.
   void StampAged(std::chrono::steady_clock::time_point now);
   // The game destroyed `queue` (native) after idling it: forget the tokens submitted or stamped on it, so
   // no later stamp or Flush signals a released queue. The queue's fence and last value stay: a new queue at
   // the same address keeps counting up from it.
   void ForgetQueue(ID3D12CommandQueue* queue);
   [[nodiscard]] size_t OutstandingTokens() const;
-  // Split chain (fix round 1, I1: two NR features of one runtime never run at once, and never a GPU wait that could deadlock): `token` is a DLSS-stage NR
-  // recording's. The queue its list is submitted to is remembered for StageQueueOtherThan, and StageWorkDone checks it. Fix round 2 (I1): a token marked
-  // after its list was submitted names that queue at once; (m1) a list carrying one, executed again (Resubmit), marks its fresh token on its queue too.
+  // DLSS-stage NR tokens identify queues for StageQueueOtherThan and StageWorkDone; callers gate other queues through completion checks without GPU waits.
+  // Marking an already-submitted token records its queue immediately; Resubmit also marks the fresh token on its queue.
   void MarkStageToken(uint64_t token);
   // The first queue other than `queue` a marked token's list was submitted to, ever; null when none was.
   [[nodiscard]] ID3D12CommandQueue* StageQueueOtherThan(ID3D12CommandQueue* queue) const;
@@ -140,7 +137,7 @@ class Timeline {
   // itself runs in queue order; a RECORDED one is not on the GPU yet (StageQueueOtherThan reports where it goes once submitted), but counts as not done
   // until some marked token has been seen submitted (where they go is unknown before that).
   [[nodiscard]] bool StageWorkDone(uint64_t through, ID3D12CommandQueue* queue) const;
-  // Split chain (Task 5, Vulkan): whether `token` alone is complete (TokensComplete for one token): pruned, dropped or never issued here, its event set
+  // Split chain (Vulkan): whether `token` alone is complete (TokensComplete for one token): pruned, dropped or never issued here, its event set
   // (a probe's), or its stamp passed on its queue. Never waits.
   [[nodiscard]] bool TokenComplete(uint64_t token) const;
 
@@ -187,7 +184,7 @@ class Timeline {
   std::atomic<uint32_t> unstamped_{0u};  // SUBMITTED tokens: lets StampThread return without the lock
   std::unique_ptr<QueueFences> fences_;
   std::map<ID3D12CommandQueue*, uint64_t> queue_values_;  // the last value signalled on each queue's fence
-  // Important 1: the latest present-queue switch's frame and barrier token, both guarded by
+  // The latest present-queue switch's frame and barrier token, both guarded by
   // tokens_mutex_ like the rest of this group. 0/0 (the initial value) never matches a real mark,
   // since frames start at 1.
   uint64_t switch_frame_ = 0u;
@@ -198,9 +195,9 @@ class Timeline {
   };
   std::vector<Reexecution> reexecutions_;      // guarded by tokens_mutex_; pruned by Poll once each fresh token completes
   std::atomic<bool> stuck_warned_{false};      // one stuck-token WARN per Timeline's lifetime (one per device)
-  std::function<bool(uint64_t)> token_probe_;  // Plan 13; guarded by tokens_mutex_; empty on D3D12
+  std::function<bool(uint64_t)> token_probe_;  // guarded by tokens_mutex_; empty on D3D12
   std::vector<ID3D12CommandQueue*> stage_queues_;  // split chain: every queue a marked token's list was submitted to; guarded by tokens_mutex_
-  // Fix round 2 (m1): the first tokens of the newest lists submitted with a marked token (Resubmit's `first_token`), at most STAGE_LISTS of them.
+  // The first tokens of the newest lists submitted with a marked token (Resubmit's `first_token`), at most STAGE_LISTS of them.
   static constexpr size_t STAGE_LISTS = 64u;
   std::vector<uint64_t> stage_lists_;
 };

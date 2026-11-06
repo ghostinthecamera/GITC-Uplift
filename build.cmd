@@ -3,7 +3,7 @@ setlocal
 set "PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer;%PATH%"
 set "PRESET=%~1"
 if "%PRESET%"=="" set "PRESET=debug"
-rem Plan 9: a -x86 preset builds the 32-bit half with the x86 tools; every other preset the 64-bit half.
+rem A -x86 preset builds the 32-bit half with the x86 tools; every other preset the 64-bit half.
 set "VCVARS=vcvars64.bat"
 if /i "%PRESET:~-4%"=="-x86" set "VCVARS=vcvars32.bat"
 rem The newest Visual Studio with the C++ tools, any edition (vswhere ships with the Visual Studio Installer).

@@ -11,20 +11,21 @@
 #include "color/encoding.hpp"
 #include "nr/budget.hpp"
 #include "nr/session_status.hpp"
+#include "nr/skip_reason.hpp"
 #include "nr/types.hpp"
 #include "ui/settings.hpp"
 
 namespace uplift::ui {
 
-// Plan 14 (design §1.2, the user's decision 1: "a user shouldnt be able to select a state which is not possible in the setup"): one option of a Setup
-// row. Empty `why`: selectable. Otherwise greyed, unclickable, and `why` is the tooltip after "Unavailable here: ".
+// One option of a Setup row. Empty `why`: selectable. Otherwise greyed, unclickable, and `why` is the tooltip after
+// "Unavailable here: ".
 struct OptionState {
   std::string_view why;
   bool temporary = false;  // the cause can clear by itself this session (DLSS starting, Ray Reconstruction off, Launchpad turned on)
 };
 inline constexpr std::string_view FG_PRESENT_OFF_REASON = "Frame generation is on: turn on Present with frame generation (Advanced)";
 inline constexpr std::string_view DLSS_NOT_SEEN_REASON = "Available once the game renders with DLSS";
-// Plan 18 Task 12: the game switched its DLSS off (it released its last DLSS feature, or on Direct3D 11 shut NGX down) after DLSS ran on this device: the
+// The game switched its DLSS off (it released its last DLSS feature, or on Direct3D 11 shut NGX down) after DLSS ran on this device: the
 // DLSS stages, DLSS's vectors and Match game wait for it (a temporary cause: SetupFacts::dlss_off), and NR runs at Present, at Full, meanwhile.
 inline constexpr std::string_view DLSS_OFF_REASON = "The game's DLSS is off: turn it on in the game's settings";
 // On Vulkan at Present the game's DLSS motion vectors reach NR through copies made in the game's frame, on a GPU-ordered bridge only: a CPU-ordered Vulkan
@@ -32,48 +33,48 @@ inline constexpr std::string_view DLSS_OFF_REASON = "The game's DLSS is off: tur
 inline constexpr std::string_view VULKAN_CPU_ORDERED_MOTION = "Needs the GPU-ordered Vulkan bridge, which this device cannot have (Details says why once NR has run)";
 // The game presents from a second queue: the bridge would wait a GPU frame inside the present event for every copy.
 inline constexpr std::string_view VULKAN_SECOND_QUEUE_MOTION = "The game presents from a second queue, where copying DLSS's vectors would stall its render thread";
-// Final review I-1: the native Vulkan context stopped for good (the game shut NGX down on this device, or the device was lost). The DLSS stages and DLSS's
+// The native Vulkan context stopped for good (the game shut NGX down on this device, or the device was lost). The DLSS stages and DLSS's
 // vectors cannot run again this session (SetupFacts::dlss_unavailable).
 inline constexpr std::string_view VULKAN_NGX_SHUT_DOWN_REASON =
     "The game shut NVIDIA's NGX down on this device (or the device was lost): NR inside the game's frame stays off until the game restarts";
 // And while NR sat at a DLSS stage then, Present cannot run either: the native context keeps NR's claim, so the Present path never loads NR into a game that
-// may be quitting (Plan 13's exit protection; SetupFacts::present_fixed).
+// may be quitting (shutdown protection; SetupFacts::present_fixed).
 inline constexpr std::string_view VULKAN_NGX_SHUT_DOWN_PRESENT_REASON =
     "The game shut NVIDIA's NGX down on this device (or the device was lost) while NR ran inside its frame: NR stays off until the game restarts";
-// Plan 15: on Direct3D 12 the game shut NVIDIA's NGX down on its device (some games do when a DLSS setting changes, every Streamline game when it quits):
+// On Direct3D 12 the game shut NVIDIA's NGX down on its device (some games do when a DLSS setting changes, every Streamline game when it quits):
 // Uplift released NR first and holds it off there, every stage alike, until the game creates its DLSS again (a temporary cause: SetupFacts::held, CardFacts::held).
 inline constexpr std::string_view D3D12_NGX_SHUT_DOWN_REASON = "The game shut NVIDIA's NGX down; NR resumes when the game's DLSS starts again";
-// Plan 15: the same shutdown came while NR's last frames had not finished within 2 s, so NR was abandoned without an NGX call: nothing runs again on the device
-// this session (fix round, minor 6: SetupFacts::stopped greys every option with it, and the card is "NR stopped" with it).
+// The same shutdown came while NR's last frames had not finished within D3D12_CORE_SHUTDOWN_WAIT, so NR was abandoned without an NGX call: nothing runs
+// again on the device this session (SetupFacts::stopped greys every option with it, and the card is "NR stopped" with it).
 inline constexpr std::string_view D3D12_NGX_ABANDONED_REASON =
     "The game shut NVIDIA's NGX down while NR's work was still running: NR stays off on this device until the game restarts";
-// Plan 17 (the 2-strike rule): NR's private Direct3D 12 device (a bridge's, or the 64-bit helper's) stopped a second time this session, so Retry now is no
+// NR's private Direct3D 12 device (a bridge's, or the 64-bit helper's) stopped a second time this session, so Retry now is no
 // longer offered: the card's reason, and Setup's fixed cause (SetupFacts::stopped).
 inline constexpr std::string_view PRIVATE_DEVICE_STOPPED_TWICE_REASON = "NR stopped twice this session: it stays off on this device until the game restarts";
-// Test phase (review M-3): a bridge's private device that is the adapter's shared one (no device factory in this game's D3D12 runtime) stopped. No new device
+// A bridge's private device that is the adapter's shared one (no device factory in this game's D3D12 runtime) stopped. No new device
 // can be made while the game runs, so the first stop is final: Setup's fixed cause, and the log's line.
 inline constexpr std::string_view PRIVATE_DEVICE_STOPPED_FINAL_REASON =
     "NR stopped, and this game's Direct3D 12 runtime cannot give Uplift a new device: it stays off on this device until the game restarts";
-// Final review, minor 3: on Vulkan at Present Match game cannot read the game's DLSS render size, but a DLSS stage can (a temporary cause).
+// On Vulkan at Present Match game cannot read the game's DLSS render size, but a DLSS stage can (a temporary cause).
 inline constexpr std::string_view VULKAN_MATCH_GAME_REASON = "On Vulkan, Match game applies at After DLSS and Before upscaling";
-// Plan 18 (design §5): in a Direct3D 11 game whose DLSS runs on a separate Direct3D 12 device (a mod's own), which Uplift cannot reach: a fixed cause for the
+// In a Direct3D 11 game whose DLSS runs on a separate Direct3D 12 device (a mod's own), which Uplift cannot reach: a fixed cause for the
 // DLSS stages and DLSS's vectors (SetupFacts::dlss_unavailable). NR at Present runs as before.
 inline constexpr std::string_view FOREIGN_D3D12_DLSS_REASON =
     "This game's DLSS runs on a separate Direct3D 12 device (a mod), which Uplift cannot reach. NR runs at Present";
 
-// Split chain (Task 3): every "Runs at" choice is greyed with it on a route that runs every pass at one stage (every route but native Direct3D 12, for now).
+// Split chain: every "Runs at" choice is greyed with it on a route that runs every pass at one stage.
 inline constexpr std::string_view ONE_STAGE_REASON = "All passes run at one stage here";
 
-// A selectable motion source that delivered nothing on the latest recording (design §1.4).
+// A selectable motion source that delivered nothing on the latest recording.
 enum class MotionGap : uint8_t {
   NONE,
   GAME_PASSED_NONE,  // the game's evaluate carried no readable motion vectors
   NO_COPY,           // DLSS's vectors exist, but no copy of them reached the Present path's recording (a busy slot: the GPU runs behind)
   NO_UPLIFT_MV,      // Launchpad's UPLIFT_MV did not arrive at the recording (Uplift.fx's Uplift technique is not below Launchpad)
-  DLSS_PAUSED,       // final review, minor 1: no copy because the game's DLSS has not run for a while (a menu, a loading screen)
+  DLSS_PAUSED,       // no copy because the game's DLSS has not run for a while (a menu, a loading screen)
 };
 
-// What Setup and the card need about the device the overlay shows (design §1.2-1.4). Views must outlive ResolveSetup and BuildLiveCard.
+// What Setup and the card need about the device the overlay shows. Views must outlive ResolveSetup and BuildLiveCard.
 struct SetupFacts {
   // The stored preference: read, never written.
   SourcePick preferred_stage = SourcePick::AFTER_DLSS;  // SourcePickOf(settings, explicit_dlss)
@@ -81,22 +82,22 @@ struct SetupFacts {
   bool motion_auto = true;                              // MotionVectors = Auto: DLSS, else Launchpad, else Lumenite, else Off
   ResolutionMode preferred_resolution = ResolutionMode::FULL;
   float custom_scale = 100.f;
-  // What is possible now (§1.2).
+  // What is possible now.
   std::string_view dlss_unavailable;  // fixed: the bridges, OpenGL, the helper, hooks, ReShade, the latch, Vulkan's native problems
-  // Plan 18 (design §3): a DLSS stage that cannot run here although DLSS runs (the Direct3D 11 bridge cannot share its image): a fixed cause for that stage
+  // A DLSS stage that cannot run here although DLSS runs (the Direct3D 11 bridge cannot share its image): a fixed cause for that stage
   // alone; Present and DLSS's vectors stay as they are.
   std::string_view after_dlss_fixed;
   std::string_view before_upscaling_fixed;
   bool dlss_seen = false;             // sticky for the session
-  bool dlss_off = false;              // Plan 18 Task 12: seen, and the game switched its DLSS off since (DLSS_OFF_REASON); a pause is not off
+  bool dlss_off = false;              // seen, and the game switched its DLSS off since (DLSS_OFF_REASON); a pause is not off
   bool ray_reconstruction = false;    // the main DLSS feature is Ray Reconstruction
-  bool ray_reconstruction_after_dlss = false;  // split-chain design 11: Ray Reconstruction keeps NR after DLSS here (the Direct3D 11 bridge, decision Q7)
+  bool ray_reconstruction_after_dlss = false;  // Ray Reconstruction keeps NR after DLSS here (the Direct3D 11 bridge)
   bool frame_generation_blocks_present = false;
-  std::string_view present_fixed;      // final review I-1: Present cannot run this session (VULKAN_NGX_SHUT_DOWN_PRESENT_REASON)
-  // Plan 15: NR is held off on this Direct3D 12 device until the game's DLSS starts again (D3D12_NGX_SHUT_DOWN_REASON): every stage and DLSS's and
+  std::string_view present_fixed;      // Present cannot run this session (VULKAN_NGX_SHUT_DOWN_PRESENT_REASON)
+  // NR is held off on this Direct3D 12 device until the game's DLSS starts again (D3D12_NGX_SHUT_DOWN_REASON): every stage and DLSS's and
   // Launchpad's vectors wait (temporary), except the highlighted ones; a fixed cause keeps its own text.
   std::string_view held;
-  // Plan 15 fix round (minor 6): nothing can run again on this device this session (D3D12_NGX_ABANDONED_REASON): every option of the three rows is greyed
+  // Nothing can run again on this device this session (D3D12_NGX_ABANDONED_REASON): every option of the three rows is greyed
   // with it, a fixed cause, the highlights included (none of them runs).
   std::string_view stopped;
   bool before_fg_late_effects = false;
@@ -105,13 +106,13 @@ struct SetupFacts {
   std::string_view dlss_motion_fixed;  // Vulkan at Present on a CPU-ordered bridge: DLSS's motion vectors cannot reach NR there (VULKAN_CPU_ORDERED_MOTION)
   bool launchpad_ready = false;        // Launchpad's technique and Uplift.fx's Uplift technique are enabled
   std::string_view launchpad_fixed;    // Launchpad's vectors cannot reach NR on this device: a 32-bit Direct3D 10 or 11 device without fences shares no images
-  bool lumenite_ready = false;         // 2026-10-08: Lumenite's Kernel and Uplift.fx's Uplift technique are enabled
+  bool lumenite_ready = false;         // Lumenite's Kernel and Uplift.fx's Uplift technique are enabled
   std::string_view lumenite_fixed;     // Lumenite's vectors cannot reach NR on this device (Direct3D 9, or no images shared, as Launchpad's)
   bool uplift_mv_lumenite = false;     // UPLIFT_MV holds Lumenite's vectors now (the running provider reads as Lumenite, not Launchpad)
   bool match_game_readable = true;     // false on the bridges, OpenGL, the helper and Vulkan at Present
-  bool match_game_at_dlss_stages = false;  // final review, minor 3: unreadable here, but a DLSS stage on this device reads it (Vulkan at Present)
-  std::string_view below_full_fixed;   // why the modes below Full cannot run (fixed); no path sets it since Plan 14 Task 8
-  // What runs (§1.3).
+  bool match_game_at_dlss_stages = false;  // unreadable here, but a DLSS stage on this device reads it (Vulkan at Present)
+  std::string_view below_full_fixed;   // why the modes below Full cannot run (fixed); current producers leave it empty
+  // What runs.
   std::optional<SourcePick> stage;   // the shown context's decided placement; none without a context
   std::optional<MotionPick> motion;  // the latest recording's provider while NR works; none otherwise
   MotionGap dlss_motion_gap = MotionGap::NONE;
@@ -131,7 +132,7 @@ struct SetupFacts {
   std::string_view passes_note;
   std::string_view chain_note;  // split chain: "Pass 3 runs at After DLSS: frame generation is on" (ChainPlan::note)
   std::string_view frame_generation_line;
-  // Split chain (Task 3): passes 2..N's "Runs at" rows. `chain`: where each pass runs now, from the shown context's chain; without one, the stored picks
+  // Split chain: passes 2..N's "Runs at" rows. `chain`: where each pass runs now, from the shown context's chain; without one, the stored picks
   // from pass 1's highlight, never backwards.
   uint32_t pass_count = 1u;
   std::array<PassStage, MAX_PASSES - 1u> stored_stages = {};  // Pass{n}Stage
@@ -139,12 +140,12 @@ struct SetupFacts {
   std::optional<std::array<SourcePick, MAX_PASSES>> chain;
 };
 
-// Split chain (Task 3): one choice of a pass's "Runs at" row. Empty `why`: selectable. It owns its text (a backwards pick names the pass before).
+// Split chain: one choice of a pass's "Runs at" row. Empty `why`: selectable. It owns its text (a backwards pick names the pass before).
 struct PassStageOption {
   std::string why;
   bool temporary = false;  // the cause can clear by itself (frame generation turned off, DLSS starting)
 };
-// Split chain (Task 3): pass n's "Runs at" row (n >= 2).
+// Split chain: pass n's "Runs at" row (n >= 2).
 struct PassStageRow {
   std::array<PassStageOption, 4> options = {};  // PassStage order: Same as pass n-1, Before upscaling, After DLSS, Present
   PassStage shown = PassStage::SAME;  // the highlight: what runs (a stored stage that runs elsewhere shows where it runs)
@@ -156,20 +157,20 @@ struct SetupView {
   std::array<OptionState, 3> stage_options = {};       // SourcePick order
   std::array<OptionState, 4> motion_options = {};      // MotionPick order
   std::array<OptionState, 6> resolution_options = {};  // ResolutionMode order
-  SourcePick stage = SourcePick::PRESENT;              // the highlights: what runs (§1.3)
+  SourcePick stage = SourcePick::PRESENT;              // the highlights: what runs
   MotionPick motion = MotionPick::OFF;
   ResolutionMode resolution = ResolutionMode::FULL;
   std::string why;  // without "Why: "; empty unless a highlight is a temporary fallback from the preference
-  bool stopped = false;  // Plan 15 fix round: SetupFacts::stopped; the highlights stay greyed too (SetupSettle never un-greys them)
-  // Split chain (Task 3): passes 2..10's rows ([0] is pass 2; only those below the pass count are resolved), whether passes can run at several stages
+  bool stopped = false;  // SetupFacts::stopped; the highlights stay greyed too (SetupSettle never un-greys them)
+  // Split chain: passes 2..10's rows ([0] is pass 2; only those below the pass count are resolved), whether passes can run at several stages
   // here (otherwise every row is greyed with ONE_STAGE_REASON), and whether some pass runs at another stage than pass 1 (the pass trees name the stage).
   std::array<PassStageRow, MAX_PASSES - 1u> pass_stages = {};
   bool split_capable = false;
   bool chain_split = false;
-  // Split-chain design 11 (2026-10-15): the game's DLSS is Ray Reconstruction and Before upscaling may run on it here: its tip says what NR then works on.
+  // The game's DLSS is Ray Reconstruction and Before upscaling may run on it here: its tip says what NR then works on.
   bool before_upscaling_on_rr = false;
 };
-// Every option's state, the three highlights and the Why line, from the facts alone (design §1.2-§1.4): pure.
+// Every option's state, the three highlights and the Why line, from the facts alone: pure.
 [[nodiscard]] SetupView ResolveSetup(const SetupFacts& facts);
 
 // The working card's rows (they say what `shown` highlights), its note and its footer.
@@ -182,7 +183,7 @@ struct LiveCard {
 };
 [[nodiscard]] LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown);
 
-// R89: the highlights the overlay draws. An engine-driven change shows once it has lasted `settle`; a click shows at once.
+// The highlights the overlay draws. An engine-driven change shows once it has lasted `settle`; a click shows at once.
 enum class SetupRow : uint8_t {
   STAGE,
   MOTION,
@@ -214,9 +215,20 @@ class SetupSettle {
   std::optional<std::chrono::steady_clock::time_point> last_update_;
 };
 
-// Plan 7: the DLSS placements' reason on a bridged context without them (the Direct3D 10 bridge, OpenGL, the 32-bit helper); Plan 18: Direct3D 11 has them.
-// Plan 9 moved it here, from addon/device_context.hpp, so the 32-bit add-on shows the same text without that header.
+// The DLSS placements' reason on a bridged context without them (the Direct3D 10 bridge, OpenGL, the 32-bit helper); Direct3D 11 has them.
+// Shared with the 32-bit add-on without depending on DeviceContext.
 inline constexpr std::string_view BRIDGED_DLSS_REASON = "NR after DLSS needs a 64-bit Direct3D 11, Direct3D 12 or Vulkan game";
+
+// Before FG's stage choice (the PresentWithFrameGen row and the stage picker), greyed with why where frame generation cannot exist on the shown device.
+inline constexpr std::string_view BEFORE_FG_API_REASON = "Before FG supports Streamline on Direct3D 12 and Vulkan";
+inline constexpr std::string_view BEFORE_FG_NO_STREAMLINE_REASON = "Before FG needs frame generation through Streamline, which this game has not loaded";
+// Diffuse white on an sRGB image: display-referred, so no diffuse-white scale applies (color::InputScale is 1) and Manual exposure, which is Diffuse
+// white alone, does nothing. Greys the Diffuse white row and the Manual choice.
+inline constexpr std::string_view DIFFUSE_WHITE_SRGB_REASON = "Diffuse white does not apply to an sRGB image (display-referred)";
+// The Colour conversion rows that do nothing on the shown image: Primaries and Neural transfer on an sRGB image (the shaders saturate it and skip
+// the scene-linear path), Linear unit outside the linear BT.709 and scRGB encodings (color::InputScale reads it for those alone).
+inline constexpr std::string_view SRGB_FIX_REASON = "Does not apply to an sRGB image (display-referred)";
+inline constexpr std::string_view LINEAR_UNIT_REASON = "Linear unit applies to linear BT.709 and scRGB images only";
 
 struct StatusView {
   nr::SessionState state = nr::SessionState::OFF;
@@ -233,12 +245,12 @@ struct StatusView {
 // One status line for the overlay; only ACTIVE shows the detail.
 [[nodiscard]] std::string FormatStatusLine(const StatusView& view);
 
-// v2 design §3.5: "Frame generation: on (2x, NGX)", "Frame generation: on (3x)", "Frame generation: off".
+// "Frame generation: on (2x, NGX)", "Frame generation: on (3x)", "Frame generation: off".
 [[nodiscard]] std::string FormatFrameGenerationLine(bool active, uint32_t multiplier, bool from_ngx);
-// With frame generation on, every pass beyond the first can push it past its frame budget ([V7] §4.2).
+// With frame generation on, every pass beyond the first can push it past its frame budget.
 [[nodiscard]] std::optional<std::string> FrameGenerationWarning(bool active, uint32_t passes);
 
-// Keep faces (2026-10-08): what decides whether Keep faces can run on the shown device. NR's Character mask (DLSSNR.UseAutoMask), which the extra run
+// Keep faces: what decides whether Keep faces can run on the shown device. NR's Character mask (DLSSNR.UseAutoMask), which the extra run
 // needs, is forced off by NR whenever a DLSSNR.ControlMask is bound; Uplift binds none anywhere (its NR mask, UPLIFT_MASK, is applied after NR, in the
 // compose), so that never greys it.
 struct KeepFacesFacts {
@@ -248,7 +260,21 @@ struct KeepFacesFacts {
 // Why Keep faces cannot run on the shown device, or empty.
 [[nodiscard]] std::string_view KeepFacesUnavailable(const KeepFacesFacts& facts);
 
-// Plan 6 (v2 design §3.18, D1): the status card, the first failing stage of the verdict ladder.
+// Before FG: what decides whether the Before FG stage can be chosen on the shown device, in the order the reasons rank.
+struct BeforeFgFacts {
+  bool api_supported = true;      // a Direct3D 12 or Vulkan device, the only ones with a game-facing Streamline Present
+  bool hooks_installed = true;    // the Streamline presentation hooks started (addon::streamline::Installed)
+  bool streamline_loaded = true;  // the game's Streamline interposer is in the process (addon::streamline::StreamlineLoaded)
+};
+// Why the Before FG stage cannot be chosen on the shown device, or empty: the first missing fact's reason.
+[[nodiscard]] std::string_view BeforeFgUnavailable(const BeforeFgFacts& facts);
+// Why Diffuse white, and Manual exposure with it, does nothing on the shown image (DIFFUSE_WHITE_SRGB_REASON), or empty; nullopt, before a
+// frame has resolved the encoding, greys nothing.
+[[nodiscard]] std::string_view DiffuseWhiteUnavailable(std::optional<color::Encoding> encoding);
+// Why the Colour conversion row `key` (LinearUnitNits, SourcePrimaries, NeuralTransfer) does nothing on the shown image, or empty; nullopt greys nothing.
+[[nodiscard]] std::string_view ColorFixUnavailable(std::string_view key, std::optional<color::Encoding> encoding);
+
+// The status card, the first failing stage of the verdict ladder.
 enum class CardStage : uint8_t {
   DEVICE,
   CONFLICTS,
@@ -272,43 +298,50 @@ struct StatusCard {
   bool working = false;
   std::string title;
   std::string reason;
+  std::string before_fg_note;
   std::vector<std::string> fixes;  // at most two
   CardButton button = CardButton::NONE;
+
+  // A limited pass count takes priority over a Keep faces warning on a working card.
+  [[nodiscard]] std::string_view WorkingNote() const {
+    return working && !fixes.empty() ? std::string_view(fixes.front()) : std::string_view{};
+  }
 };
 
 // What the add-on knows about one device, flattened so the ladder stays testable. Views must outlive the call.
 struct CardFacts {
   std::string_view device_problem;  // no context here: not D3D12, not NVIDIA, could not start, or no frame yet
-  // Plan 9: the 32-bit add-on's 64-bit helper exited, hung or could not start; checked right after device_problem, and only
+  // The 32-bit add-on's 64-bit helper exited, hung or could not start; checked right after device_problem, and only
   // while `enabled` (with NR off the card is the normal off state; the failure shows again when NR is turned on).
   std::string_view helper_problem;
-  // Plan 17: NR's private Direct3D 12 device (a bridge's) stopped: its device was removed or hung, or the CPU-ordered timeouts. While `enabled` the card offers
+  // NR's private Direct3D 12 device (a bridge's) stopped: its device was removed or hung, or the CPU-ordered timeouts. While `enabled` the card offers
   // Retry now. `private_stops_final`: it stopped twice this session (the 2-strike rule), so the card says so instead, whatever `enabled` is; the helper's
   // second stop sets it too.
   std::string_view private_stopped;
   bool private_stops_final = false;
-  // Test phase (review M-3): the stop in `private_stopped` cannot be retried (the adapter's shared device): the card says to restart, with no Retry now,
+  // The stop in `private_stopped` cannot be retried (the adapter's shared device): the card says to restart, with no Retry now,
   // whatever `enabled` is.
   bool private_stop_unretryable = false;
   bool device_lost = false;
-  std::string_view stopped;  // Plan 15 fix round (minor 6): NR stopped on this device for the session (D3D12_NGX_ABANDONED_REASON); checked after `device_lost`
+  std::string_view stopped;  // NR stopped on this device for the session (D3D12_NGX_ABANDONED_REASON); checked after `device_lost`
   std::string_view blocked;  // a conflicting host, a missing runtime, another NR producer
   CardStage blocked_stage = CardStage::CONFLICTS;
   bool runtime_in_game_folder = false;  // 1.1.4: `blocked` says NVIDIA's DLSS loaded nvngx_dlssnr.dll from the game's folder first
   bool claimed_elsewhere = false;  // NR runs on another D3D12 device in this game
   bool enabled = false;
-  std::string_view held;  // Plan 15: why NR waits for the game's DLSS after the game's NGX shutdown (D3D12_NGX_SHUT_DOWN_REASON); checked right after `enabled`
+  std::string_view held;  // why NR waits for the game's DLSS after the game's NGX shutdown (D3D12_NGX_SHUT_DOWN_REASON); checked right after `enabled`
   nr::SessionStatus session;
   std::string_view output_problem;  // a device-removal message, an unsupported back-buffer format or colour space
   std::string_view placement_note;  // why no placement runs, or DLSS idle
   bool dlss_latched = false;
   bool nr_applied = false;
   uint32_t passes_run = 0u;
-  std::string_view skip_reason;
+  nr::SkipReason skip_reason = nr::SkipReason::NONE;
   bool skip_from_session = false;
   std::string_view working_line;  // FormatStatusLine, for a working card
-  nr::VramCheck vram_check = nr::VramCheck::CAREFUL;  // 2026-10-09: the video memory cards offer the looser checks there are
-  // Plan 9: the add-on's own file name, for the RUNTIME card's fix ("next to gitc-uplift.addon64 or the game").
+  std::string_view before_fg_note;
+  nr::VramCheck vram_check = nr::VramCheck::CAREFUL;  // the video memory cards offer the looser checks there are
+  // The add-on's own file name, for the RUNTIME card's fix ("next to gitc-uplift.addon64 or the game").
   std::string_view addon_file = "gitc-uplift.addon64";
 };
 [[nodiscard]] StatusCard BuildStatusCard(const CardFacts& facts);

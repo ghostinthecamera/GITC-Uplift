@@ -26,10 +26,10 @@ namespace uplift::helper {
 // `max_level`. Each record is the level as an ASCII digit, then the message.
 void InstallLogSink(ipc::ControlBlock* block, nr::LogLevel max_level);
 
-// The control block's heartbeat. Beat() is the loop's own (a request finished, the GPU moved). A handler that can enter NR's
-// runtime (ATTACH, FRAME, RUN) may run long: a cold NGX load takes more than the add-on's 20 s "hung" limit. Around such a
-// handler this class's thread beats every 100 ms, but only up to `limit` after the handler began, so a helper that is truly
-// stuck in one is still found (`limit` + 20 s), and one stuck in any other handler after 20 s, since nothing beats for those.
+// Beat marks request completion or GPU progress. ATTACH, FRAME and RUN can enter NR, whose cold load can exceed
+// ipc::HelperLauncher::HUNG_AFTER. During those handlers the worker beats at LOOP_WAIT_MS intervals, only until the
+// supplied limit expires. A helper truly stuck in one is still found (the limit plus HUNG_AFTER), and one stuck in any
+// other handler after HUNG_AFTER, since nothing beats for those.
 class Heartbeat {
  public:
   explicit Heartbeat(ipc::ControlBlock* block);
@@ -54,7 +54,7 @@ struct Events {
   HANDLE reply = nullptr;
 };
 
-// Plan 9 (design §2.1, §2.2): the helper's request loop. It hosts addon::DeviceContext unchanged (bridged) on the D3D12Side
+// The helper's request loop. It hosts addon::DeviceContext unchanged (bridged) on the D3D12Side
 // the process made, and a Transport for the API the add-on attached. One thread; the add-on has at most one request
 // outstanding.
 class Helper {
@@ -64,14 +64,14 @@ class Helper {
   Helper(const Helper&) = delete;
   Helper& operator=(const Helper&) = delete;
 
-  // Serves requests until QUIT (0) or 30 s with no request at all (0); 1 when the request event fails.
+  // Serves requests until QUIT or IDLE_EXIT without a request (returns 0); returns 1 if the request event fails.
   int Loop();
 
  private:
   void Attach(const ipc::Request& request, ipc::Reply* reply);
   void Frame(const ipc::Request& request, ipc::Reply* reply);
   void Run(const ipc::Request& request, ipc::Reply* reply, bool* deferred);
-  // The FrameTrigger's two events the add-on reached, applied to this side's copy so the two never diverge (design §2.1):
+  // The FrameTrigger's two events the add-on reached, applied to this side's copy so the two never diverge:
   // Replay a marker observed by the front, including recovery frames that already ran NR before effects.
   void ReplayPoint(uint32_t point);
   void ApplySettings(uint64_t generation);
@@ -88,10 +88,10 @@ class Helper {
   uint64_t settings_generation_ = 0u;
   bool settings_loaded_ = false;
   ui::ControlsCoalescer coalescer_;
-  std::optional<nr::MemoryInfo> last_game_memory_;  // the add-on's figures, for RealHost::QueryMemory (design §2.10)
+  std::optional<nr::MemoryInfo> last_game_memory_;  // the add-on's figures, for RealHost::QueryMemory
   bool snippet_found_ = false;
   uint64_t busy_skips_ = 0u;
-  // 1.0.1 (F2): the once-a-minute "NR running" line and the "NR stopped after" one, with this (the helper's) process's private bytes and VRAM.
+  // Periodic NR-running and stopped lines include this process's private bytes and VRAM.
   addon::NrHeartbeat nr_heartbeat_;
   addon::ProcessVram nr_vram_;
   Heartbeat heartbeat_;  // declared last: its thread stops first

@@ -5,7 +5,7 @@
 
 namespace uplift::addon {
 
-// Plan 12 (design §6): client::D3D12Host on ReShade's API, on the present queue's immediate command list (on Direct3D 12 the effect runtime's queue is the game's
+// client::D3D12Host on ReShade's API, on the present queue's immediate command list (on Direct3D 12 the effect runtime's queue is the game's
 // own, so the present event's and the effect events' queues are the same). Barriers and copies are command_list::barrier and copy_resource, which record
 // into ReShade's native immediate list and raise no add-on event; Signal is command_queue::signal, which flushes that list and then signals the fence natively;
 // Wait is command_queue::wait, which does not flush. Resource states are ReShade's api::resource_usage values (general is COMMON; undefined is never used: it

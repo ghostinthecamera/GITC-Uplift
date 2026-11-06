@@ -2,10 +2,10 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <climits>
 #include <format>
 
+#include "color/shader_constants.hpp"
 #include "decode_cs.h"
 #include "decode_ps.h"
 #include "decode_vs.h"
@@ -23,7 +23,6 @@ namespace uplift::color {
 namespace {
 
 constexpr uint32_t ROOT_CONSTANTS = 32u;     // the root signature's; each pass sets only what its shader reads
-constexpr uint32_t PASS_CONSTANTS = 16u;     // Plans 2-4's passes
 constexpr uint32_t SHADER_RESOURCES = 5u;    // t0-t4
 constexpr uint32_t UNORDERED_ACCESSES = 2u;  // u0, u1
 constexpr uint32_t TABLE_SIZE = SHADER_RESOURCES + UNORDERED_ACCESSES;
@@ -47,60 +46,52 @@ constexpr uint32_t FACES_COMBINE_FIRST_TABLE = 14u * TABLE_SIZE;
 constexpr uint32_t FACES_COMBINE_TABLE = 15u * TABLE_SIZE;
 constexpr uint32_t FACES_COMBINE_SWAPPED_TABLE = 16u * TABLE_SIZE;
 constexpr uint32_t FACES_SHOW_TABLE = 17u * TABLE_SIZE;
-// Fix round 4: the despike of pass 1's difference, and of a later pass's (A -> B, or swapped B -> A).
+// The despike of pass 1's difference, and of a later pass's (A -> B, or swapped B -> A).
 constexpr uint32_t FACES_DESPIKE_FIRST_TABLE = 18u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_TABLE = 19u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_SWAPPED_TABLE = 20u * TABLE_SIZE;
 constexpr uint32_t DESCRIPTORS_PER_SLOT = 21u * TABLE_SIZE;
-constexpr uint32_t STABILIZE_CUT = 0u;  // look_stabilize_cs.hlsl's modes and flags
-constexpr uint32_t STABILIZE_LEVELS = 1u;
-constexpr uint32_t STABILIZE_DETAIL = 2u;
-constexpr uint32_t STABILIZE_FLAG_RESET = 1u;
-constexpr uint32_t STABILIZE_FLAG_MOTION = 2u;
-constexpr uint32_t STABILIZE_FLAG_VECTORS = 4u;
-constexpr uint32_t FACES_MODE_LEVEL = 0u;  // faces_cs.hlsl's modes
-constexpr uint32_t FACES_MODE_FIRST = 1u;
-constexpr uint32_t FACES_MODE_LATER = 2u;
-constexpr uint32_t FACES_MODE_SHOW = 3u;
-constexpr uint32_t FACES_MODE_DESPIKE = 4u;
-constexpr uint32_t FACES_FLAG_FIRST = 1u;  // faces_cs.hlsl's flags
-constexpr uint32_t FACES_FLAG_FILL = 2u;
-
-uint32_t Bits(float value) {
-  return std::bit_cast<uint32_t>(value);
-}
 
 // faces_cs.hlsl's constants. A level dispatch's `first` matters at level 1 only.
-std::array<uint32_t, 16> FacesConstants(nr::Size size, uint32_t levels, uint32_t mode, uint32_t level, uint32_t flags,
+shader::FacesConstants FacesConstants(nr::Size size, uint32_t levels, uint32_t mode, uint32_t level, uint32_t flags,
                                         const look::FacesParameters& parameters) {
-  return {size.width, size.height, levels, mode, level, flags, Bits(parameters.low_level), Bits(parameters.mask_level),
-          Bits(parameters.edge_level), Bits(parameters.dead_zone), Bits(parameters.full_weight), Bits(parameters.coverage_gain), Bits(parameters.density),
-          parameters.speck_radius, Bits(parameters.fill_level), Bits(parameters.fill_tolerance)};
+  return {
+      .width = size.width, .height = size.height, .levels = levels,
+      .mode = mode, .level = level, .flags = flags,
+      .low_level = parameters.low_level, .mask_level = parameters.mask_level, .edge_level = parameters.edge_level,
+      .dead_zone = parameters.dead_zone, .full_weight = parameters.full_weight, .coverage_gain = parameters.coverage_gain,
+      .density = parameters.density, .speck_radius = parameters.speck_radius, .fill_level = parameters.fill_level,
+      .fill_tolerance = parameters.fill_tolerance,
+  };
 }
 
 // shaders/encode_cs.hlsl's constants; `change_mode` selects its change-field pass, `second_output` its u1 write.
-std::array<uint32_t, PASS_CONSTANTS> EncodeConstants(const EncodePass& pass, uint32_t change_mode, bool second_output) {
+shader::EncodeConstants EncodeConstants(const EncodePass& pass, uint32_t change_mode, bool second_output) {
   const bool whole = (pass.region.width == 0u || pass.region.height == 0u);
   const bool unpadded = pass.canvas.Empty();
   return {
-      static_cast<uint32_t>(pass.encoding), pass.width, pass.height, Bits(pass.input_scale),
-      (second_output ? 1u : 0u), (pass.exposure != nullptr ? 1u : 0u), Bits(pass.exposure_factor),
-      (whole ? 0u : pass.region.x), (whole ? 0u : pass.region.y), (whole ? pass.width : pass.region.width),
-      (whole ? pass.height : pass.region.height), (unpadded ? pass.width : pass.canvas.width),
-      (unpadded ? pass.height : pass.canvas.height), change_mode, pass.options, 0u,
+      .encoding = static_cast<uint32_t>(pass.encoding), .width = pass.width, .height = pass.height,
+      .input_scale = pass.input_scale, .second_output = (second_output ? 1u : 0u), .has_exposure = (pass.exposure != nullptr ? 1u : 0u),
+      .exposure_factor = pass.exposure_factor, .source_x = (whole ? 0u : pass.region.x), .source_y = (whole ? 0u : pass.region.y),
+      .source_width = (whole ? pass.width : pass.region.width), .source_height = (whole ? pass.height : pass.region.height), .canvas_width = (unpadded ? pass.width : pass.canvas.width),
+      .canvas_height = (unpadded ? pass.height : pass.canvas.height), .change_mode = change_mode, .options = pass.options,
+      .reserved0 = 0u,
   };
 }
 
 // look_stabilize_cs.hlsl's constants for one mode.
-std::array<uint32_t, PASS_CONSTANTS> StabilizeConstants(uint32_t mode, const StabilizePass& pass) {
+shader::StabilizeConstants StabilizeConstants(uint32_t mode, const StabilizePass& pass) {
   const StabilizeMotion& motion = pass.motion;
   const bool vectors = (motion.vectors.resource != nullptr);
-  const uint32_t flags = (pass.reset ? STABILIZE_FLAG_RESET : 0u) | (pass.motion_mode ? STABILIZE_FLAG_MOTION : 0u)
-                         | (vectors ? STABILIZE_FLAG_VECTORS : 0u);
+  const uint32_t flags = (pass.reset ? shader::STABILIZE_FLAG_RESET : 0u) | (pass.motion_mode ? shader::STABILIZE_FLAG_MOTION : 0u)
+                         | (vectors ? shader::STABILIZE_FLAG_VECTORS : 0u);
   return {
-      pass.atlas.image.width, pass.atlas.image.height, pass.atlas.levels, mode, pass.bands.stable_level, flags,
-      Bits(pass.rate), Bits(pass.bands.low_level), Bits(motion.scale_x), Bits(motion.scale_y), motion.vectors.rect.x,
-      motion.vectors.rect.y, (vectors ? motion.vectors.rect.width : 1u), (vectors ? motion.vectors.rect.height : 1u), 0u, 0u,
+      .image_width = pass.atlas.image.width, .image_height = pass.atlas.image.height, .levels = pass.atlas.levels,
+      .mode = mode, .level = pass.bands.stable_level, .flags = flags,
+      .rate = pass.rate, .low_level = pass.bands.low_level, .motion_scale_x = motion.scale_x,
+      .motion_scale_y = motion.scale_y, .motion_x = motion.vectors.rect.x, .motion_y = motion.vectors.rect.y,
+      .motion_width = (vectors ? motion.vectors.rect.width : 1u), .motion_height = (vectors ? motion.vectors.rect.height : 1u), .reserved0 = 0u,
+      .reserved1 = 0u,
   };
 }
 
@@ -184,7 +175,7 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
     nr::Logf(nr::LogLevel::ERR, "CreateComputePipelineState (motion) failed: {:#010x}", static_cast<uint32_t>(result));
     return false;
   }
-  // Plan 5: the look, meter and resolve pipelines.
+  // The look, meter and resolve pipelines.
   const auto build_compute = [&](const void* bytecode, size_t length, Microsoft::WRL::ComPtr<ID3D12PipelineState>* pipeline,
                                  const char* name) {
     const D3D12_COMPUTE_PIPELINE_STATE_DESC description = {
@@ -205,7 +196,7 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
       || !build_compute(g_resolve_cs, sizeof(g_resolve_cs), &resolve_pipeline_, "resolve")) {
     return false;
   }
-  // Keep faces fix round 1 (C3): optional. Without it NR runs as before and Keep faces is unavailable (FacesReady).
+  // Keep faces is optional. Without its pipeline NR still runs and FacesReady reports it unavailable.
   const D3D12_COMPUTE_PIPELINE_STATE_DESC faces = {.pRootSignature = root_signature_.Get(), .CS = {.pShaderBytecode = g_faces_cs, .BytecodeLength = sizeof(g_faces_cs)}};
   if (const HRESULT result = device->CreateComputePipelineState(&faces, IID_PPV_ARGS(&faces_pipeline_)); FAILED(result)) {
     faces_pipeline_.Reset();
@@ -227,7 +218,7 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
     nr::Logf(nr::LogLevel::ERR, "CreateDescriptorHeap (shader) failed: {:#010x}", static_cast<uint32_t>(result));
     return false;
   }
-  shader_heap_->SetName(L"Uplift colour descriptors");  // Plan 17: DRED names
+  shader_heap_->SetName(L"Uplift colour descriptors");  // DRED names
   if (const HRESULT result = device->CreateDescriptorHeap(&target_heap, IID_PPV_ARGS(&target_heap_)); FAILED(result)) {
     *error = "could not create the colour target descriptor heap";
     nr::Logf(nr::LogLevel::ERR, "CreateDescriptorHeap (target) failed: {:#010x}", static_cast<uint32_t>(result));
@@ -307,11 +298,11 @@ bool ColorPipeline::SlotInRange(uint32_t slot, const char* pass) const {
 }
 
 void ColorPipeline::DispatchCompute(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pipeline,
-                                    std::span<const uint32_t> constants, uint32_t base, uint32_t width, uint32_t height) {
+                                    std::span<const std::byte> constants, uint32_t base, uint32_t width, uint32_t height) {
   ID3D12DescriptorHeap* const heaps[] = {shader_heap_.Get()};
   list->SetDescriptorHeaps(1u, heaps);
   list->SetComputeRootSignature(root_signature_.Get());
-  list->SetComputeRoot32BitConstants(0u, static_cast<UINT>(constants.size()), constants.data(), 0u);
+  list->SetComputeRoot32BitConstants(0u, static_cast<UINT>(constants.size_bytes() / shader::WORD_BYTES), constants.data(), 0u);
   list->SetComputeRootDescriptorTable(1u, GpuDescriptor(base));
   list->SetPipelineState(pipeline);
   list->Dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
@@ -322,7 +313,7 @@ bool ColorPipeline::RecordEncode(ID3D12GraphicsCommandList* list, uint32_t slot,
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + ENCODE_TABLE;
   WriteTable(base, {{pass.source, pass.source_view_format}, {}, ExposureView(pass.exposure)},
              {{pass.model}, {pass.motion, DXGI_FORMAT_R16G16_FLOAT}});
-  DispatchCompute(list, encode_pipeline_.Get(), EncodeConstants(pass, 0u, pass.motion != nullptr), base,
+  DispatchCompute(list, encode_pipeline_.Get(), shader::Bytes(EncodeConstants(pass, shader::ENCODE_INPUT, pass.motion != nullptr)), base,
                   (pass.canvas.Empty() ? pass.width : pass.canvas.width), (pass.canvas.Empty() ? pass.height : pass.canvas.height));
   return true;
 }
@@ -332,7 +323,7 @@ bool ColorPipeline::RecordChange(ID3D12GraphicsCommandList* list, uint32_t slot,
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + CHANGE_TABLE;
   WriteTable(base, {{pass.encode.source, pass.encode.source_view_format}, {pass.nr_output}, ExposureView(pass.encode.exposure), {pass.model_input}},
              {{pass.change}, {pass.basis, DXGI_FORMAT_R16G16_FLOAT}});
-  DispatchCompute(list, encode_pipeline_.Get(), EncodeConstants(pass.encode, (pass.model_input != nullptr ? 2u : 1u), pass.basis != nullptr), base, pass.encode.width,
+  DispatchCompute(list, encode_pipeline_.Get(), shader::Bytes(EncodeConstants(pass.encode, (pass.model_input != nullptr ? shader::CHANGE_PRESERVED : shader::CHANGE_RECOMPUTED), pass.basis != nullptr)), base, pass.encode.width,
                   pass.encode.height);
   return true;
 }
@@ -341,12 +332,15 @@ bool ColorPipeline::RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot,
   if (!SlotInRange(slot, "RecordMotion")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + MOTION_TABLE;
   WriteTable(base, {{}, {pass.source, pass.source_view_format}, ExposureView(nullptr)}, {{}, {pass.target, DXGI_FORMAT_R16G16_FLOAT}});
-  const std::array<uint32_t, PASS_CONSTANTS> constants = {
-      pass.region.x, pass.region.y, pass.region.width, pass.region.height, pass.image.width, pass.image.height,
-      pass.canvas.width, pass.canvas.height, Bits(pass.scale_x), Bits(pass.scale_y),
-      (pass.flip_y ? 1u : 0u), Bits(pass.offset_x), Bits(pass.offset_y), 0u, 0u, 0u,
+  const shader::MotionConstants constants = {
+      .region_x = pass.region.x, .region_y = pass.region.y, .region_width = pass.region.width,
+      .region_height = pass.region.height, .image_width = pass.image.width, .image_height = pass.image.height,
+      .canvas_width = pass.canvas.width, .canvas_height = pass.canvas.height, .scale_x = pass.scale_x,
+      .scale_y = pass.scale_y, .flip_y = (pass.flip_y ? 1u : 0u), .offset_x = pass.offset_x,
+      .offset_y = pass.offset_y, .reserved3 = 0u, .reserved4 = 0u,
+      .reserved5 = 0u,
   };
-  DispatchCompute(list, motion_pipeline_.Get(), constants, base, pass.canvas.width, pass.canvas.height);
+  DispatchCompute(list, motion_pipeline_.Get(), shader::Bytes(constants), base, pass.canvas.width, pass.canvas.height);
   return true;
 }
 
@@ -366,12 +360,13 @@ bool ColorPipeline::RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot,
   // RTV descriptors are read when OMSetRenderTargets records, so one slot serves every frame.
   const D3D12_CPU_DESCRIPTOR_HANDLE target_handle = target_heap_->GetCPUDescriptorHandleForHeapStart();
   device_->CreateRenderTargetView(pass.target, &target_view, target_handle);
-  const std::array<uint32_t, PASS_CONSTANTS> constants = {
-      static_cast<uint32_t>(pass.encoding), (pass.target_view_srgb ? 1u : 0u), Bits(pass.input_scale),
-      Bits(pass.transfer_strength), Bits(pass.color_strength), (pass.exposure != nullptr ? 1u : 0u),
-      Bits(pass.exposure_factor), 0u, 0u, pass.width, pass.height,
-      (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u), 0u, 0u,
-      pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
+  const shader::DecodeConstants constants = {
+      .encoding = static_cast<uint32_t>(pass.encoding), .target_srgb = (pass.target_view_srgb ? 1u : 0u), .input_scale = pass.input_scale,
+      .transfer_strength = pass.transfer_strength, .color_strength = pass.color_strength, .has_exposure = (pass.exposure != nullptr ? 1u : 0u),
+      .exposure_factor = pass.exposure_factor, .origin_x = 0u, .origin_y = 0u,
+      .width = pass.width, .height = pass.height, .upsampling = (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
+      .source_x = 0u, .source_y = 0u, .options = pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u),
+      .chroma_clamp = pass.chroma_clamp,
   };
   const D3D12_VIEWPORT viewport = {.TopLeftX = 0.f, .TopLeftY = 0.f, .Width = static_cast<float>(pass.width),
                                    .Height = static_cast<float>(pass.height), .MinDepth = 0.f, .MaxDepth = 1.f};
@@ -379,7 +374,7 @@ bool ColorPipeline::RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot,
   ID3D12DescriptorHeap* const heaps[] = {shader_heap_.Get()};
   list->SetDescriptorHeaps(1u, heaps);
   list->SetGraphicsRootSignature(root_signature_.Get());
-  list->SetGraphicsRoot32BitConstants(0u, static_cast<UINT>(constants.size()), constants.data(), 0u);
+  list->SetGraphicsRoot32BitConstants(0u, static_cast<UINT>(sizeof(constants) / shader::WORD_BYTES), &constants, 0u);
   list->SetGraphicsRootDescriptorTable(1u, GpuDescriptor(base));
   list->SetPipelineState(pipeline);
   list->OMSetRenderTargets(1u, &target_handle, FALSE, nullptr);
@@ -396,29 +391,33 @@ bool ColorPipeline::RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_
   WriteTable(base, {{pass.source, pass.source_view_format}, {pass.nr_output}, ExposureView(pass.exposure),
                     {pass.mask, pass.mask_view_format}},
              {{pass.target, pass.target_uav_format}});
-  const std::array<uint32_t, PASS_CONSTANTS> constants = {
-      static_cast<uint32_t>(pass.encoding), 0u, Bits(pass.input_scale), Bits(pass.transfer_strength),
-      Bits(pass.color_strength), (pass.exposure != nullptr ? 1u : 0u), Bits(pass.exposure_factor), pass.origin_x,
-      pass.origin_y, pass.width, pass.height, (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
-      pass.source_x, pass.source_y, pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
+  const shader::DecodeConstants constants = {
+      .encoding = static_cast<uint32_t>(pass.encoding), .target_srgb = 0u, .input_scale = pass.input_scale,
+      .transfer_strength = pass.transfer_strength, .color_strength = pass.color_strength, .has_exposure = (pass.exposure != nullptr ? 1u : 0u),
+      .exposure_factor = pass.exposure_factor, .origin_x = pass.origin_x, .origin_y = pass.origin_y,
+      .width = pass.width, .height = pass.height, .upsampling = (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
+      .source_x = pass.source_x, .source_y = pass.source_y, .options = pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u),
+      .chroma_clamp = pass.chroma_clamp,
   };
-  DispatchCompute(list, compute_decode_pipeline_.Get(), constants, base, pass.width, pass.height);
+  DispatchCompute(list, compute_decode_pipeline_.Get(), shader::Bytes(constants), base, pass.width, pass.height);
   return true;
 }
 
 bool ColorPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, const MeterPass& pass) {
   if (!SlotInRange(slot, "RecordMeter")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + METER_TABLE;
-  // Plan 17: t2 is the game's exposure, as the encode binds it (a null view reads 0, which GameExposure replaces with 1).
+  // t2 is the game's exposure, as the encode binds it (a null view reads 0, which GameExposure replaces with 1).
   WriteTable(base, {{pass.source, pass.source_view_format}, {}, ExposureView(pass.probe ? pass.game_exposure : nullptr)},
              {{pass.state, DXGI_FORMAT_R32G32B32A32_FLOAT}});
-  const std::array<uint32_t, PASS_CONSTANTS> constants = {
-      static_cast<uint32_t>(pass.encoding), pass.primaries, Bits(pass.input_scale), pass.region.x, pass.region.y,
-      pass.region.width, pass.region.height, (pass.snap ? 1u : 0u), (pass.smooth ? 1u : 0u), Bits(pass.brighter_rate),
-      Bits(pass.darker_rate), Bits(pass.frame_seconds), (pass.probe ? 1u : 0u), (pass.probe && pass.game_exposure != nullptr ? 1u : 0u),
-      Bits(pass.game_exposure_factor), Bits(pass.probe ? pass.game_weight : 0.f),
+  const shader::MeterConstants constants = {
+      .encoding = static_cast<uint32_t>(pass.encoding), .primaries = pass.primaries, .input_scale = pass.input_scale,
+      .source_x = pass.region.x, .source_y = pass.region.y, .source_width = pass.region.width,
+      .source_height = pass.region.height, .snap = (pass.snap ? 1u : 0u), .smooth = (pass.smooth ? 1u : 0u),
+      .brighter_rate = pass.brighter_rate, .darker_rate = pass.darker_rate, .frame_seconds = pass.frame_seconds,
+      .probe = (pass.probe ? 1u : 0u), .has_game_texture = (pass.probe && pass.game_exposure != nullptr ? 1u : 0u), .game_factor = pass.game_exposure_factor,
+      .game_weight = pass.probe ? pass.game_weight : 0.f,
   };
-  DispatchCompute(list, meter_pipeline_.Get(), constants, base, 1u, 1u);  // one group of 256 threads
+  DispatchCompute(list, meter_pipeline_.Get(), shader::Bytes(constants), base, 1u, 1u);  // one group of 256 threads
   return true;
 }
 
@@ -431,8 +430,11 @@ bool ColorPipeline::RecordPyramid(ID3D12GraphicsCommandList* list, uint32_t slot
       UavBarriers(list, {pass.gauss, pass.peaks});  // level reads level - 1
     }
     const nr::Size size = look::LevelSize(pass.atlas.image, level);
-    const std::array<uint32_t, 4> constants = {pass.atlas.image.width, pass.atlas.image.height, level, 0u};
-    DispatchCompute(list, pyramid_pipeline_.Get(), constants, base, size.width, size.height);
+    const shader::PyramidConstants constants = {
+        .image_width = pass.atlas.image.width, .image_height = pass.atlas.image.height, .level = level,
+        .reserved0 = 0u,
+    };
+    DispatchCompute(list, pyramid_pipeline_.Get(), shader::Bytes(constants), base, size.width, size.height);
   }
   return true;
 }
@@ -442,10 +444,10 @@ bool ColorPipeline::RecordStabilize(ID3D12GraphicsCommandList* list, uint32_t sl
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + STABILIZE_TABLE;
   WriteTable(base, {{pass.gauss}, {pass.previous}, {pass.motion.vectors.resource, MotionViewOf(pass.motion)}},
              {{pass.current}, {pass.state, DXGI_FORMAT_R32G32B32A32_FLOAT}});
-  DispatchCompute(list, stabilize_pipeline_.Get(), StabilizeConstants(STABILIZE_CUT, pass), base, 1u, 1u);
+  DispatchCompute(list, stabilize_pipeline_.Get(), shader::Bytes(StabilizeConstants(shader::STABILIZE_CUT, pass)), base, 1u, 1u);
   UavBarriers(list, {pass.state});
   const nr::Size size = look::LevelSize(pass.atlas.image, pass.bands.stable_level);
-  DispatchCompute(list, stabilize_pipeline_.Get(), StabilizeConstants(STABILIZE_LEVELS, pass), base, size.width, size.height);
+  DispatchCompute(list, stabilize_pipeline_.Get(), shader::Bytes(StabilizeConstants(shader::STABILIZE_LEVELS, pass)), base, size.width, size.height);
   return true;
 }
 
@@ -454,7 +456,7 @@ bool ColorPipeline::RecordDetail(ID3D12GraphicsCommandList* list, uint32_t slot,
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + DETAIL_TABLE;
   WriteTable(base, {{pass.gauss}, {pass.previous}, {pass.motion.vectors.resource, MotionViewOf(pass.motion)}, {pass.change}},
              {{pass.current}, {pass.state, DXGI_FORMAT_R32G32B32A32_FLOAT}});
-  DispatchCompute(list, stabilize_pipeline_.Get(), StabilizeConstants(STABILIZE_DETAIL, pass), base, pass.atlas.image.width,
+  DispatchCompute(list, stabilize_pipeline_.Get(), shader::Bytes(StabilizeConstants(shader::STABILIZE_DETAIL, pass)), base, pass.atlas.image.width,
                   pass.atlas.image.height);
   return true;
 }
@@ -466,15 +468,17 @@ bool ColorPipeline::RecordShape(ID3D12GraphicsCommandList* list, uint32_t slot, 
                     {pass.detail}},
              {{pass.change}});
   const look::ShapeSettings& shape = pass.settings;
-  const uint32_t flags = (pass.sdr ? 1u : 0u) | (pass.history != nullptr ? 2u : 0u) | (pass.detail != nullptr ? 4u : 0u);
-  const std::array<uint32_t, 20> constants = {
-      pass.atlas.image.width, pass.atlas.image.height, pass.atlas.levels, flags,
-      Bits(pass.bands.low_level), pass.bands.peak_level, Bits(shape.tone), Bits(shape.detail),
-      Bits(shape.halo), Bits(shape.brighten), Bits(shape.darken), Bits(shape.color),
-      Bits(shape.hue), Bits(shape.shadows), Bits(shape.midtones), Bits(shape.highlights),
-      Bits(shape.edit_strength), Bits(shape.max_brighten), Bits(shape.max_darken), Bits(shape.max_color),
+  const uint32_t flags = (pass.sdr ? shader::SHAPE_FLAG_SDR : 0u) | (pass.history != nullptr ? shader::SHAPE_FLAG_STABILIZED : 0u) | (pass.detail != nullptr ? shader::SHAPE_FLAG_DETAIL : 0u);
+  const shader::ShapeConstants constants = {
+      .image_width = pass.atlas.image.width, .image_height = pass.atlas.image.height, .levels = pass.atlas.levels,
+      .flags = flags, .low_level = pass.bands.low_level, .peak_level = pass.bands.peak_level,
+      .tone = shape.tone, .detail = shape.detail, .halo = shape.halo,
+      .brighten = shape.brighten, .darken = shape.darken, .color = shape.color,
+      .hue = shape.hue, .shadows = shape.shadows, .midtones = shape.midtones,
+      .highlights = shape.highlights, .edit_strength = shape.edit_strength, .max_brighten = shape.max_brighten,
+      .max_darken = shape.max_darken, .max_color = shape.max_color,
   };
-  DispatchCompute(list, shape_pipeline_.Get(), constants, base, pass.atlas.image.width, pass.atlas.image.height);
+  DispatchCompute(list, shape_pipeline_.Get(), shader::Bytes(constants), base, pass.atlas.image.width, pass.atlas.image.height);
   return true;
 }
 
@@ -482,9 +486,11 @@ bool ColorPipeline::RecordResolve(ID3D12GraphicsCommandList* list, uint32_t slot
   if (!SlotInRange(slot, "RecordResolve")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + (pass.swapped ? RESOLVE_SWAPPED_TABLE : RESOLVE_TABLE);
   WriteTable(base, {{pass.given}}, {{pass.returned}});
-  const std::array<uint32_t, 4> constants = {pass.size.width, pass.size.height, Bits(pass.transfer_strength),
-                                             Bits(pass.color_strength)};
-  DispatchCompute(list, resolve_pipeline_.Get(), constants, base, pass.size.width, pass.size.height);
+  const shader::ResolveConstants constants = {
+      .width = pass.size.width, .height = pass.size.height, .transfer_strength = pass.transfer_strength,
+      .color_strength = pass.color_strength,
+  };
+  DispatchCompute(list, resolve_pipeline_.Get(), shader::Bytes(constants), base, pass.size.width, pass.size.height);
   return true;
 }
 
@@ -498,10 +504,10 @@ bool ColorPipeline::RecordFacesPyramid(ID3D12GraphicsCommandList* list, uint32_t
     table = FACES_LEVEL_SWAPPED_TABLE;
   }
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + table;
-  // Round 5: pass 1 with the fill writes the fill's pyramid too (u1).
+  // Pass 1 with the fill writes the fill's pyramid too (u1).
   const bool fill = (first && pass.parameters.fill);
   WriteTable(base, {{pass.changed}, {pass.reference}, {pass.mask}}, {{pass.atlas}, {(fill ? pass.fill : nullptr)}});
-  const uint32_t flags = (first ? FACES_FLAG_FIRST : 0u) | (fill ? FACES_FLAG_FILL : 0u);
+  const uint32_t flags = (first ? shader::FACES_FLAG_FIRST : 0u) | (fill ? shader::FACES_FLAG_FILL : 0u);
   for (uint32_t level = 1u; level <= pass.layout.levels; ++level) {
     if (level > 1u) {
       // Level reads level - 1.
@@ -512,7 +518,7 @@ bool ColorPipeline::RecordFacesPyramid(ID3D12GraphicsCommandList* list, uint32_t
       }
     }
     const nr::Size size = look::LevelSize(pass.layout.image, level);
-    DispatchCompute(list, faces_pipeline_.Get(), FacesConstants(pass.layout.image, pass.layout.levels, FACES_MODE_LEVEL, level, flags, pass.parameters), base,
+    DispatchCompute(list, faces_pipeline_.Get(), shader::Bytes(FacesConstants(pass.layout.image, pass.layout.levels, shader::FACES_MODE_LEVEL, level, flags, pass.parameters)), base,
                     size.width, size.height);
   }
   return true;
@@ -534,8 +540,8 @@ bool ColorPipeline::RecordFacesCombine(ID3D12GraphicsCommandList* list, uint32_t
     WriteTable(base, {{pass.atlas}, {pass.mask}, {pass.reference}, {pass.detail}}, {{pass.changed}});
   }
   DispatchCompute(list, faces_pipeline_.Get(),
-                  FacesConstants(pass.layout.image, pass.layout.levels, (first ? FACES_MODE_FIRST : FACES_MODE_LATER), 0u,
-                                 ((first && pass.parameters.fill) ? FACES_FLAG_FILL : 0u), pass.parameters),
+                  shader::Bytes(FacesConstants(pass.layout.image, pass.layout.levels, (first ? shader::FACES_MODE_FIRST : shader::FACES_MODE_LATER), 0u,
+                                 ((first && pass.parameters.fill) ? shader::FACES_FLAG_FILL : 0u), pass.parameters)),
                   base,
                   pass.layout.image.width, pass.layout.image.height);
   return true;
@@ -551,7 +557,7 @@ bool ColorPipeline::RecordFacesDespike(ID3D12GraphicsCommandList* list, uint32_t
   }
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + table;
   WriteTable(base, {{pass.changed}, {pass.reference}}, {{pass.detail}});
-  DispatchCompute(list, faces_pipeline_.Get(), FacesConstants(pass.layout.image, pass.layout.levels, FACES_MODE_DESPIKE, 0u, 0u, pass.parameters), base,
+  DispatchCompute(list, faces_pipeline_.Get(), shader::Bytes(FacesConstants(pass.layout.image, pass.layout.levels, shader::FACES_MODE_DESPIKE, 0u, 0u, pass.parameters)), base,
                   pass.layout.image.width, pass.layout.image.height);
   return true;
 }
@@ -560,7 +566,7 @@ bool ColorPipeline::RecordFacesShow(ID3D12GraphicsCommandList* list, uint32_t sl
   if (!SlotInRange(slot, "RecordFacesShow")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + FACES_SHOW_TABLE;
   WriteTable(base, {{}, {mask}}, {{target}});
-  DispatchCompute(list, faces_pipeline_.Get(), FacesConstants(size, 1u, FACES_MODE_SHOW, 0u, 0u, {}), base, size.width, size.height);
+  DispatchCompute(list, faces_pipeline_.Get(), shader::Bytes(FacesConstants(size, 1u, shader::FACES_MODE_SHOW, 0u, 0u, {})), base, size.width, size.height);
   return true;
 }
 

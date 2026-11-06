@@ -1,14 +1,14 @@
 cmake_minimum_required(VERSION 3.23)
-project(uplift VERSION 1.8.0 LANGUAGES C CXX)
+project(uplift VERSION 1.9.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# Plan 9: one tree, two halves. x64 is everything Uplift was before, plus the 64-bit NR helper; x86 is the 32-bit add-on's
-# own code (no NGX, no D3D12 pipeline, no shaders; MinHook only for the Vulkan device hook, Plan 11). build.cmd picks the tools by preset
-# (vcvars64 or vcvars32).
+# One tree builds both halves: x64 has the add-on, NR support and helper; x86 has the client add-on without NGX, shaders or a D3D12 NR pipeline.
+# Both use MinHook for the Vulkan device hook. build.cmd selects tools by preset; one configure produces one architecture.
+
 set(UPLIFT_ARCH "x64" CACHE STRING "x64 or x86: which half of Uplift this build makes")
 if(UPLIFT_ARCH STREQUAL "x86" AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
   message(FATAL_ERROR "UPLIFT_ARCH=x86 needs the x86 tools: configure release-x86 from build.cmd (vcvars32)")
@@ -29,7 +29,7 @@ if(NOT EXISTS "${UPLIFT_RESHADE_INCLUDE}/reshade.hpp" OR NOT EXISTS "${UPLIFT_IM
   message(FATAL_ERROR "ReShade/ImGui headers not found; run tools\\fetch_deps.cmd")
 endif()
 
-# Plan 11: the Vulkan SDK's headers, for both halves. Nothing links a Vulkan library (vulkan-1.dll is loaded at run time) and nothing from
+# The Vulkan SDK's headers, for both halves. No Vulkan import library is linked; exports are resolved at run time and nothing from
 # the SDK is copied into the repository.
 find_path(UPLIFT_VULKAN_INCLUDE vulkan/vulkan.h HINTS "$ENV{VULKAN_SDK}/Include" DOC "the Vulkan SDK's Include folder")
 if(NOT UPLIFT_VULKAN_INCLUDE)
@@ -37,7 +37,7 @@ if(NOT UPLIFT_VULKAN_INCLUDE)
 endif()
 
 add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
-# 1.1.5: the NR floor (nr/types.hpp): no NR network runs on a frame whose shorter side is below the first or whose longer side is below the
+# The NR floor (nr/types.hpp): no NR network runs on a frame whose shorter side is below the first or whose longer side is below the
 # second. One setting for every target, so the add-ons, the helper and the tests always agree. 640x360 is the smallest size probed on hardware.
 set(UPLIFT_NR_MIN_SHORT_SIDE 360 CACHE STRING "NR floor: the smallest shorter side NR runs on")
 set(UPLIFT_NR_MIN_LONG_SIDE 640 CACHE STRING "NR floor: the smallest longer side NR runs on")
@@ -45,7 +45,7 @@ add_compile_definitions(UPLIFT_NR_MIN_SHORT_SIDE=${UPLIFT_NR_MIN_SHORT_SIDE} UPL
 # The C++ warning and conformance set; MinHook's C sources below keep their own warning level.
 add_compile_options(/utf-8 "$<$<COMPILE_LANGUAGE:CXX>:/W4;/permissive-;/Zc:__cplusplus;/EHsc;/external:W0>")
 
-# Plan 9 (design §2.2): UPLIFT_BUILD_ID = "<version>+<git short hash>[-dirty]", written at every build (not at configure) by
+# UPLIFT_BUILD_ID = "<version>+<git short hash>[-dirty]", written at every build (not at configure) by
 # cmake/build_id.cmake, so gitc-uplift.addon32 and gitc-uplift-helper64.exe built from one tree agree and halves from different
 # trees are refused. Targets that include "build_id.hpp" depend on uplift_build_id and add UPLIFT_GENERATED.
 set(UPLIFT_GENERATED "${CMAKE_BINARY_DIR}/generated")
@@ -56,7 +56,7 @@ add_custom_target(uplift_build_id ALL
   COMMENT "uplift build id"
   VERBATIM)
 
-# MinHook, in both halves since Plan 11: the x86 add-on detours vulkan-1.dll's vkCreateDevice too (the x64 half also hooks NGX with it).
+# MinHook, in both halves: the x86 add-on detours vulkan-1.dll's vkCreateDevice too (the x64 half also hooks NGX with it).
 set(UPLIFT_MINHOOK_DIR "${CMAKE_SOURCE_DIR}/third_party/_deps/minhook" CACHE PATH "MinHook at the commit the pinned ReShade tag records")
 if(NOT EXISTS "${UPLIFT_MINHOOK_DIR}/include/MinHook.h")
   message(FATAL_ERROR "MinHook not found in ${UPLIFT_MINHOOK_DIR}; run tools\\fetch_deps.cmd")
@@ -71,13 +71,13 @@ add_library(uplift_minhook STATIC
 target_include_directories(uplift_minhook SYSTEM PUBLIC "${UPLIFT_MINHOOK_DIR}/include")
 target_compile_options(uplift_minhook PRIVATE /W1)
 
-# Plan 11 (key decision c): MinHook is initialised once per process (MH_ERROR_ALREADY_INITIALIZED counts as started), shared by the NGX hooks
+# MinHook is initialised once per process (MH_ERROR_ALREADY_INITIALIZED counts as started), shared by the NGX hooks
 # (x64) and the Vulkan device hook (both halves).
 add_library(uplift_minhook_once STATIC src/ngx_hooks/minhook_once.cpp)
 target_include_directories(uplift_minhook_once PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(uplift_minhook_once PUBLIC uplift_minhook)
 
-# Plan 11: the Vulkan game side, ReShade-free and D3D12-free, in both halves: the pure device-adjustment decision, the vkCreateDevice hook, the
+# The Vulkan game side, ReShade-free and D3D12-free, in both halves: the pure device-adjustment decision, the vkCreateDevice hook, the
 # loader's functions, the imports and the formats. It logs and writes its pending marker through the half's base library (linked below).
 add_library(uplift_vk STATIC
   src/vk/device_adjustment.cpp
@@ -92,7 +92,7 @@ target_include_directories(uplift_vk SYSTEM PUBLIC "${UPLIFT_VULKAN_INCLUDE}")
 target_compile_definitions(uplift_vk PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
 target_link_libraries(uplift_vk PUBLIC uplift_minhook_once)
 
-# Plan 12: the OpenGL game side, ReShade-free and D3D12-free, in both halves: the native functions (resolved at run time from the system opengl32.dll; nothing
+# The OpenGL game side, ReShade-free and D3D12-free, in both halves: the native functions (resolved at run time from the system opengl32.dll; nothing
 # links opengl32.lib, and gl.h only supplies GL 1.1's types), the formats by family, the imports and semaphores, the capped GLsync wait and the default
 # framebuffer's state guard. It logs nothing.
 add_library(uplift_gl STATIC
@@ -123,7 +123,7 @@ add_library(uplift_nr STATIC
   src/nr/session.cpp)
 target_include_directories(uplift_nr PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_include_directories(uplift_nr SYSTEM PUBLIC "${UPLIFT_NGX_INCLUDE}")
-# Plan 13: nr::Snippet's Vulkan binding and VkHost/VkFeature name Vulkan's types. Headers only: nothing links a Vulkan library.
+# nr::Snippet's Vulkan binding and VkHost/VkFeature name Vulkan's types. Headers only: nothing links a Vulkan library.
 target_include_directories(uplift_nr SYSTEM PUBLIC "${UPLIFT_VULKAN_INCLUDE}")
 target_compile_definitions(uplift_nr PUBLIC VK_NO_PROTOTYPES)
 target_link_libraries(uplift_nr PUBLIC d3d12 dxgi version)
@@ -151,7 +151,7 @@ add_library(uplift_testing STATIC
   src/testing/identity_host.cpp
   src/testing/vk_identity_host.cpp
   src/testing/dlss_host.cpp
-  src/testing/dlss_host11.cpp)  # Plan 18: the Direct3D 11 DLSS backends' keys and the fake core's (NVIDIA's is ngx_real_backend11.cpp, test executables only)
+  src/testing/dlss_host11.cpp)  # the Direct3D 11 DLSS backends' keys and the fake core's (NVIDIA's is ngx_real_backend11.cpp, test executables only)
 target_link_libraries(uplift_testing PUBLIC uplift_nr uplift_color windowscodecs ole32 d3dcompiler advapi32 d3d9 d3d10_1 d3d11 dxgi)
 target_compile_definitions(uplift_testing PUBLIC UPLIFT_SOURCE_DIR=L"${CMAKE_SOURCE_DIR}")
 endif()
@@ -183,14 +183,14 @@ foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0"
     DEPENDS "${CMAKE_SOURCE_DIR}/shaders/${shader_name}.hlsl" "${CMAKE_SOURCE_DIR}/shaders/color_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/change_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/decode_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/look_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/vk_common.hlsli"
+            "${CMAKE_SOURCE_DIR}/src/color/shader_values.h"
     COMMENT "dxc ${shader_name}.hlsl (${shader_profile})"
     VERBATIM)
   list(APPEND UPLIFT_SHADER_HEADERS "${shader_header}")
 endforeach()
 
-# Plan 13 (design §1.5, §4.2): SPIR-V for the Vulkan DLSS placements, from the same HLSL, with the Vulkan SDK's DXC (the Windows SDK's has no SPIR-V
-# back end). The SDK is required since Plan 11, so this adds no dependency. The DXIL above is built exactly as before: vk_common.hlsli's macros are empty
-# there (no __spirv__), so the generated DXIL headers stay byte-identical.
+# Vulkan's SPIR-V shaders use the same HLSL and the Vulkan SDK's DXC; the Windows SDK's DXC supplies DXIL.
+# vk_common.hlsli's Vulkan macros are empty for DXIL when __spirv__ is absent.
 find_program(UPLIFT_DXC_SPIRV NAMES dxc HINTS "$ENV{VULKAN_SDK}/Bin" NO_DEFAULT_PATH)
 if(NOT UPLIFT_DXC_SPIRV)
   message(FATAL_ERROR "the Vulkan SDK's dxc.exe (VULKAN_SDK/Bin) was not found: it compiles Uplift's SPIR-V shaders")
@@ -206,6 +206,7 @@ function(uplift_add_spirv name source)
     DEPENDS "${CMAKE_SOURCE_DIR}/shaders/${source}.hlsl" "${CMAKE_SOURCE_DIR}/shaders/vk_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/color_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/change_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/decode_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/look_common.hlsli"
+            "${CMAKE_SOURCE_DIR}/src/color/shader_values.h"
     COMMENT "dxc (SPIR-V) ${name}"
     VERBATIM)
   set(UPLIFT_SHADER_HEADERS ${UPLIFT_SHADER_HEADERS} "${header}" PARENT_SCOPE)
@@ -213,14 +214,14 @@ endfunction()
 uplift_add_spirv(encode_vk_sampled encode_cs)
 uplift_add_spirv(decode_vk_presr decode_cs "-DUPLIFT_VK_TARGET_FORMAT=\"rgba16f\"")
 uplift_add_spirv(motion_vk motion_cs)
-# Plan 14 (design §3.2): the look stage's three passes, for the Vulkan DLSS placements.
+# The look stage's three passes, for the Vulkan DLSS placements.
 uplift_add_spirv(look_pyramid_vk look_pyramid_cs)
 uplift_add_spirv(look_stabilize_vk look_stabilize_cs)
 uplift_add_spirv(look_shape_vk look_shape_cs)
-# Plan 14 Task 10: each later pass's own Transfer/Colour strength, and the exposure meter (sampled for Before upscaling, one per output format for After DLSS).
+# Each later pass's own Transfer/Colour strength, and the exposure meter (sampled for Before upscaling, one per output format for After DLSS).
 uplift_add_spirv(resolve_vk resolve_cs)
 uplift_add_spirv(meter_vk_sampled meter_cs)
-# Keep faces (2026-10-08): the twin's recombination and the later passes' protection.
+# Keep faces: the twin's recombination and the later passes' protection.
 uplift_add_spirv(faces_vk faces_cs)
 foreach(format IN ITEMS rgba16f r11g11b10f rgba8 rgb10a2 rgba32f)
   uplift_add_spirv(encode_vk_${format} encode_cs -DUPLIFT_VK_SOURCE_STORAGE=1 "-DUPLIFT_VK_TARGET_FORMAT=\"${format}\"")
@@ -265,7 +266,9 @@ add_library(uplift_addon_core STATIC
   src/addon/frame_trigger.cpp
   src/addon/device_context.cpp
   src/addon/frame_config.cpp
+  src/addon/before_fg_decision.cpp
   src/addon/placement.cpp
+  src/addon/vk_route.cpp
   src/addon/chain_plan.cpp
   src/addon/nr_claim.cpp
   src/addon/environment.cpp
@@ -280,21 +283,21 @@ add_library(uplift_addon_core STATIC
   src/addon/nr_heartbeat.cpp
   src/addon/dred.cpp)
 target_link_libraries(uplift_addon_core PUBLIC uplift_sources uplift_ui uplift_ngx_hooks uplift_state bcrypt)
-# Plan 11: the Vulkan side's log and pending marker (nr::Log, addon::WriteLatchMarker) come from here in the 64-bit half.
+# The Vulkan side's log and pending marker (nr::Log, addon::WriteLatchMarker) come from here in the 64-bit half.
 target_link_libraries(uplift_vk PUBLIC uplift_addon_core)
-# Plan 13: native Vulkan NR's device functions and completion (on nr::Timeline), the 64-bit half only. Batch 3: the native context of the DLSS
+# Native Vulkan NR's device functions and completion (on nr::Timeline), the 64-bit half only. The native context of the DLSS
 # placements (addon::VkDlssContext, ReShade-free), which sits on both and on the add-on core.
-# Plan 19: native NR at Present's own command buffers on the effect queue (vk::CommandRing).
+# Native NR at Present's own command buffers on the effect queue (vk::CommandRing).
 target_sources(uplift_vk PRIVATE src/vk/nr_functions.cpp src/vk/nr_timeline.cpp src/vk/command_ring.cpp src/vk/present_relay_host.cpp src/addon/vk_dlss_context.cpp)
 
-# Plan 7: the D3D11 bridge (design 2026-09-28-uplift-d3d11-design-draft.md). ReShade-free.
-# Plan 8: the D3D10 bridge on it (design 2026-09-29-uplift-d3d10-design.md); no new link library.
-# Plan 9: D3D12Side (its D3D12 half, which the 32-bit helper's transports sit on too) and RecordNr (the recorder both
+# The D3D11 bridge. ReShade-free.
+# The D3D10 bridge uses it and the same link libraries.
+# D3D12Side (its D3D12 half, which the 32-bit helper's transports sit on too) and RecordNr (the recorder both
 # bridges and the helper run).
-# Plan 10: KeyedRelay (the D3D10 bridge's relay and keyed-mutex hand-offs, which the 32-bit D3D10 client shares).
-# Plan 11: VkBridge (a Vulkan game device's NR, in-process), on src/vk/.
-# Plan 12: GlBridge (an OpenGL context's NR, in-process), on src/gl/.
-# Plan 18: the Direct3D 11 bridge's mid-frame DLSS hand-off and the Present ring (d3d11_dlss.cpp).
+# KeyedRelay (the D3D10 bridge's relay and keyed-mutex hand-offs, which the 32-bit D3D10 client shares).
+# VkBridge (a Vulkan game device's NR, in-process), on src/vk/.
+# GlBridge (an OpenGL context's NR, in-process), on src/gl/.
+# The Direct3D 11 bridge's mid-frame DLSS hand-off and the Present ring (d3d11_dlss.cpp).
 add_library(uplift_bridge STATIC
   src/bridge/bridge_sequence.cpp
   src/bridge/d3d12_side.cpp
@@ -307,9 +310,8 @@ add_library(uplift_bridge STATIC
   src/bridge/gl_bridge.cpp)
 target_link_libraries(uplift_bridge PUBLIC uplift_addon_core uplift_vk uplift_gl d3d11 d3d12 dxgi)
 
-# Plan 10 (design §2.1): the 32-bit add-on's clients in the 64-bit half too. gitc-uplift.addon64 runs a Direct3D 9 device's NR in
-# gitc-uplift-helper64.exe through the same D3D9Client and RemoteNr (the D3D10 and D3D11 clients are compiled here and never routed).
-# Plan 12: the OpenGL client (src/client/gl_client.cpp, on src/gl/) and the Direct3D 12 client, in both halves like the others; gitc-uplift.addon64 routes neither.
+# Clients compile in both halves. The x64 add-on uses the helper for Direct3D 9 and for Vulkan's helper route.
+# Direct3D 10, Direct3D 11, OpenGL and Direct3D 12 clients are compiled here but selected only by the x86 front.
 add_library(uplift_client STATIC
   src/client/remote_nr.cpp
   src/client/d3d9_client.cpp
@@ -322,6 +324,9 @@ target_link_libraries(uplift_client PUBLIC uplift_ipc uplift_bridge uplift_vk up
 
 add_library(uplift_addon SHARED
   src/addon.cpp
+  src/addon/host_common.cpp
+  src/addon/before_fg_device.cpp
+  src/addon/e2e_harness.cpp
   src/addon/streamline_present.cpp
   src/addon/before_fg_dx12.cpp
   src/addon/before_fg_vk.cpp
@@ -345,7 +350,7 @@ add_dependencies(uplift_addon uplift_build_id)
 
 else()
 
-# Plan 9: the 32-bit add-on's own code. No NGX include path, no shaders, no D3D12 pipeline.
+# The 32-bit add-on's own code. No NGX include path, no shaders, no D3D12 pipeline.
 add_library(uplift_ui32 STATIC
   src/sources/work_size.cpp
   src/nr/log.cpp src/color/encoding.cpp src/look/look_math.cpp
@@ -354,14 +359,14 @@ add_library(uplift_ui32 STATIC
   src/addon/nr_claim.cpp src/addon/reshade_version.cpp src/addon/environment.cpp src/addon/removal_latch.cpp)
 target_include_directories(uplift_ui32 PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(uplift_ui32 PUBLIC dxgi bcrypt version)
-# Plan 11: the Vulkan side's log and pending marker come from here in the 32-bit half.
+# The Vulkan side's log and pending marker come from here in the 32-bit half.
 target_link_libraries(uplift_vk PUBLIC uplift_ui32)
 add_library(uplift_bridge_sequence STATIC src/bridge/bridge_sequence.cpp)
 target_include_directories(uplift_bridge_sequence PUBLIC "${CMAKE_SOURCE_DIR}/src")
 
 endif()
 
-# Plan 9 (design §2.2): the control block, the settings text and the launcher, in both halves. The 32-bit add-on and the
+# The control block, the settings text and the launcher, in both halves. The 32-bit add-on and the
 # 32-bit tests start the helper with the launcher; the helper maps the block and reads the text.
 add_library(uplift_ipc STATIC
   src/ipc/control_block.cpp
@@ -376,10 +381,10 @@ endif()
 
 if(UPLIFT_ARCH STREQUAL "x86")
 
-# Plan 9 (design §2.5): the 32-bit add-on's link to the helper and its D3D9 and D3D11 clients. ReShade-free (native
+# The 32-bit add-on's link to the helper and its D3D9 and D3D11 clients. ReShade-free (native
 # pointers only), so the x86 GPU tests drive them exactly as gitc-uplift.addon32 does. The x64 half builds them too (above).
-# Plan 10 (design §3): the Direct3D 10 client, on Plan 8's relay (KeyedRelay, ReShade-free too).
-# Plan 12: gl_client.cpp (on src/gl/) and d3d12_client.cpp. Nothing here links d3d12.lib or opengl32.lib: the Direct3D 12 client makes only COM calls on the game's
+# The Direct3D 10 client, on the relay (KeyedRelay, ReShade-free too).
+# gl_client.cpp (on src/gl/) and d3d12_client.cpp. Nothing here links d3d12.lib or opengl32.lib: the Direct3D 12 client makes only COM calls on the game's
 # own device, and every GL function is resolved at run time.
 add_library(uplift_client STATIC
   src/client/remote_nr.cpp
@@ -392,11 +397,12 @@ add_library(uplift_client STATIC
   src/bridge/keyed_relay.cpp)
 target_link_libraries(uplift_client PUBLIC uplift_ipc uplift_bridge_sequence uplift_ui32 uplift_vk uplift_gl d3d9 d3d10_1 d3d11 dxgi)
 
-# Plan 9 (design §2.6): gitc-uplift.addon32, the 32-bit add-on: ReShade's events, the settings and the panel, and the clients (Plan 10:
-# through addon::HelperFront, which gitc-uplift.addon64 hosts for its Direct3D 9 devices too). It contains no NGX code; NR runs in
-# gitc-uplift-helper64.exe, which lies next to it.
+# gitc-uplift.addon32 hosts ReShade events, settings, the panel and HelperFront clients.
+# The x64 add-on also uses HelperFront for Direct3D 9 and Vulkan helper devices.
+# The x86 add-on contains no NGX code; NR runs in the neighbouring gitc-uplift-helper64.exe.
 add_library(uplift_addon32 SHARED
   src/addon32.cpp
+  src/addon/host_common.cpp
   src/addon/helper_front.cpp
   src/addon/live_facts.cpp
   src/addon/log_bridge.cpp
@@ -412,12 +418,12 @@ target_include_directories(uplift_addon32 SYSTEM PRIVATE "${UPLIFT_RESHADE_INCLU
 target_include_directories(uplift_addon32 PRIVATE "${UPLIFT_GENERATED}")
 target_compile_definitions(uplift_addon32 PRIVATE ImTextureID=ImU64 IMGUI_DISABLE_OBSOLETE_FUNCTIONS UPLIFT_VERSION_TEXT="${PROJECT_VERSION}")
 target_link_libraries(uplift_addon32 PRIVATE uplift_client uplift_vk uplift_gl delayimp)
-# Plan 10 (final review M-3): D3D11CreateDevice, the only d3d11.dll import, runs for a Direct3D 10 game's relay alone. Delay-loaded, so a
+# D3D11CreateDevice, the only d3d11.dll import, runs for a Direct3D 10 game's relay alone. Delay-loaded, so a
 # Direct3D 9 game never maps d3d11.dll for Uplift's sake.
 target_link_options(uplift_addon32 PRIVATE /DELAYLOAD:d3d11.dll)
 add_dependencies(uplift_addon32 uplift_build_id)
 
-# Plan 9 Task 7: the 32-bit GPU smokes (tests/x86), against the x64 half's helper test build.
+# The 32-bit GPU smokes (tests/x86), against the x64 half's helper test build.
 if(UPLIFT_WITH_TESTS AND EXISTS "${CMAKE_SOURCE_DIR}/tests/x86/CMakeLists.txt")
   enable_testing()
   add_subdirectory(tests/x86)
@@ -427,7 +433,7 @@ endif()
 
 if(UPLIFT_ARCH STREQUAL "x64")
 
-# Plan 9 (design §2.1): the 64-bit NR helper, DeviceContext on D3D12Side; no UI, no window (a WIN32 executable). The
+# The 64-bit NR helper, DeviceContext on D3D12Side; no UI, no window (a WIN32 executable). The
 # test build swaps NVIDIA's runtime for testing::IdentityHost (UPLIFT_HELPER_IDENTITY_NR); it never ships.
 set(UPLIFT_HELPER_SOURCES src/helper/main.cpp src/helper/helper.cpp src/helper/transports.cpp)
 add_executable(uplift_helper64 WIN32 ${UPLIFT_HELPER_SOURCES})

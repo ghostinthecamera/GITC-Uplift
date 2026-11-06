@@ -17,21 +17,23 @@
 
 namespace uplift::ui {
 
+using nr::MAX_PASSES;
+
 inline constexpr char CONFIG_SECTION[] = "Uplift";
 inline constexpr char ENABLED_KEY[] = "Enabled";  // the one key the add-on polls every present
 inline constexpr float SKIN_SAME_AS_STRUCTURE = -1.f;
 
-// v2 design §5: written from Plan 3. Plan 17 (1.0.1): 3, where InputExposure's default became Auto; LoadSettings migrates older files.
+// The version written into the settings file; 3 is the one in which InputExposure's default became Auto. LoadSettings migrates older files.
 inline constexpr uint32_t CONFIG_VERSION = 3u;
 
-// v2 design §5. Every combo is stored as its index, in the order below.
+// Every combo is stored as its index, in the order below.
 enum class PlacementSource : uint32_t {
   AUTO = 0u,     // after DLSS once the game has used DLSS, else Present
   DLSS = 1u,     // after DLSS only
   PRESENT = 2u,  // the presented frame only
 };
 
-// v2 design §3.8 (T4, P15): the Resolution combo, in stored-index order.
+// The Resolution combo, in stored-index order.
 enum class ResolutionMode : uint32_t {
   FULL = 0u,
   QUALITY = 1u,      // 67 %
@@ -44,12 +46,12 @@ enum class ResolutionMode : uint32_t {
 enum class MotionVectorSource : uint32_t {
   AUTO = 0u,  // DLSS's vectors, else Launchpad's, else Lumenite's (the last two at Present only), else none
   DLSS = 1u,
-  LAUNCHPAD = 2u,  // Plan 6
+  LAUNCHPAD = 2u,
   NONE = 3u,
-  LUMENITE = 4u,  // 2026-10-08: LumeniteFX's Kernel flow, through Uplift.fx's UPLIFT_MV as Launchpad's (stored last, shown after Launchpad)
+  LUMENITE = 4u,  // LumeniteFX's Kernel flow, through Uplift.fx's UPLIFT_MV as Launchpad's (stored last, shown after Launchpad)
 };
 
-// ui-review.md §4.1: the Source toggle the overlay draws, in pipeline order. `SourcePickOf`/`SetSourcePick`
+// The Source toggle the overlay draws, in pipeline order. `SourcePickOf`/`SetSourcePick`
 // translate to and from the persisted (PlacementSource, PreUpscale) pair; there are no new ini keys.
 enum class SourcePick : uint32_t {
   BEFORE_UPSCALING,
@@ -64,13 +66,13 @@ inline constexpr const char* StageLabel(SourcePick stage, bool before_framegen =
 }
 
 
-// ui-review.md §4.2: the Motion vectors toggle, in pipeline order. `MotionPickOf`/`SetMotionPick` translate
+// The Motion vectors toggle, in pipeline order. `MotionPickOf`/`SetMotionPick` translate
 // to and from the persisted MotionVectorSource.
 enum class MotionPick : uint32_t {
   OFF,
   DLSS,
   LAUNCHPAD,
-  LUMENITE,  // 2026-10-08
+  LUMENITE,
 };
 
 // The stored index is NVSDK_NGX_PerfQuality_Value + 1; GAME keeps the game's own mode.
@@ -84,7 +86,7 @@ enum class DlssQualityOverride : uint32_t {
   DLAA = 6u,
 };
 
-// GAME keeps the game's preset; J..M are DLSS render presets 10..13 (spec §10).
+// GAME keeps the game's preset; J..M are DLSS render presets 10..13.
 enum class DlssPresetOverride : uint32_t {
   GAME = 0u,
   J = 1u,
@@ -110,14 +112,14 @@ enum class AutoExposureOverride : uint32_t {
   ON = 2u,
 };
 
-// DLSSNR.DepthInverted: GAME forwards DLSS's DepthInverted create flag (no effect in NR 310.8, E8).
+// DLSSNR.DepthInverted: GAME forwards DLSS's DepthInverted create flag (no effect in NR 310.8, tools/nrspike's e8).
 enum class DepthDirection : uint32_t {
   GAME = 0u,
   NORMAL = 1u,
   INVERTED = 2u,
 };
 
-// What Uplift replays after recording on a game list (v2 design §3.2).
+// What Uplift replays after recording on a game list.
 enum class StateRestore : uint32_t {
   FULL = 0u,
   MINIMAL = 1u,  // the descriptor heaps and root signature only
@@ -133,8 +135,8 @@ enum class ForeignNrMode : uint32_t {
   OBSERVE = 1u,  // keep running, and log it
 };
 
-// Plan 19 (the owner's decision): where NR at Present runs on a 64-bit Vulkan game. Native runs on the game's own VkDevice when it can (else Direct3D 12,
-// and the card says why); Direct3D 12 always uses the private Direct3D 12 device (the bridge). T5 (2026-10-08): the chain goes on to Uplift's helper
+// Where NR at Present runs on a 64-bit Vulkan game. Native runs on the game's own VkDevice when it can (else Direct3D 12,
+// and the card says why); Direct3D 12 always uses the private Direct3D 12 device (the bridge). The chain goes on to Uplift's helper
 // process when Direct3D 12 cannot run either; Helper starts there. NGX's device additions are made only when this is Native at AddonInit.
 enum class VulkanNrMode : uint32_t {
   NATIVE = 0u,
@@ -142,26 +144,26 @@ enum class VulkanNrMode : uint32_t {
   HELPER = 2u,
 };
 
-// Plan 5 (v2 design §5, key decision 8): Auto binds an effect's UPLIFT_MASK, when one runs.
+// Auto binds an effect's UPLIFT_MASK, when one runs.
 enum class MaskMode : uint32_t {
   AUTO = 0u,
   OFF = 1u,
 };
 
-// Plan 5 (design D7 B, parked): forwards DLSSNR.UICorrection on the Present path only, when On.
+// Forwards DLSSNR.UICorrection on the Present path only, when On.
 enum class UiCorrection : uint32_t {
   AUTO = 0u,
   OFF = 1u,
   ON = 2u,
 };
 
-// Plan 5 (v2 design §3.14): Smooth adapts at AdaptBrighterStops/AdaptDarkerStops; Off applies the target every frame.
+// Smooth adapts at AdaptBrighterStops/AdaptDarkerStops; Off applies the target every frame.
 enum class ExposureAdapt : uint32_t {
   OFF = 0u,
   SMOOTH = 1u,
 };
 
-// Plan 5 (F11): greyed until E15 is checked in game.
+// Pedestal removal remains unavailable in the panel pending in-game validation.
 enum class PedestalRemoval : uint32_t {
   OFF = 0u,
   AUTO = 1u,
@@ -170,9 +172,7 @@ enum class PedestalRemoval : uint32_t {
 
 enum class Language : uint32_t { ENGLISH = 0u, SIMPLIFIED_CHINESE = 1u };
 
-inline constexpr uint32_t MAX_PASSES = 10u;
-
-// Split chain (2026-10-10): pass n >= 2's "Runs at", in stored-index order. SAME runs it where the pass before it runs (design Q1).
+// Split chain: pass n >= 2's "Runs at", in stored-index order. SAME runs it where the pass before it runs.
 enum class PassStage : uint32_t {
   SAME = 0u,
   BEFORE_UPSCALING = 1u,
@@ -180,7 +180,7 @@ enum class PassStage : uint32_t {
   PRESENT = 3u,
 };
 
-// Pass n >= 2's own settings (v2 design §3.10, P4-P13), used only while it does not follow pass 1. `stage` and `preset` apply either way.
+// Pass n >= 2's own settings, used only while it does not follow pass 1. `stage` and `preset` apply either way.
 struct PassSettings {
   bool follow_pass1 = true;
   float intensity = 1.f;
@@ -196,7 +196,7 @@ struct PassSettings {
   friend bool operator==(const PassSettings&, const PassSettings&) = default;
 };
 
-// Every setting persisted in ReShade.ini [Uplift] (spec §12, v2 design §5), with their defaults.
+// Every setting persisted in ReShade.ini [Uplift], with their defaults.
 // ui/settings_schema.cpp describes each field once; load, save, sanitising and the overlay read it.
 struct Settings {
   Language language = Language::ENGLISH;
@@ -208,13 +208,13 @@ struct Settings {
   float local_tone = 1.f;
   bool auto_mask = true;
   float skin_structure = 1.f;  // SKIN_SAME_AS_STRUCTURE or 0-1
-  // Keep faces (2026-10-08): pass 1 runs a second time with the Character mask on and Skin structure at `face_protection`; on characters only the part
+  // Keep faces: pass 1 runs a second time with the Character mask on and Skin structure at `face_protection`; on characters only the part
   // of NR's change broader than `lighting_scale` (% of the image height) is kept from the user's own run.
   bool keep_faces = false;
   float face_protection = 0.f;
   float lighting_scale = 2.5f;
   bool show_face_mask = false;  // Advanced: tints what Keep faces protects, for tuning
-  look::FacesTuning face_tuning;  // fix round 1 addendum: the mask's Advanced rows (FaceMaskThreshold ... FaceEdgeFalloff)
+  look::FacesTuning face_tuning;  // the mask's Advanced rows (FaceMaskThreshold ... FaceEdgeFalloff)
   uint32_t pass_count = 1u;
   color::Encoding encoding = color::Encoding::AUTO;
   float diffuse_white_nits = 0.f;  // 0 = automatic for the encoding, else 48-500
@@ -225,8 +225,8 @@ struct Settings {
   uint32_t mask_blend_mode = 1u;
   uint32_t performance = 3u;  // forwarded; no effect in NR 310.8
   float grace_seconds = 5.f;
-  uint32_t budget_margin_mb = 0u;  // 0 = automatic (spec §6.5): 512 MiB
-  nr::VramCheck vram_check = nr::VramCheck::CAREFUL;  // 2026-10-09 (owner)
+  uint32_t budget_margin_mb = 0u;  // 0 = automatic: 512 MiB
+  nr::VramCheck vram_check = nr::VramCheck::CAREFUL;
   bool auto_resume = true;
   bool show_nv_indicator = false;
   nr::LogLevel log_level = nr::LogLevel::INFO;
@@ -248,28 +248,28 @@ struct Settings {
   StateRestore state_restore = StateRestore::FULL;
   NgxHooksMode ngx_hooks = NgxHooksMode::AUTO;
   ForeignNrMode foreign_nr = ForeignNrMode::YIELD;
-  VulkanNrMode vulkan_nr = VulkanNrMode::NATIVE;  // Plan 19
-  ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
+  VulkanNrMode vulkan_nr = VulkanNrMode::NATIVE;
+  ResolutionMode resolution_mode = ResolutionMode::FULL;
   float resolution_scale = 100.f;                         // Custom: % of the output, 25-100
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
-  // Split chain (2026-10-10): a later stage group's size (its first pass is not pass 1), keyed by stage; pass 1's group uses Resolution above. Before
+  // Split chain: a later stage group's size (its first pass is not pass 1), keyed by stage; pass 1's group uses Resolution above. Before
   // upscaling is always the first stage, so it has none.
   ResolutionMode resolution_mode_after_dlss = ResolutionMode::FULL;
   float resolution_scale_after_dlss = 100.f;
   ResolutionMode resolution_mode_present = ResolutionMode::FULL;
   float resolution_scale_present = 100.f;
-  // Split chain, owner's decision Q5a: Keep faces also protects a later stage group (its first pass runs twice). Pass 1's group is protected whenever
+  // Split chain: Keep faces also protects a later stage group (its first pass runs twice). Pass 1's group is protected whenever
   // Keep faces is on.
   bool keep_faces_after_dlss = false;
   bool keep_faces_present = false;
-  bool pre_upscale = false;  // Before upscaling (pre-SR), off until E13
+  bool pre_upscale = false;  // Before upscaling (pre-SR), off by default
   std::array<PassSettings, MAX_PASSES - 1u> passes = {};  // passes 2..10
   look::LookSettings look;                                // Shape result and its rows
   MaskMode mask = MaskMode::AUTO;
   UiCorrection ui_correction = UiCorrection::AUTO;
-  color::InputExposure input_exposure = color::InputExposure::AUTO;  // Plan 17: Auto (the game's when it agrees with the meter); was Game, Plan 4's exposure
-  color::AutoExposureMode auto_exposure_mode = color::AutoExposureMode::BLEND;  // 2026-10-09: how Auto uses a valid game exposure
-  float auto_exposure_blend = 0.8f;                                             // 2026-10-09: Blend's point, 0 the game's, 1 the meter's
+  color::InputExposure input_exposure = color::InputExposure::AUTO;  // Auto (the game's when it agrees with the meter)
+  color::AutoExposureMode auto_exposure_mode = color::AutoExposureMode::BLEND;  // how Auto uses a valid game exposure
+  float auto_exposure_blend = 0.8f;                                             // Blend's point, 0 the game's, 1 the meter's
   ExposureAdapt exposure_adapt = ExposureAdapt::SMOOTH;
   float adapt_brighter_stops = 2.f;
   float adapt_darker_stops = 0.7f;
@@ -279,32 +279,32 @@ struct Settings {
   float chroma_clamp = 0.f;
   bool near_black_guard = false;
   PedestalRemoval pedestal_removal = PedestalRemoval::OFF;
-  bool dlss_placement_blocked = false;       // hidden: the device-removal latch (v2 design §3.2)
+  bool dlss_placement_blocked = false;       // hidden: the device-removal latch
   uint32_t config_version = CONFIG_VERSION;  // hidden: the version the loaded file declared
-  bool auto_retry = true;                    // Plan 6 (D11): retry a failed session on the backoff
+  bool auto_retry = true;                    // retry a failed session on the backoff
   // These settings can also be turned off manually. Remember which ones Uplift disabled after a failed start.
   static constexpr uint32_t LATCH_D3D9EX = 1u, LATCH_VK_DEVICE = 2u, LATCH_VK_NGX = 4u;
   uint32_t startup_latches = 0u;
-  bool use_d3d9ex = false;                   // Plan 9 (design §2.9): ask ReShade for a Direct3D 9Ex device (Direct3D 9 games, 32- and 64-bit)
-  bool adjust_vulkan_devices = true;         // Plan 11 (Vulkan design §2.3): hidden; 0 keeps the vkCreateDevice hook recording devices but adding nothing
-  bool adjust_vulkan_devices_for_ngx = true;  // Plan 19 T1b: hidden; 0 keeps NGX's extensions and bufferDeviceAddress off the game's device (64-bit)
-  bool vulkan_native_nr = true;  // Plan 19 T6 (I-4): hidden; 0 keeps NR at Present off the native route (Uplift's latch after a crash or a device loss)
-  uint32_t diagnostic_remove_device = 0u;    // Plan 17: hidden, diagnostic only (DiagnosticRemoveDevice); 0 = off
+  bool use_d3d9ex = false;                   // ask ReShade for a Direct3D 9Ex device (Direct3D 9 games, 32- and 64-bit)
+  bool adjust_vulkan_devices = true;         // hidden; 0 keeps the vkCreateDevice hook recording devices but adding nothing
+  bool adjust_vulkan_devices_for_ngx = true;  // hidden; 0 keeps NGX's extensions and bufferDeviceAddress off the game's device (64-bit)
+  bool vulkan_native_nr = true;  // hidden; 0 keeps NR at Present off the native route (Uplift's latch after a crash or a device loss)
+  uint32_t diagnostic_remove_device = 0u;    // hidden, diagnostic only (DiagnosticRemoveDevice); 0 = off
 
   friend bool operator==(const Settings&, const Settings&) = default;
 };
 
-// ui-review.md §4.1's table: Present reads PlacementSource::PRESENT; Before upscaling reads PreUpscale on;
+// Present reads PlacementSource::PRESENT; Before upscaling reads PreUpscale on;
 // After DLSS is the fallback, so it also reads a legacy PlacementSource::DLSS (the dropped strict "wait for
-// DLSS" choice, question 3) as itself.
-// Plan 13 (the user's decision 1): with `explicit_dlss` (a Vulkan device), Auto stays at Present, so it reads as Present, and the DLSS picks are
+// DLSS" choice) as itself.
+// With `explicit_dlss` (a Vulkan device), Auto stays at Present, so it reads as Present, and the DLSS picks are
 // PlacementSource::DLSS (Before upscaling with PreUpscale on).
 [[nodiscard]] SourcePick SourcePickOf(const Settings& settings, bool explicit_dlss = false);
 // Writes the toggle's (PlacementSource, PreUpscale) pair. Any click -- Present or After DLSS included --
-// rewrites a legacy PlacementSource::DLSS back to Auto (question 3). With `explicit_dlss` the DLSS picks write
+// rewrites a legacy PlacementSource::DLSS back to Auto. With `explicit_dlss` the DLSS picks write
 // PlacementSource::DLSS and Present writes Auto (the default, which stays at Present on Vulkan).
 void SetSourcePick(Settings* settings, SourcePick pick, bool explicit_dlss = false);
-// ui-review.md §4.2's table: Off and Launchpad read their own MotionVectorSource; DLSS is the fallback, so it
+// Off and Launchpad read their own MotionVectorSource; DLSS is the fallback, so it
 // also reads a legacy MotionVectorSource::DLSS (strict, never Launchpad) as itself.
 [[nodiscard]] MotionPick MotionPickOf(const Settings& settings);
 // Writes the toggle's MotionVectorSource. Any click rewrites a legacy MotionVectorSource::DLSS to Auto.
@@ -320,6 +320,7 @@ struct SessionOptions {
   std::optional<uint64_t> margin_override_bytes;
   nr::VramCheck vram_check = nr::VramCheck::CAREFUL;
   bool auto_retry = true;
+  friend bool operator==(const SessionOptions&, const SessionOptions&) = default;
 };
 
 // The [Uplift] section of a config file; the add-on binds it to ReShade's config API.
@@ -336,10 +337,10 @@ class ConfigStore {
 [[nodiscard]] std::optional<bool> ParseBoolSetting(std::string_view text);
 
 // Missing keys keep their defaults. An unreadable, non-finite or out-of-range value keeps its default
-// and adds one line to `warnings` (v2 design §3.16, Plan 2 final review M3). An older ConfigVersion is migrated (MigrateSettings).
+// and adds one line to `warnings`. An older ConfigVersion is migrated (MigrateSettings).
 [[nodiscard]] Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnings);
 void SaveSettings(const Settings& settings, ConfigStore* store);
-// Plan 17: a file written before CONFIG_VERSION 3 (1.0.0 stored every key, its default InputExposure Game included) reads InputExposure Game as Auto, the
+// A file written before CONFIG_VERSION 3 (1.0.0 stored every key, its default InputExposure Game included) reads InputExposure Game as Auto, the
 // new default; Metered and Manual stay. The next save writes the current version, so an explicit Game chosen after that stays Game.
 void MigrateSettings(Settings* settings);
 // After an overlay edit: a non-finite value returns to its default, a number is clamped into its
@@ -350,7 +351,7 @@ void MigrateSettings(Settings* settings);
 [[nodiscard]] SessionOptions ToSessionOptions(const Settings& settings);
 
 // Re-reads `Enabled` at most once per period, so a tool that writes [Uplift] Enabled through
-// ReShade's config API toggles NR (spec amendment 8; the end-to-end test relies on it).
+// ReShade's config API toggles NR (used by the end-to-end test).
 class EnabledPoller {
  public:
   explicit EnabledPoller(std::chrono::milliseconds period = std::chrono::seconds(1)) : period_(period) {}

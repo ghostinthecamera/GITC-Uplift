@@ -7,21 +7,22 @@
 #include "ipc/control_block.hpp"
 #include "nr/log.hpp"
 #include "nr/session_status.hpp"
+#include "text/helper_messages.hpp"
 
 namespace uplift::client {
 namespace {
 
-constexpr uint32_t FRAME_CAP_MS = 100u;        // FRAME, ATTACH, DETACH, STOP, QUIT (design §2.2)
-constexpr uint32_t RUN_CAP_MS = 2000u;         // RUN, SHARE_*
+constexpr uint32_t FRAME_CAP_MS = 100u;        // FRAME, ATTACH, DETACH, STOP, QUIT
+constexpr uint32_t RUN_CAP_MS = static_cast<uint32_t>(std::chrono::milliseconds(RUN_REPLY_CAP).count());
 constexpr std::chrono::seconds START_CAP{10};  // STARTING without READY: the helper hung, or never resumed, while starting
 constexpr std::chrono::seconds QUIT_CAP{2};    // QUIT answered, the process still there: ended (its Teardown is bounded by 2 s too)
 // AddonUninit runs at every last-device destruction, and a game that recreates its device (a resolution change) waits for it. An idle
 // helper exits within milliseconds of QUIT; a busy one is ended by the job, as it is when the game itself exits.
 constexpr std::chrono::milliseconds QUIT_EXIT_WAIT{250};
-// Helper hand-over round: a helper that is ended (hung, failed, or not gone after QUIT) is waited for this long, so its NR is gone before NR loads in the game.
+// A helper that is ended (hung, failed, or not gone after QUIT) is waited for this long, so its NR is gone before NR loads in the game.
 constexpr std::chrono::milliseconds KILL_EXIT_WAIT{1000};
 
-// The NT handles a reply can hand out, besides the block's group (mapping, size and row pitch). Plan 12 (protocol 5): a texture's handle carries its
+// The NT handles a reply can hand out, besides the block's group (mapping, size and row pitch). A texture's handle carries its
 // allocation size (`bytes`), which an OpenGL import needs, so a late handle keeps it on the way to the FRAME reply that delivers it; a fence has none.
 using HandleField = uint64_t ipc::Handles::*;
 struct NtHandle {
@@ -104,7 +105,7 @@ void RemoteNr::Kill() {
     Sleep(5u);
   }
   if (!launcher_->ExitCode()) {
-    nr::Log(nr::LogLevel::WARN, "the helper process was ended but had not exited after 1 s");
+    nr::Logf(nr::LogLevel::WARN, uplift::text::EXIT_TIMEOUT_LINE, std::chrono::duration<double>(KILL_EXIT_WAIT).count());
   }
 }
 
@@ -115,7 +116,7 @@ std::optional<ipc::Reply> RemoteNr::Transact(const ipc::Request& request, uint32
   switch (launcher_->Send(request, cap_ms)) {
     case ipc::HelperLauncher::Wait::REPLIED:
       outstanding_ = {};
-      DrainLog();  // helper hand-over round: what the helper logged handling this request reaches ReShade.log now, not at the next present
+      DrainLog();  // what the helper logged handling this request reaches ReShade.log now, not at the next present
       return launcher_->Block()->reply;
     case ipc::HelperLauncher::Wait::PENDING:
       outstanding_ = {request.kind, (request.kind == ipc::RequestKind::FRAME ? request.frame.settings_generation : frame_generation_),
@@ -140,12 +141,12 @@ void RemoteNr::Consume(const Outstanding& request, const ipc::Reply& reply, bool
       break;
     case ipc::RequestKind::FRAME:
     case ipc::RequestKind::RUN:
-      // RUN's status is the recording's outcome (nr_applied, the skip reason); FRAME's predates it (design §2.2, batch 2).
+      // RUN's status is the recording's outcome (nr_applied, the skip reason); FRAME's predates it.
       if (reply.ok != 0u) {
         last_status_ = reply.status;
         status_generation_ = request.generation;
         have_status_ = true;
-        // Helper hand-over round: one request at a time, so this answers the newest FRAME; sent without nr_allowed and OFF, the helper's NR is unloaded
+        // One request at a time, so this answers the newest FRAME; sent without nr_allowed and OFF, the helper's NR is unloaded
         // (the Session reaches OFF only after its unload) and nothing sent since can load it.
         if (request.kind == ipc::RequestKind::FRAME && !request.nr_allowed
             && reply.status.session_state == static_cast<uint32_t>(nr::SessionState::OFF)) {
@@ -219,7 +220,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
   if (const std::optional<DWORD> code = launcher_->ExitCode()) {
     DrainLog();  // the helper's last lines (its unload) may have been written since the drain above
     if (quit_sent_ || *code == 0u) {
-      // A QUIT, or its own 30 s idle exit (a game that stopped presenting): NR's memory went with the process.
+      // A normal exit, on QUIT or idle, releases the process's NR memory.
       nr::Log(nr::LogLevel::INFO, "helper exited (NR released)");
       Forget();
     } else {
@@ -229,7 +230,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
   }
   if (launcher_->State() == ipc::HelperState::STARTING) {
     if (launcher_->StartedFor() > START_CAP) {
-      Fail("It did not start within 10 s");
+      Fail(std::format(uplift::text::START_TIMEOUT_LINE, START_CAP.count()));
     }
     return std::nullopt;  // "Starting Uplift's 64-bit helper"
   }
@@ -278,7 +279,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
   }
   if (!enabled) {
     // NR is off: once the Session is back at OFF under these very settings, everything it held is unloaded, and the helper's
-    // exit returns all of its VRAM (design §2.7). A helper that never attached has nothing to wait for.
+    // exit returns all of its VRAM. A helper that never attached has nothing to wait for.
     const bool session_off = (have_status_ && status_generation_ == frame.settings_generation
                               && last_status_.session_state == static_cast<uint32_t>(nr::SessionState::OFF));
     if (!attached_ || session_off) {
@@ -297,7 +298,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
     if (launcher_ == nullptr || !attached_) return std::nullopt;
   }
   if (!launcher_->Pending() && (!text_written_ || frame.settings_generation != written_generation_)) {
-    // Only while no request is pending: the helper reads the text during a FRAME (review of batch 2, minor 8).
+    // Only while no request is pending: the helper reads the text during a FRAME.
     ipc::CopyText(launcher_->Block()->settings_text, settings_text);
     written_generation_ = frame.settings_generation;
     text_written_ = true;

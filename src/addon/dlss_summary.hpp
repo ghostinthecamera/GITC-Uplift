@@ -11,7 +11,7 @@
 
 namespace uplift::addon {
 
-// Plan 18 (design §5): the first game DLSS evaluate a process shows Uplift, written once at INFO so a remote tester's ReShade.log says what the game or mod
+// The first game DLSS evaluate a process shows Uplift, written once at INFO so a remote tester's ReShade.log says what the game or mod
 // does. Plain data: FormatDlssSummary is pure.
 struct DlssSummary {
   std::string_view api;     // "Direct3D 11", "Direct3D 12", "Vulkan"

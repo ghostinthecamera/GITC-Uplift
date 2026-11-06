@@ -17,10 +17,10 @@ inline constexpr wchar_t SNIPPET_FILE_NAME[] = L"nvngx_dlssnr.dll";
 inline constexpr wchar_t RUNTIME_FOLDER[] = L"GITC-Uplift";
 inline constexpr uint32_t NVIDIA_VENDOR_ID = 0x10DEu;
 
-// RenoDX DLSS5 v7 sets this while its NR runtime is loaded ([V7] §6.8).
+// RenoDX DLSS5 v7 sets this while its NR runtime is loaded.
 inline constexpr wchar_t RENODX_NR_MARKER[] = L"RENODX_DLSS5_NR_RUNTIME_LOADED";
 
-// v2 design §3.19 (I3): what says another NR producer runs in this game.
+// Evidence that another NR producer runs in this game.
 struct ForeignNrSignals {
   uint32_t live_foreign_nr = 0u;          // live NGX feature-18 creates that Uplift did not make
   bool runtime_mapped_elsewhere = false;  // nr::IsRuntimeMappedElsewhere for the located runtime
@@ -34,12 +34,12 @@ struct SnippetSearch {
   std::filesystem::path game_directory;   // the folder of the game's executable
 };
 
-// Spec §6.1 (amendment 3). A relative `configured` resolves against `game_directory`, never the
+// A relative `configured` resolves against `game_directory`, never the
 // process's current working directory. nullopt when no candidate exists.
 [[nodiscard]] std::optional<std::filesystem::path> LocateSnippet(const SnippetSearch& search);
 // Lower-case hex SHA-256; empty when the file cannot be read.
 [[nodiscard]] std::string Sha256Hex(const std::filesystem::path& file);
-// The loaded file name (any case) of an add-on that already hosts NR (spec §17 R4). Only the exact
+// The loaded file name (any case) of an add-on that already hosts NR. Only the exact
 // RenoDX NR hosts count: renodx-dlssfix, for example, overrides DLSS-SR and runs no NR.
 [[nodiscard]] std::optional<std::wstring> FindConflictingHost(const std::vector<std::wstring>& module_file_names);
 // File names (no folders) of every module loaded in this process.
@@ -48,7 +48,7 @@ struct SnippetSearch {
 [[nodiscard]] bool IsNvidiaDevice(ID3D12Device* device);
 
 // Converts UTF-8 to a path without throwing. std::filesystem::path's std::u8string constructor
-// converts with MB_ERR_INVALID_CHARS and throws std::system_error on invalid UTF-8 (I1): a
+// converts with MB_ERR_INVALID_CHARS and throws std::system_error on invalid UTF-8: a
 // `[Uplift] SnippetPath` value hand-edited into an ANSI code page can contain exactly that, and an
 // exception escaping the present event would crash the game. nullopt when `text` is not valid
 // UTF-8; an empty `text` returns an empty path.

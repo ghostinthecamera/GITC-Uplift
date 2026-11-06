@@ -1,8 +1,8 @@
-// Plan 9 (design §2.1, §2.2): gitc-uplift-helper64.exe, the 64-bit process that runs NR for a 32-bit game. It has no window and no
-// UI. gitc-uplift.addon32 starts it in a kill-on-close job with four inherited handles (the control block, the request and reply
+// gitc-uplift-helper64.exe, the 64-bit process that runs NR for an add-on. It has no window and no
+// UI. The add-on starts it in a kill-on-close job with four inherited handles (the control block, the request and reply
 // events, and a SYNCHRONIZE handle to the game), passed on the command line as hex values:
 //   gitc-uplift-helper64.exe --block H --request H --reply H --game H
-// Exit codes: 0 after QUIT or 30 s idle; 2 a bad command line; 3 a build or protocol mismatch; 4 no D3D12 device.
+// Exit codes: 0 after QUIT or IDLE_EXIT without a request; 2 a bad command line; 3 a build or protocol mismatch; 4 no D3D12 device.
 #include <Windows.h>
 
 #include <d3d12.h>

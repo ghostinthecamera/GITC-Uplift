@@ -18,8 +18,8 @@
 
 namespace uplift::client {
 
-// Design §2.8 and §4.1: what a D3D9 format crosses as. An X8R8G8B8 or A2R10G10B10 image crosses through a converting StretchRect into its
-// twin (both exact both ways, the D3D9 draft's §1.2); the others cross as they are.
+// What a D3D9 format crosses as. An X8R8G8B8 or A2R10G10B10 image crosses through a converting StretchRect into its
+// twin (both exact both ways); the others cross as they are.
 struct D3D9FormatMap {
   D3DFORMAT source;
   D3DFORMAT twin;
@@ -27,11 +27,11 @@ struct D3D9FormatMap {
   uint32_t bytes_per_pixel;
 };
 
-// Plan 9 (design §2.3, §2.4, §2.8): a D3D9 device's frames to and from NR through an NrLink. KMT on a 9Ex device, BLOCK
-// otherwise. Plan 10 (design §4): the same two transports carry UPLIFT_MASK and LaunchPad's UPLIFT_MV. ReShade-free: it takes native
+// A D3D9 device's frames to and from NR through an NrLink. KMT on a 9Ex device, BLOCK
+// otherwise. The same two transports carry UPLIFT_MASK and LaunchPad's UPLIFT_MV. ReShade-free: it takes native
 // pointers and calls only StretchRect, GetRenderTargetData, UpdateSurface, LockRect/UnlockRect, CreateTexture, CreateRenderTarget,
 // CreateOffscreenPlainSurface, CreateQuery/Issue/GetData and, on ReShade's effect textures, GetLevelDesc and GetSurfaceLevel.
-// Its CPU wait is the design's R29 one, capped at 2 s: a frame whose GPU work outlasts the cap is skipped, and the frames after it
+// Its CPU wait is bounded by GPU_CAP: a frame whose GPU work outlasts the cap is skipped, and the frames after it
 // are skipped until that work is done (nothing is latched). Not thread-safe: the add-on's lock. Everything it makes is
 // D3DPOOL_DEFAULT (or SYSTEMMEM), released by ReleaseAll() before the device is reset or destroyed, and made again lazily
 // afterwards.
@@ -58,7 +58,7 @@ class D3D9Client {
   // helper's NR is not running.
   void Apply(const ipc::Reply& reply, NrLink& link);
   // At the trigger point: out, RUN, back. True when NR's result reached `source`. `source` is the back buffer at PRESENT, or the
-  // event's own render-target surface (bit 0 masked) at the marker and after the effects. Plan 10 (design §4.3): `motion` is this
+  // event's own render-target surface (bit 0 masked) at the marker and after the effects. `motion` is this
   // frame's UPLIFT_MV texture (G16R16F; the texture variable's binding, which on D3D9 IS the IDirect3DTexture9, bit 0 masked) at the
   // Uplift technique while LaunchPad feeds it, null elsewhere. Its level 0 goes out beside the colour (KMT: StretchRect into a shared
   // twin; BLOCK: GetRenderTargetData into a SYSTEMMEM surface, both before the one event query) and the RUN carries `motion`. A frame
@@ -66,11 +66,11 @@ class D3D9Client {
   bool Run(IDirect3DSurface9* source, IDirect3DTexture9* motion, addon::TriggerPoint point, NrLink& link);
   // The last Run put a RUN on the wire (the helper has seen its point); false when it skipped or failed before sending.
   [[nodiscard]] bool LastRunSent() const { return run_sent_; }
-  // At the end of the effects (design §4.3): UPLIFT_MASK toward the next RUN. `mask` is the texture variable's binding: on D3D9 a
-  // shader-resource view IS the IDirect3DTexture9 (bit 0 masked), not a surface (design §4.1); its level 0 is the source. KMT:
+  // At the end of the effects: UPLIFT_MASK toward the next RUN. `mask` is the texture variable's binding: on D3D9 a
+  // shader-resource view IS the IDirect3DTexture9 (bit 0 masked), not a surface; its level 0 is the source. KMT:
   // StretchRect into a shared twin (an X8R8G8B8 mask becomes A8R8G8B8); BLOCK: GetRenderTargetData into a SYSTEMMEM surface, collected by
   // the next Run once its own event query has passed. While a request has no reply nothing is touched (`busy`): the helper may still
-  // read the shared twin or the mask block. A format outside the design's table is `unsupported`, named in `d3d9_format`.
+  // read the shared twin or the mask block. A format outside the supported-format table is `unsupported`, named in `d3d9_format`.
   MaskCopy CopyMask(IDirect3DTexture9* mask, NrLink& link);
   void ReleaseMask();  // no enabled effect writes UPLIFT_MASK: the twin, the SYSTEMMEM surface and the mapping go
   // Every object this client made, on both sides of the device: the DEFAULT-pool twins, plain surface, shared texture and query
@@ -85,14 +85,14 @@ class D3D9Client {
  private:
   D3D9Client() = default;
 
-  // A size and format whose objects or block could not be made: not retried until NR is re-enabled (Plan 7's Minor 3).
+  // A size and format whose objects or block could not be made: not retried until NR is re-enabled.
   struct Failure {
     uint32_t width = 0u;
     uint32_t height = 0u;
     D3DFORMAT format = D3DFMT_UNKNOWN;
     std::string text;
   };
-  // The mask or the motion shared with the helper (design §4.2). KMT: `texture` is a shared render-target twin the helper opens by its
+  // The mask or the motion shared with the helper. KMT: `texture` is a shared render-target twin the helper opens by its
   // handle (a D3DPOOL_DEFAULT object: ReleaseAll frees it before a Reset). BLOCK: `view` is the helper's file mapping for it, mapped
   // here, and `sysmem` the SYSTEMMEM surface GetRenderTargetData fills, in the source's own format.
   struct Image {
@@ -108,7 +108,7 @@ class D3D9Client {
     uint64_t vram_bytes = 0u;  // KMT: the twin
     bool pending = false;      // BLOCK: a readback was issued; the next Run collects it once its own query has passed
     bool fresh = false;        // the helper has not been told about the newest copy yet
-    bool late = false;         // its SHARE reply has not come: Apply forgets the ask (design §4.2, key decision h)
+    bool late = false;         // its SHARE reply has not come: Apply forgets the ask
     [[nodiscard]] bool Ready() const { return surface != nullptr || view != nullptr; }
   };
   enum class Ensure { READY,

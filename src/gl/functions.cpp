@@ -9,7 +9,7 @@
 namespace uplift::gl {
 namespace {
 
-// The system opengl32.dll, found with GetModuleHandleW and never loaded (key decision b); null, with `missing` set, when it is not there.
+// The system opengl32.dll, found with GetModuleHandleW and never loaded; null, with `missing` set, when it is not there.
 HMODULE SystemOpenGl(std::string* missing) {
   wchar_t directory[MAX_PATH] = {};
   const UINT length = GetSystemDirectoryW(directory, MAX_PATH);

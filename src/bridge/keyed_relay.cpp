@@ -6,13 +6,14 @@
 #include <utility>
 
 #include "addon/environment.hpp"
+#include "text/nr_messages.hpp"
 
 namespace uplift::bridge {
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
-// D3D10 design §2 rule 3: each key is released on this thread just before it is acquired, so an acquire never waits for a frame, however
+// Each key is released on this thread just before it is acquired, so an acquire never waits for a frame, however
 // slow; only a broken hand-off reaches this. As the watchdog's limit. (Verdict "A with a CPU wait": 10000.)
 constexpr DWORD KEY_TIMEOUT_MS = 2000u;
 
@@ -41,7 +42,7 @@ std::unique_ptr<KeyedRelay> KeyedRelay::Create(ID3D10Device* game, ComPtr<ID3D11
     return fail("the game's adapter could not be read");
   }
   if (adapter_description.VendorId != addon::NVIDIA_VENDOR_ID) {
-    return fail("Uplift needs an NVIDIA GPU; this game renders on another adapter");
+    return fail(uplift::text::NVIDIA_GPU_REQUIRED_LINE);
   }
   relay->luid_ = adapter_description.AdapterLuid;
   ComPtr<IDXGIFactory4> factory;
@@ -58,7 +59,7 @@ std::unique_ptr<KeyedRelay> KeyedRelay::Create(ID3D10Device* game, ComPtr<ID3D11
     return fail(std::format("the Direct3D 11 relay device could not be created ({:#010x})", static_cast<uint32_t>(result)));
   }
   relay->relay_created_ = *relay_created;
-  // The D3D11 design's §9 a, one API down: ReShade forwards CreateFence unwrapped and hooks GetDevice only on buffer and
+  // As for the D3D11 bridge, one API down: ReShade forwards CreateFence unwrapped and hooks GetDevice only on buffer and
   // texture vtables, so a fence's own device is the native relay, and the relay's copies raise no ReShade event.
   ComPtr<ID3D11Device5> proxy5;
   ComPtr<ID3D11Fence> fence;
@@ -131,7 +132,7 @@ bool KeyedRelay::CreateKeyed(nr::Size size, DXGI_FORMAT format, uint32_t bytes_p
     return false;
   }
   // The relay's own turn first: it takes key 0, gives it back and flushes, so nothing it did to make the texture can race the game's
-  // first write, whose acquire then waits behind the relay's submitted work (Plan 8's batch 2 review Minor 3).
+  // first write, whose acquire then waits behind the relay's submitted work.
   if (const HRESULT taken = created.relay_mutex->AcquireSync(0u, KEY_TIMEOUT_MS); taken != S_OK) {
     *result = taken;  // only S_OK counts: WAIT_TIMEOUT is a success code
     return false;

@@ -9,7 +9,7 @@
 
 namespace uplift::ngx_hooks {
 
-// The DLSS-SR page's create overrides (spec §10). The key mapping follows the NGX SDK header.
+// The DLSS-SR page's create overrides. The key mapping follows the NGX SDK header.
 struct SrOverrides {
   int perf_quality = -1;                     // an NVSDK_NGX_PerfQuality_Value to force; -1 keeps the game's
   std::array<unsigned int, 6> presets = {};  // per PRESET_KEYS entry: a render preset to force; 0 keeps the game's
@@ -29,7 +29,7 @@ inline constexpr std::array<const char*, 6> PRESET_KEYS = {
 };
 
 // Applies `overrides` to a SuperSampling create's parameter block. The game's value of every key it
-// changes goes into `saved` first, so the create detour can put it back (Task 1). The create helper
+// changes goes into `saved` first, so the create detour can put it back. The create helper
 // writes PerfQualityValue and the create flags as int; games write presets as unsigned int.
 void ApplySrOverrides(NVSDK_NGX_Parameter* parameters, const SrOverrides& overrides, std::vector<SavedParameter>* saved);
 

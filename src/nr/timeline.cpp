@@ -12,13 +12,11 @@ namespace uplift::nr {
 namespace {
 
 // A submission its own thread has not stamped yet is stamped by any present once it is this old
-// and this many frames behind: its ExecuteCommandLists has returned long before (amendment 1).
+// and this many frames behind: its ExecuteCommandLists has returned long before.
 constexpr auto AGED_SUBMISSION_TIME = std::chrono::milliseconds(250);
 constexpr uint64_t AGED_SUBMISSION_FRAMES = 2u;
 
-// A release waits on every token issued before it, so a token stuck this long (never submitted,
-// dropped or stamped through to completion) would hold VRAM silently: the stutter Plan 1 fixed
-// would come back undiagnosed. One WARN per Timeline (one per device, in practice one per process).
+// Unfinished tokens retain deferred releases and can hold VRAM indefinitely. Warn once per Timeline when one remains stuck this long.
 constexpr auto STUCK_TOKEN_AGE = std::chrono::seconds(5);
 
 // One fence per queue, created on first use. The device outlives its Timeline (DeviceContext).
@@ -72,7 +70,7 @@ class D3D12QueueFences final : public QueueFences {
 std::unique_ptr<Timeline> Timeline::CreateD3D12(ID3D12Device* device) {
   Microsoft::WRL::ComPtr<ID3D12Fence> fence;
   if (device == nullptr || FAILED(device->CreateFence(0u, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return nullptr;
-  fence->SetName(L"Uplift frame fence");  // Plan 17: DRED names
+  fence->SetName(L"Uplift frame fence");  // DRED names
   HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (event == nullptr) return nullptr;
   ID3D12Fence* raw = fence.Get();
@@ -143,15 +141,15 @@ void Timeline::SetTokenProbe(std::function<bool(uint64_t token)> probe) {
 uint64_t Timeline::BeginFrame(ID3D12CommandQueue* queue) {
   const uint64_t current = current_frame_.load(std::memory_order_acquire);
   if (queue != nullptr && last_queue_ != nullptr && queue != last_queue_) {
-    // Frame values signalled on the new present queue do not follow the old queue's work, so every
-    // mark taken at or before this frame also waits for one barrier on the old queue (Plan 2 final
-    // review note). Unavailable, same as before Task 5, when there is no fence backend at all.
+    // Frame values on the new present queue do not follow the old queue's work, so every mark taken at or before the switch
+    // frame also needs a barrier on the old queue.
+    // A queue-switch barrier cannot be created without a fence backend.
     {
       const std::unique_lock lock(tokens_mutex_);
       if (fences_ != nullptr) {
         const uint64_t value = ++queue_values_[last_queue_];
         const uint64_t barrier = ++last_token_;
-        // Important 1 (fix round 1): every mark taken at or before this frame now also needs
+        // Every mark taken at or before this frame now also needs
         // `barrier` complete, folded in dynamically by IsComplete(const Mark&) -- not just the
         // marks already sitting in pending_ at this exact moment (a mark committed to pending_
         // later, such as NrPipeline's on a deferred release, would otherwise miss this entirely).
@@ -161,10 +159,10 @@ uint64_t Timeline::BeginFrame(ID3D12CommandQueue* queue) {
           tokens_.emplace(barrier, Token{.state = Token::State::STAMPED, .queue = last_queue_, .issue_time = std::chrono::steady_clock::now(), .submit_frame = CurrentFrame(), .fence_value = value});
         } else {
           // The barrier Signal failed: rather than silently leaving every pending release
-          // unprotected (Task 5 review), keep the token SUBMITTED and tag it with this, the
+          // unprotected, keep the token SUBMITTED and tag it with this, the
           // presenting thread, so its own next reset, evaluate or present -- a StampThread call --
           // retries the same Signal, exactly like any other failed stamp (StampLocked below).
-          // P7: left at its default (the epoch), submit_time also makes StampAged treat this token as
+          // Left at its default (the epoch), submit_time also makes StampAged treat this token as
           // aged the moment its frame count passes -- an extra, thread-independent way to retry the
           // same Signal from any present, on top of this thread's own StampThread call. Both paths
           // only ever retry Signal, so this is safe.
@@ -195,11 +193,11 @@ bool Timeline::IsComplete(const Mark& mark) const {
   {
     const std::shared_lock lock(tokens_mutex_);
     if (mark.frame != 0u && mark.frame <= switch_frame_) {
-      token = std::max(token, switch_barrier_);  // Plan 3, Important 1
+      token = std::max(token, switch_barrier_);
     }
     for (const Reexecution& reexecution : reexecutions_) {
       if (mark.token >= reexecution.first_token) {
-        token = std::max(token, reexecution.fresh_token);  // N12
+        token = std::max(token, reexecution.fresh_token);
       }
     }
   }
@@ -228,7 +226,7 @@ void Timeline::Poll() {
       });
     }
     if (token_probe_) {
-      // Plan 13: the tokens the probe calls complete (their VkEvent is set) are done, whatever their state.
+      // The tokens the probe calls complete (their VkEvent is set) are done, whatever their state.
       std::erase_if(tokens_, [this](const auto& entry) {
         if (!token_probe_(entry.first)) return false;
         if (entry.second.state == Token::State::SUBMITTED) {
@@ -272,7 +270,7 @@ std::string_view Timeline::WaitIdle(std::chrono::milliseconds timeout) {
     probed = static_cast<bool>(token_probe_);
   }
   if (probed) {
-    // Plan 13: a host cannot wait on a VkEvent (only the GPU does, and only the host polls), so the tokens are polled until the deadline.
+    // A host cannot wait on a VkEvent (only the GPU does, and only the host polls), so the tokens are polled until the deadline.
     const uint64_t newest = LastToken();
     while (!TokensComplete(newest) && std::chrono::steady_clock::now() < deadline) {
       Sleep(1u);
@@ -282,12 +280,8 @@ std::string_view Timeline::WaitIdle(std::chrono::milliseconds timeout) {
     }
   }
   const std::unique_lock lock(tokens_mutex_);
-  // The device-destroy flush stamps every submitted token unconditionally: every
-  // ExecuteCommandLists has returned by then, so any thread's tokens are safe to stamp. That
-  // holds at device destruction only. A present-queue teardown while the device still lives
-  // (Task 10) would also need to stamp everything here, but a game thread caught between its
-  // execute_command_list event and its native call at that moment is not protected by this --
-  // an accepted, rare gap (spec amendment 1). Plan 15: the game's own NGX shutdown is the same case.
+  // Device destruction follows every ExecuteCommandLists return, so all submitted tokens can be stamped here.
+  // At a live queue teardown or the game's NGX shutdown, this wait does not protect a game thread between its execute_command_list event and native call.
   StampLocked([](const Token& /*token*/) { return true; });
   if (fences_ != nullptr) {
     for (const auto& [queue, value] : queue_values_) {
@@ -350,7 +344,7 @@ void Timeline::Submit(std::span<const uint64_t> tokens, ID3D12CommandQueue* queu
       stage_queues_.push_back(queue);
     }
     if (stage && std::ranges::find(stage_lists_, tokens.front()) == stage_lists_.end()) {
-      // Split chain (fix round 2, m1): this list carries DLSS-stage NR, so an execution of it again without a reset (Resubmit) is DLSS-stage NR too.
+      // Split chain: this list carries DLSS-stage NR, so an execution of it again without a reset (Resubmit) is DLSS-stage NR too.
       stage_lists_.push_back(tokens.front());
       if (stage_lists_.size() > STAGE_LISTS) {
         stage_lists_.erase(stage_lists_.begin());
@@ -364,14 +358,14 @@ uint64_t Timeline::Resubmit(uint64_t first_token, ID3D12CommandQueue* queue, uin
   const std::unique_lock lock(tokens_mutex_);
   const uint64_t fresh = ++last_token_;
   if (token_probe_) {
-    // Plan 13: the probe decides when this execution is done; nothing stamps it, so it stays RECORDED (never counted as unstamped).
+    // The probe decides when this execution is done; nothing stamps it, so it stays RECORDED (never counted as unstamped).
     tokens_.emplace(fresh, Token{.queue = queue, .thread_id = thread_id, .issue_time = now, .submit_frame = CurrentFrame(), .submit_time = now});
   } else {
     tokens_.emplace(fresh, Token{.state = Token::State::SUBMITTED, .queue = queue, .thread_id = thread_id, .issue_time = now, .submit_frame = CurrentFrame(), .submit_time = now});
     unstamped_.fetch_add(1u);
   }
   reexecutions_.push_back({.first_token = first_token, .fresh_token = fresh});
-  // Split chain (fix round 2, m1): a list carrying DLSS-stage NR, executed again: its fresh token is DLSS-stage NR on `queue` (the latch and StageWorkDone).
+  // Split chain: a list carrying DLSS-stage NR, executed again: its fresh token is DLSS-stage NR on `queue` (the latch and StageWorkDone).
   if (std::ranges::find(stage_lists_, first_token) != stage_lists_.end()) {
     tokens_.at(fresh).stage = true;
     if (std::ranges::find(stage_queues_, queue) == stage_queues_.end()) {
@@ -404,9 +398,9 @@ void Timeline::StampAged(std::chrono::steady_clock::time_point now) {
       // tokens_ is keyed by issue order, so the first entry not yet STAMPED is the oldest
       // outstanding one: a STAMPED token with a smaller id is just waiting on its fence, not stuck.
       if (token.state == Token::State::STAMPED) continue;
-      // Plan 13: a token the probe already calls complete is waiting for Poll to prune it, not stuck.
+      // A token the probe already calls complete is waiting for Poll to prune it, not stuck.
       if (token_probe_ && token_probe_(id)) continue;
-      // P8: exchange, not a load then a store -- today's outer relaxed load above already makes a
+      // Exchange, not a load then a store: the fast-path relaxed load above already makes a
       // second WARN merely unlikely (every caller holds the add-on lock in practice), and this makes
       // it impossible even if that ever stopped holding: only the caller that flips the latch logs.
       if (now - token.issue_time > STUCK_TOKEN_AGE && !stuck_warned_.exchange(true, std::memory_order_relaxed)) {
@@ -447,7 +441,7 @@ void Timeline::MarkStageToken(uint64_t token) {
   const std::unique_lock lock(tokens_mutex_);
   if (const auto found = tokens_.find(token); found != tokens_.end()) {
     found->second.stage = true;
-    // Split chain (fix round 2, I1): a recording marked after its list was submitted (the frame the chain splits) names its queue at once.
+    // Split chain: a recording marked after its list was submitted (the frame the chain splits) names its queue at once.
     if (found->second.state != Token::State::RECORDED && std::ranges::find(stage_queues_, found->second.queue) == stage_queues_.end()) {
       stage_queues_.push_back(found->second.queue);
     }
@@ -493,7 +487,7 @@ bool Timeline::TokensComplete(uint64_t through) const {
   const std::shared_lock lock(tokens_mutex_);
   for (const auto& [id, token] : tokens_) {
     if (id > through) break;
-    if (token_probe_ && token_probe_(id)) continue;  // Plan 13: a Vulkan token is complete when its event says so, whatever its state
+    if (token_probe_ && token_probe_(id)) continue;  // A Vulkan token is complete when its event says so, whatever its state
     if (token.state != Token::State::STAMPED || fences_ == nullptr || fences_->Completed(token.queue) < token.fence_value) {
       return false;
     }

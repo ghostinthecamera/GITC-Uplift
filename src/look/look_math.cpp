@@ -98,30 +98,30 @@ Float2 LimitChroma(Float2 delta, float limit) {
 }
 
 ShapedChange ShapeChange(const ShapeInput& input, const ShapeSettings& settings, bool sdr) {
-  // Step 4: the broad and fine bands.
+  // The broad and fine bands.
   const float banded = settings.tone * input.low + settings.detail * input.high;
   const Float2 chroma = {input.chroma_low.x + input.chroma_high.x, input.chroma_low.y + input.chroma_high.y};
-  // Step 5: halo suppression, before the sign split, so Darkening still scales what it leaves.
+  // Halo suppression, before the sign split, so Darkening still scales what it leaves.
   const float halo_weight = SmoothStep(1.f, 3.f, input.peak - input.guide);
   const float dehaloed = banded - settings.halo * halo_weight * std::min(banded - input.reference, 0.f);
-  // Step 6: brightening and darkening.
+  // Brightening and darkening.
   const float split = settings.brighten * std::max(dehaloed, 0.f) + settings.darken * std::min(dehaloed, 0.f);
-  // Step 7: colour and hue.
+  // Colour and hue.
   const ChromaSplit parts = SplitChroma(chroma, input.basis);
   const Float2 recoloured = {
       settings.color * parts.radial.x + settings.hue * parts.tangential.x,
       settings.color * parts.radial.y + settings.hue * parts.tangential.y,
   };
-  // Steps 8-9: the tonal weight on the game's own image, then Edit strength.
+  // The tonal weight on the game's own image, then Edit strength.
   const ToneWeights tone = WeighTone(ToneKey(sdr, input.guide));
   const float weight = settings.shadows * tone.shadows + settings.midtones * tone.midtones + settings.highlights * tone.highlights;
   const float strength = settings.edit_strength * weight;
   const float stops = strength * split;
-  // Step 10: the soft limits, last, so they hold whatever the multipliers are.
+  // The soft limits, last, so they hold whatever the multipliers are.
   const float limited = SoftLimit(stops, (stops > 0.f ? settings.max_brighten : settings.max_darken));
   const Float2 chroma_out = LimitChroma({strength * recoloured.x, strength * recoloured.y}, settings.max_color);
   if (!std::isfinite(limited) || !std::isfinite(chroma_out.x) || !std::isfinite(chroma_out.y)) return {};
-  // Step 12: the safety clamp.
+  // The safety clamp.
   return {.stops = std::clamp(limited, -CHANGE_LIMIT, CHANGE_LIMIT), .chroma = chroma_out};
 }
 
@@ -162,7 +162,7 @@ Bands MakeBands(float detail_radius, uint32_t height, uint32_t levels) {
 FacesParameters MakeFacesParameters(float lighting_scale, const FacesTuning& tuning, uint32_t height, uint32_t levels) {
   return {.low_level = MakeBands(lighting_scale, height, levels).low_level,
           .mask_level = MakeBands(tuning.softness, height, levels).low_level,
-          // Fix round 2 (3): unlike the other bands, down to level 0 (the combine's own per-pixel weights), so the row's low end is finer, not a floor.
+          // Edge falloff reaches the combine's per-pixel weights at level zero; the other bands stop at the first pyramid level.
           .edge_level = std::clamp(std::log2(2.f * std::max(tuning.edge_falloff / 100.f * static_cast<float>(height), 0.5f)), 0.f, static_cast<float>(levels)),
           .dead_zone = tuning.threshold * FACES_PERCENT,
           .full_weight = std::max(tuning.full, tuning.threshold + FACES_MIN_SPAN) * FACES_PERCENT,

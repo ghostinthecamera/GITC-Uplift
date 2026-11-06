@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "text/before_fg_messages.hpp"
 #include "ui/controls_coalescer.hpp"
 #include "ui/settings.hpp"
 #include "ui/status_text.hpp"
@@ -20,6 +21,9 @@ struct OverlayView {
   std::string status_line;
   std::array<nr::RecordedModel, MAX_PASSES> pass_models{};
   std::string details_backend, details_note;
+  void AddBeforeFgNote(const text::BeforeFgMessage& note) {
+    if (details_note.empty() && note.Severity() == text::BeforeFgSeverity::UNAVAILABLE) details_note = note.Text();
+  }
   color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
   nr::Size output_size;
   nr::Size first_stage_input, first_stage_canvas;
@@ -30,6 +34,7 @@ struct OverlayView {
   uint64_t intermediate_bytes = 0u;
   std::optional<uint64_t> runtime_bytes;  // the NR runtime's own allocation, when its stats report it
   float effective_diffuse_white_nits = 0.f;
+  std::optional<color::Encoding> encoding;  // the Present path's, resolved (ContextStatus::encoding); nullopt before a frame, when unsupported, and in 32-bit games
   uint32_t last_key_pressed = 0u;         // effect_runtime::last_key_pressed, for hotkey capture
   // The lines the Details header shows after the status line, also promoted into the status card while it is
   // working (its fixed height has spare lines then). Each is the engine's or the bridge's own text.
@@ -66,37 +71,37 @@ struct OverlayView {
   std::string before_fg_unavailable;
   std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
   bool frame_generation_active = false;  // the working card shows frame_generation_line only when this is set
-  bool dlss_latched = false;              // DlssPlacementBlocked: the device-removal latch is set (Plan 19 fix round: or, in a Vulkan game, VulkanNativeNr = 0)
-  std::string ui_correction_note;  // Plan 5 (D7): why UI correction does nothing on this placement
-  std::string keep_faces_unavailable;  // Keep faces (2026-10-08): non-empty greys its rows, and says why (ui::KeepFacesUnavailable)
-  StatusCard card;  // Plan 6 (D1): replaces the message line at the top
+  bool dlss_latched = false;              // DlssPlacementBlocked: the device-removal latch is set (or, in a Vulkan game, VulkanNativeNr = 0)
+  std::string ui_correction_note;  // why UI correction does nothing on this placement
+  std::string keep_faces_unavailable;  // Keep faces: non-empty greys its rows, and says why (ui::KeepFacesUnavailable)
+  StatusCard card;  // replaces the message line at the top
   std::string mask_note;       // "NR mask: UPLIFT_MASK (1920x1080)", or why not
   std::string frame_generation_warning;  // shown under Pass count when it applies; empty otherwise
-  // ui-review.md §4.1: why no DLSS placement can run this session (bridged, hooks, ReShade version, the
+  // Why no DLSS placement can run this session (bridged, hooks, ReShade version, the
   // latch); empty when they can. Greys Game state after NR (the NR stage and Motion vectors toggles read it through Setup).
   std::string dlss_unavailable;
-  // Plan 13 (the user's decision 1): a Vulkan device, where Auto stays at Present and Before upscaling and After DLSS are explicit choices
+  // A Vulkan device, where Auto stays at Present and Before upscaling and After DLSS are explicit choices
   // (SourcePickOf's `explicit_dlss`); their tips name the one-time cost.
   bool dlss_explicit = false;
   bool cross_queue_passes_available = false;
-  // Plan 9 (design §2.9): the Direct3D 9Ex row. `d3d9ex_unavailable` non-empty greys it ("Only for 32-bit Direct3D 9
-  // games" in gitc-uplift.addon32, "Only for Direct3D 9 games" in gitc-uplift.addon64 since Plan 10) and is what shows under it; otherwise
+  // The Direct3D 9Ex row. `d3d9ex_unavailable` non-empty greys it ("Only for 32-bit Direct3D 9
+  // games" in gitc-uplift.addon32, "Only for Direct3D 9 games" in gitc-uplift.addon64) and is what shows under it; otherwise
   // `d3d9ex_readout` ("Now: ...") does.
   std::string d3d9ex_readout;
   std::string d3d9ex_unavailable;
-  // Plan 19 (the owner's UI rules): the VulkanNr row. `vulkan_nr_unavailable` non-empty greys the whole row (not a 64-bit Vulkan game);
+  // The VulkanNr row. `vulkan_nr_unavailable` non-empty greys the whole row (not a 64-bit Vulkan game);
   // `vulkan_native_unavailable` greys Native alone, with why native NR cannot run on this device; `vulkan_nr_running` highlights the route that runs (the
-  // stored choice stays as it is and returns by itself), and `vulkan_nr_note` says why it differs from the choice ("Now: ..."). T5:
+  // stored choice stays as it is and returns by itself), and `vulkan_nr_note` says why it differs from the choice ("Now: ...").
   // `vulkan_d3d12_unavailable` greys Direct3D 12 alone the same way (Helper is never greyed: it is the chain's end).
   std::string vulkan_nr_unavailable;
   std::string vulkan_native_unavailable;
   std::string vulkan_d3d12_unavailable;
   std::optional<VulkanNrMode> vulkan_nr_running;
   std::string vulkan_nr_note;
-  // In-game round 2, fix round 1 (M5): on a 64-bit Vulkan device's helper view, why After DLSS and Before upscaling are greyed (the helper front's Setup
+  // On a 64-bit Vulkan device's helper view, why After DLSS and Before upscaling are greyed (the helper front's Setup
   // greys only them with it); empty elsewhere.
   std::string vulkan_stages_off;
-  // Plan 14 (design §1): Setup (every option's state, the three highlights, the Why) and the working card's rows, from FinishSetup. `setup`'s views point
+  // Setup (every option's state, the three highlights, the Why) and the working card's rows, from FinishSetup. `setup`'s views point
   // into this view's own strings (and static text).
   SetupView setup;
   LiveCard live;
@@ -116,26 +121,26 @@ struct OverlayState {
   bool key_captured_this_frame = false;
   // 1.1.0: when DrawOverlay last showed the capture; a capture not shown for a moment (the overlay closed, another tab) ends (ExpireKeyCapture).
   std::chrono::steady_clock::time_point capture_seen;
-  bool defaults_view = false;   // Plan 6 (D6): session only; the add-on keeps it when the overlay closes
+  bool defaults_view = false;   // session only; the add-on keeps it when the overlay closes
   std::string_view enable_warning_key;  // requested checkbox confirmation; ImGui owns the open modal
   bool confirm_present_stage = false;  // The diagram changes both Source and FG placement when the warning is accepted.
-  bool confirm_restore = false;  // G2: the first click of Restore all defaults
-  bool retry_now = false;        // D11: the add-on calls DeviceContext::RetryNow after DrawOverlay and clears it
+  bool confirm_restore = false;  // the first click of Restore all defaults
+  bool retry_now = false;        // the add-on calls DeviceContext::RetryNow after DrawOverlay and clears it
   // An APPLY_ON_RELEASE slider being held: the value it shows. The setting keeps the applied one until release.
   std::optional<int> pending_release;
   std::string_view pending_key;  // the held row's key (schema keys are static)
-  // Plan 14 (R89): the Setup highlights' settle, for the device they belong to (a change of device starts it afresh).
+  // The Setup highlights' settle, for the device they belong to (a change of device starts it afresh).
   SetupSettle setup_settle;
   const void* setup_device = nullptr;
 };
 
-// Plan 14: resolves Setup from `facts` (the shown device's), settles its highlights in `state` and, for a working card, builds the card's rows. Sets
+// Resolves Setup from `facts` (the shown device's), settles its highlights in `state` and, for a working card, builds the card's rows. Sets
 // `view->setup` and `view->live`; `view->card` must be set already. `device`: the shown device's identity. `facts`' views must outlive the draw.
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now);
 
 bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state);
 
-// Draws the Uplift panel (spec §12) inside the window ReShade opened for it, editing `settings`
+// Draws the Uplift panel inside the window ReShade opened for it, editing `settings`
 // in place. Returns true when a setting changed; the caller then sanitises, saves and applies.
 bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state);
 

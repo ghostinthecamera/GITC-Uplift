@@ -1,7 +1,7 @@
 #include "look_common.hlsli"
 #include "vk_common.hlsli"
 
-// v2 design §3.12: one level of the Gaussian pyramid of the change field ([1 3 3 1]/8 at stride 2) and of the
+// One level of the Gaussian pyramid of the change field ([1 3 3 1]/8 at stride 2) and of the
 // max pyramid of ℓ_M, each into its atlas. Dispatched once per level, with a UAV barrier between levels.
 cbuffer PyramidConstants : register(b0) {
   uint image_width;

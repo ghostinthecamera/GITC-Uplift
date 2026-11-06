@@ -62,7 +62,7 @@ NVSDK_NGX_Result VkFeature::Evaluate(ID3D12GraphicsCommandList* list, const Eval
   if (handle_ == nullptr || list == nullptr || inputs.color == nullptr || inputs.output == nullptr) {
     return NVSDK_NGX_Result_FAIL_InvalidParameter;
   }
-  // The NR floor (spec §6.2), enforced here too so no caller can reach NGX below it. A Vulkan image has no GetDesc: its size is the one the
+  // The NR floor, enforced here too so no caller can reach NGX below it. A Vulkan image has no GetDesc: its size is the one the
   // caller's NVSDK_NGX_Resource_VK says.
   const NVSDK_NGX_ImageViewInfo_VK& output_view = VkResourceOf(inputs.output)->Resource.ImageViewInfo;
   const Size output_size = {output_view.Width, output_view.Height};

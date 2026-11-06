@@ -14,12 +14,12 @@ enum class TriggerPoint : uint8_t {
 
 [[nodiscard]] std::string_view TriggerPointName(TriggerPoint point);
 
-// Spec §8.1 (amendment 7): picks the one event per frame in which NR runs. The add-on calls it
+// Picks the one event per frame in which NR runs. The add-on calls it
 // only for the primary swap chain, and only for events recorded on ReShade's immediate list.
 class FrameTrigger {
  public:
   // First event of a frame. `marker_expected`: effects are on and an enabled Uplift technique exists. `effects_on`: ReShade's effects are on.
-  // 1.1.6: with effects on, NR before effects waits for the begin-effects event, which comes after every add-on's present event (RenoDX draws its
+  // With effects on, NR before effects waits for the begin-effects event, which comes after every add-on's present event (RenoDX draws its
   // swap chain proxy over the back buffer in its own, so NR's result in the present event was painted over). Only when the last frame had a usable
   // one: while effects load, or render on a game's list, none comes, and NR stays in the present event (one frame goes without NR when that starts).
   TriggerPoint OnPresent(bool marker_expected, bool effects_on = false, bool marker_rendered_early = false);

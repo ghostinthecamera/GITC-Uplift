@@ -1,6 +1,6 @@
 #pragma once
 
-// Plan 9 (design §2.2): the small pieces around ipc::ControlBlock that both processes use -- bounded text fields, the
+// The small pieces around ipc::ControlBlock that both processes use -- bounded text fields, the
 // helper's log ring, the header check, and the drag state's wire form.
 
 #include <cstddef>

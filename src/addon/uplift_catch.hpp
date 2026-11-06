@@ -4,7 +4,7 @@
 
 #include "nr/log.hpp"
 
-// I1: no exception may ever escape into ReShade or the game. Every event handler and the overlay
+// No exception may ever escape into ReShade or the game. Every event handler and the overlay
 // callback wraps its whole body in `try { ... }` immediately followed by this macro, which logs an
 // ERR at most once per handler (the static is one instance per expansion site) and returns the
 // event's safe default: nothing for a void handler, `false` for reshade_open_overlay. The `try` opens

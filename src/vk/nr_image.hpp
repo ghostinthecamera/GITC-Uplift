@@ -10,7 +10,7 @@
 
 namespace uplift::vk {
 
-// Plan 13: an image Uplift owns on the game's device (the colour pipeline's models, the zero motion, the placeholders): one dedicated device-local
+// An image Uplift owns on the game's device (the colour pipeline's models, the zero motion, the placeholders): one dedicated device-local
 // allocation, a 2D view of the whole image, and the NVSDK_NGX_Resource_VK the snippet is handed for it (NR's A, B and zero motion travel as pointers
 // to `ngx`, nr/vk_handles.hpp). Header-only on purpose: the colour pipeline (uplift_color) and the sources (uplift_sources) both make images, and
 // neither links the Vulkan side's library.
@@ -43,7 +43,7 @@ inline void DestroyNrImage(const NrFunctions& functions, VkDevice device, NrImag
   *image = {};
 }
 
-// A 2D optimal-tiling image of `format` in UNDEFINED (every recording that uses it moves it to GENERAL first: design §3.5). `read_write` is the
+// A 2D optimal-tiling image of `format` in UNDEFINED (every recording that uses it moves it to GENERAL first). `read_write` is the
 // NVSDK_NGX_Resource_VK's ReadWrite. False when any call failed (nothing is left allocated then).
 [[nodiscard]] inline bool CreateNrImage(const NrFunctions& functions, VkDevice device, const VkPhysicalDeviceMemoryProperties& memory, VkFormat format,
                                         uint32_t width, uint32_t height, VkImageUsageFlags usage, bool read_write, NrImage* out) {

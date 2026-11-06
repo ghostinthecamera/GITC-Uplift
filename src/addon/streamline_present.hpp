@@ -4,11 +4,28 @@
 #include <dxgi1_6.h>
 #include <vulkan/vulkan.h>
 
+#include <atomic>
+
 namespace uplift::addon::streamline {
 
+// Borrowed pointers to VkForward are valid only while its forwarding scope is alive.
+// An unclaimed scope must complete release_tick, which takes the add-on lock, before it may destroy this object.
+// Takers dereference only under that same lock and disarm release_tick after their final read.
 struct VkForward {
   VkPresentInfoKHR info;
   VkResult failure = VK_SUCCESS;
+  bool native_tick = false;
+  using ReleaseTick = void (*)(const VkForward*) noexcept;
+  std::atomic<ReleaseTick> release_tick{};
+  bool TakeNativeTick() noexcept {
+    const bool ticked = native_tick;
+    release_tick.store(nullptr, std::memory_order_release);  // Last access: the outer scope may now end on another thread.
+    return ticked;
+  }
+  // A forwarded call that produces no accepted inner present must not leave its tick for a later frame.
+  void ReleaseNativeTick() noexcept {
+    if (const auto release = release_tick.load(std::memory_order_acquire)) release(this);
+  }
 };
 
 // The callbacks run before forwarding the application's call, outside the hook installation lock.
@@ -33,7 +50,14 @@ void NoteReshadeSwapchain(void* chain);
 bool WatchGameFacing(IDXGISwapChain* chain, bool trace_method = false);
 bool InsideOuterPresent();
 bool Installed();
+// The game's Streamline interposer (sl.interposer.dll) is in the process, so frame generation can exist here; false until Poll or the game's first
+// resolved Streamline export finds it, and for good in a game without Streamline (the overlay greys Before FG with why).
+bool StreamlineLoaded();
 enum class FgMode { UNKNOWN, OFF, ON, AUTO };
 FgMode Mode();
+
+[[nodiscard]] constexpr bool FrameGenerationActive(FgMode mode, bool detected) {
+  return mode != FgMode::OFF && (mode == FgMode::ON || mode == FgMode::AUTO || detected);
+}
 
 }  // namespace uplift::addon::streamline

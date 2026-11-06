@@ -39,7 +39,7 @@ static_assert(offsetof(SwapchainDesc68, present_mode) == offsetof(api::swapchain
 static_assert(offsetof(SwapchainDesc68, present_flags) == offsetof(api::swapchain_desc, present_flags));
 static_assert(sizeof(SwapchainDesc68) >= sizeof(api::swapchain_desc));
 
-// Vulkan only, and no Uplift lock, ever (Plan 10 C-1): ReShade raises this inside vkCreateSwapchainKHR, and other APIs' swap chains pass through
+// Vulkan only, and no Uplift lock, ever: ReShade raises this inside vkCreateSwapchainKHR, and other APIs' swap chains pass through
 // it too. Returning true makes ReShade rebuild the create info from `desc`; the round trip keeps every other field and every unmapped usage bit
 // (vulkan_hooks_swapchain.cpp:220-255, vulkan_impl_type_convert.cpp:860-910), except for a swap chain that asks for exclusive fullscreen (below).
 bool OnCreateSwapchain(api::device_api device_api, api::swapchain_desc& desc, void* /*hwnd*/) {
@@ -61,7 +61,7 @@ bool OnCreateSwapchain(api::device_api device_api, api::swapchain_desc& desc, vo
     }
     if (device_api != api::device_api::vulkan) return false;
     if (g_desc_has_fullscreen_state.load(std::memory_order_relaxed) && reinterpret_cast<const SwapchainDesc68&>(desc).fullscreen_state) {
-      // Final review I-2 (see the header): no rebuild. The swap chain keeps ReShade's own usage bits, without TRANSFER_DST, and the card says why.
+      // No rebuild. The swap chain keeps ReShade's own usage bits, without TRANSFER_DST, and the card says why.
       vk::NoteExclusiveFullscreenSwapchain();
       if (!g_fullscreen_skip_logged.exchange(true, std::memory_order_relaxed)) {
         nr::Log(nr::LogLevel::INFO,

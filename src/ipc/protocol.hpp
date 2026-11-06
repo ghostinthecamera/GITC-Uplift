@@ -1,8 +1,7 @@
 #pragma once
 
-// Plan 9 (design §2.2): the control block the add-ons (gitc-uplift.addon32, and since Plan 10 gitc-uplift.addon64 for Direct3D 9 games) and
-// gitc-uplift-helper64.exe (x64) share. Fixed-width fields only. Any change bumps PROTOCOL_VERSION and CONTROL_BLOCK_BYTES, which both
-// builds assert.
+// The add-ons and gitc-uplift-helper64.exe share this fixed-width control block.
+// Layout or field-meaning changes bump PROTOCOL_VERSION; both architectures assert CONTROL_BLOCK_BYTES.
 
 #include <cstddef>
 #include <cstdint>
@@ -11,11 +10,12 @@ namespace uplift::ipc {
 
 inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // 2: Target::block_mapped; 3: Api::D3D10, Share::kmt_handle, mask/motion blocks; 4: Api::VULKAN, Transport::SHARED_CPU;
-// 5 (Plan 12): Api::OPENGL, Api::D3D12, Handles::color_bytes (and FENCED's mask_bytes and motion_bytes), Reply::to12_completed and to11_completed;
-// 6 (Plan 14): Status::placement, motion_source, dlss_motion_gap, launchpad_gap, resolution_applied, upsampling and the work, canvas and frame sizes
-// (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read; 7 (Plan 17): Status::exposure_line (+256 bytes).
+// 5: Api::OPENGL, Api::D3D12, Handles::color_bytes (and FENCED's mask_bytes and motion_bytes), Reply::to12_completed and to11_completed;
+// 6: Status::placement, motion_source, dlss_motion_gap, launchpad_gap, resolution_applied, upsampling and the work, canvas and frame sizes
+// (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read; 7: Status::exposure_line (+256 bytes).
 // 8: Frame::uplift_mv_lumenite (+8 bytes); 9: Status::network_diagnostic (+256 bytes); 10: Status::legacy_runtime (+8 with alignment).
 // 11: network diagnostics for all ten passes (+3840 bytes).
+// 12-13: game-facing Present and per-pass network/style records; 14: the early-marker motion extent.
 inline constexpr uint32_t PROTOCOL_VERSION = 14u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t NETWORK_DIAGNOSTIC_BYTES = 4096u;
@@ -32,17 +32,17 @@ enum class HelperState : uint32_t {
 enum class Api : uint32_t {
   D3D9,
   D3D11,
-  D3D10,   // Plan 10: a 32-bit Direct3D 10 game's relay device; the helper only logs it
-  VULKAN,  // Plan 11: a Vulkan game's device (DXVK in a 32-bit game); the helper only logs it
-  OPENGL,  // Plan 12: an OpenGL game's context (a 32-bit game); the helper only logs it
-  D3D12,   // Plan 12: a 32-bit Direct3D 12 game's device (dgVoodoo2's D3D12 output); the helper only logs it
+  D3D10,   // A 32-bit Direct3D 10 game's relay device; the helper only logs it
+  VULKAN,  // A Vulkan game's device (DXVK in a 32-bit game); the helper only logs it
+  OPENGL,  // an OpenGL game's context (a 32-bit game); the helper only logs it
+  D3D12,   // A 32-bit Direct3D 12 game's device (dgVoodoo2's D3D12 output); the helper only logs it
 };
 enum class Transport : uint32_t {
   NONE,
   BLOCK,
   KMT,
   FENCED,
-  SHARED_CPU,  // Plan 11: FENCED's NT textures with no fences, CPU-ordered by the add-on (a Vulkan device without VK_KHR_external_semaphore_win32)
+  SHARED_CPU,  // FENCED's NT textures with no fences, CPU-ordered by the add-on (a Vulkan device without VK_KHR_external_semaphore_win32)
 };
 enum class RequestKind : uint32_t {
   NONE,
@@ -69,7 +69,7 @@ struct Attach {
 struct Target {
   uint32_t width = 0u;
   uint32_t height = 0u;
-  uint32_t dxgi_format = 0u;      // the twin's (design §2.8)
+  uint32_t dxgi_format = 0u;      // DXGI_FORMAT of the shared frame texture.
   uint32_t color_space = 0u;      // color::ColorSpace
   uint64_t kmt_handle = 0u;       // KMT: the add-on's shared texture; 0 while it has none
   uint32_t kmt_generation = 0u;   // bumped whenever the add-on replaced it
@@ -87,9 +87,9 @@ struct Frame {
   uint32_t nr_allowed = 1u;
   uint32_t unreported_point = 0u;  // addon::TriggerPoint the add-on reached last frame without a RUN
   uint32_t retry_now = 0u;
-  uint32_t mask_running = 0u;  // an enabled technique writes UPLIFT_MASK (helper_front.hpp's MaskEffectRunning); Plan 10: every transport
-  uint32_t drain_now = 0u;     // transitions (2026-10-08): NR's owner moved away from the helper: with nr_allowed 0, it drains with no grace (was reserved)
-  uint32_t uplift_mv_lumenite = 0u;  // 2026-10-08 (protocol 8): UPLIFT_MV holds Lumenite's vectors, not Launchpad's (the readouts name it)
+  uint32_t mask_running = 0u;  // an enabled technique writes UPLIFT_MASK (helper_front.hpp's MaskEffectRunning); every transport
+  uint32_t drain_now = 0u;     // NR's owner moved away from the helper: with nr_allowed 0, it drains with no grace
+  uint32_t uplift_mv_lumenite = 0u;  // UPLIFT_MV holds Lumenite's vectors, not Launchpad's (the readouts name it)
   uint32_t game_facing_present = 0u;
   uint32_t early_motion_width = 0u;  // written rectangle in UPLIFT_MV when the marker ran before Present
   uint32_t early_motion_height = 0u;
@@ -100,8 +100,8 @@ struct Run {
   uint64_t in = 0u;          // FENCED: the to12 value D3D11 signalled and flushed
   uint64_t out = 0u;         // FENCED: the to11 value D3D11 will wait for, once the reply says it was submitted
   uint32_t point = 0u;       // addon::TriggerPoint
-  uint32_t mask_fresh = 0u;  // UPLIFT_MASK was copied into the shared mask since the last RUN (Plan 10: BLOCK and KMT too)
-  uint32_t motion = 0u;      // UPLIFT_MV was copied into the shared motion for this RUN (Plan 10: BLOCK and KMT too)
+  uint32_t mask_fresh = 0u;  // UPLIFT_MASK was copied into the shared mask since the last RUN (BLOCK and KMT too)
+  uint32_t motion = 0u;      // UPLIFT_MV was copied into the shared motion for this RUN (BLOCK and KMT too)
   uint32_t reserved = 0u;
 };
 
@@ -139,14 +139,14 @@ struct Handles {
   uint64_t block_bytes = 0u;
   uint32_t block_row_pitch = 0u;
   uint32_t reserved = 0u;
-  uint64_t mask_bytes = 0u;  // BLOCK: `mask` is a file mapping of this size (the helper opened it as a heap); FENCED and SHARED_CPU (Plan 12): the NT texture's allocation size
+  uint64_t mask_bytes = 0u;  // BLOCK: `mask` is a file mapping of this size (the helper opened it as a heap); FENCED and SHARED_CPU: the NT texture's allocation size
   uint64_t motion_bytes = 0u;  // the same
   uint32_t mask_row_pitch = 0u;
   uint32_t motion_row_pitch = 0u;
-  uint64_t color_bytes = 0u;  // FENCED and SHARED_CPU (Plan 12): the colour NT texture's allocation size (GetResourceAllocationInfo): OpenGL's memory-object import needs it
+  uint64_t color_bytes = 0u;  // FENCED and SHARED_CPU: the colour NT texture's allocation size (GetResourceAllocationInfo): OpenGL's memory-object import needs it
 };
 
-// What the overlay and the status card need (design §2.1); texts are NUL-terminated UTF-8, truncated.
+// What the overlay and the status card need; texts are NUL-terminated UTF-8, truncated.
 struct Status {
   uint64_t intermediate_bytes = 0u;  // DeviceContext's, plus the helper's transport surfaces
   uint64_t runtime_bytes = 0u;
@@ -165,7 +165,7 @@ struct Status {
   uint32_t blocked_stage = 0u;  // ui::CardStage
   uint32_t trigger = 0u;        // addon::TriggerPoint used most recently
   float diffuse_white_nits = 0.f;
-  // Plan 14 (protocol 6): the context's enums as numbers (addon::Placement, sources::MotionSource, ui::MotionGap x2, ui::ResolutionMode, color::Upsampling).
+  // The context's enums as numbers (addon::Placement, sources::MotionSource, ui::MotionGap x2, ui::ResolutionMode, color::Upsampling).
   uint32_t placement = 0u;
   uint32_t motion_source = 0u;
   uint32_t dlss_motion_gap = 0u;
@@ -190,7 +190,7 @@ struct Status {
   char work_line[TEXT_BYTES] = {};
   char ui_correction_note[TEXT_BYTES] = {};
   char transport_line[TEXT_BYTES] = {};  // the helper's half of the Details line
-  char exposure_line[TEXT_BYTES] = {};   // Plan 17: ContextStatus::exposure_line
+  char exposure_line[TEXT_BYTES] = {};   // ContextStatus::exposure_line
   char network_diagnostic[NETWORK_DIAGNOSTIC_BYTES] = {};
   struct PassModel { uint8_t network = 0u; uint8_t style = 0xffu; };
   PassModel models[10]{};
@@ -208,7 +208,7 @@ struct Reply {
   uint32_t signalled = 0u;
   uint32_t busy = 0u;
   uint32_t reserved = 0u;
-  // Plan 12: FENCED's two fences' completed values as the helper read them when it wrote this reply (UINT64_MAX: its device was removed; 0 on every other
+  // FENCED's two fences' completed values as the helper read them when it wrote this reply (UINT64_MAX: its device was removed; 0 on every other
   // transport). A GL semaphore cannot be read from the game's side, so the OpenGL client gets the helper's view of them in every reply.
   uint64_t to12_completed = 0u;
   uint64_t to11_completed = 0u;
@@ -242,7 +242,7 @@ struct ControlBlock {
   LogRing log;
 };
 
-inline constexpr size_t CONTROL_BLOCK_BYTES = 60272u;  // protocol 14 includes the early marker motion extent
+inline constexpr size_t CONTROL_BLOCK_BYTES = 60272u;  // includes the early-marker motion extent
 static_assert(sizeof(ControlBlock) == CONTROL_BLOCK_BYTES, "the add-on and the helper disagree on the control block");
 static_assert(offsetof(ControlBlock, request) % 8u == 0u && offsetof(ControlBlock, reply) % 8u == 0u);
 // Both processes use the Interlocked*64 functions on it, which need 8 alignment on x86 too.

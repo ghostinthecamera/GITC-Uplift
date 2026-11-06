@@ -12,7 +12,15 @@
 namespace uplift::ui {
 namespace {
 
-// Shared by LoadSettings (an ini value) and Sanitized (an in-memory value already parsed).
+constexpr std::string_view BOOL_ONE = "1";
+constexpr std::string_view BOOL_ZERO = "0";
+constexpr std::string_view TEXT_TRUE = "true";
+constexpr std::string_view TEXT_FALSE = "false";
+constexpr std::string_view FG_PRESENT_KEY = "PresentWithFrameGen";
+constexpr char UNREADABLE_SETTING_WARNING[] = "{}: ignored the unreadable value '{}'";
+constexpr char OUT_OF_RANGE_SETTING_WARNING[] = "{}: '{}' is out of range; using the default {}";
+
+// Shared by ApplySettingText (an ini value) and Sanitized (an in-memory value already parsed).
 bool InRange(const SettingDescriptor& descriptor, double value) {
   if (descriptor.special.has_value() && value == *descriptor.special) return true;
   return value >= descriptor.min && value <= DescriptorMax(descriptor);
@@ -21,9 +29,35 @@ bool InRange(const SettingDescriptor& descriptor, double value) {
 }  // namespace
 
 std::optional<bool> ParseBoolSetting(std::string_view text) {
-  if (text == "1" || text == "true") return true;
-  if (text == "0" || text == "false") return false;
+  if (text == BOOL_ONE || text == TEXT_TRUE) return true;
+  if (text == BOOL_ZERO || text == TEXT_FALSE) return false;
   return std::nullopt;
+}
+
+std::errc ApplySettingText(Settings& settings, const SettingDescriptor& descriptor, std::string_view text) {
+  if (descriptor.kind == SettingKind::TEXT) {
+    descriptor.set_text(settings, text);
+    return {};
+  }
+  double value{};
+  if (descriptor.kind == SettingKind::BOOL || (descriptor.key == FG_PRESENT_KEY && (text == TEXT_TRUE || text == TEXT_FALSE))) {
+    const auto parsed = ParseBoolSetting(text);
+    if (!parsed) return std::errc::invalid_argument;
+    value = static_cast<double>(*parsed);
+  } else if (descriptor.kind == SettingKind::FLOAT) {
+    float parsed{};
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (error != std::errc{} || end != text.data() + text.size() || !std::isfinite(parsed)) return std::errc::invalid_argument;
+    value = parsed;
+  } else {
+    uint32_t parsed{};
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (error != std::errc{} || end != text.data() + text.size()) return std::errc::invalid_argument;
+    value = parsed;
+  }
+  if (!InRange(descriptor, value)) return std::errc::result_out_of_range;
+  descriptor.set(settings, value);
+  return {};
 }
 
 Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnings) {
@@ -36,37 +70,11 @@ Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnin
   for (const SettingDescriptor& descriptor : SettingsSchema()) {
     const std::optional<std::string> text = store.Get(descriptor.key);
     if (!text) continue;
-    if (descriptor.kind == SettingKind::TEXT) {
-      descriptor.set_text(settings, *text);
-      continue;
-    }
-    std::optional<double> value;
-    if (descriptor.kind == SettingKind::BOOL) {
-      if (const std::optional<bool> flag = ParseBoolSetting(*text); flag.has_value()) {
-        value = (*flag ? 1.0 : 0.0);
-      }
-    } else if (descriptor.key == "PresentWithFrameGen" && (*text == "true" || *text == "false")) {
-      value = (*text == "true" ? 1.0 : 0.0);
-    } else if (descriptor.kind == SettingKind::FLOAT) {
-      float parsed = 0.f;
-      const auto [end, error] = std::from_chars(text->data(), text->data() + text->size(), parsed);
-      if (error == std::errc{} && end == text->data() + text->size() && std::isfinite(parsed)) {
-        value = static_cast<double>(parsed);
-      }
-    } else {
-      uint32_t parsed = 0u;
-      const auto [end, error] = std::from_chars(text->data(), text->data() + text->size(), parsed);
-      if (error == std::errc{} && end == text->data() + text->size()) {
-        value = static_cast<double>(parsed);
-      }
-    }
-    if (!value) {
-      warn(std::format("{}: ignored the unreadable value '{}'", descriptor.key, *text));
-    } else if (!InRange(descriptor, *value)) {
-      warn(std::format("{}: '{}' is out of range; using the default {}", descriptor.key, *text,
-                       FormatSettingValue(descriptor, DefaultSettings())));
-    } else {
-      descriptor.set(settings, *value);
+    const auto error = ApplySettingText(settings, descriptor, *text);
+    if (error == std::errc::invalid_argument) {
+      warn(std::format(UNREADABLE_SETTING_WARNING, descriptor.key, *text));
+    } else if (error == std::errc::result_out_of_range) {
+      warn(std::format(OUT_OF_RANGE_SETTING_WARNING, descriptor.key, *text, FormatSettingValue(descriptor, DefaultSettings())));
     }
   }
   if (settings.use_d3d9ex) settings.startup_latches &= ~Settings::LATCH_D3D9EX;
@@ -91,7 +99,7 @@ void SaveSettings(const Settings& settings, ConfigStore* store) {
     }
     switch (descriptor.kind) {
       case SettingKind::TEXT:   store->Set(descriptor.key, descriptor.get_text(settings)); break;
-      case SettingKind::BOOL:   store->Set(descriptor.key, (descriptor.get(settings) != 0.0 ? "1" : "0")); break;
+      case SettingKind::BOOL:   store->Set(descriptor.key, (descriptor.get(settings) != 0.0 ? BOOL_ONE : BOOL_ZERO)); break;
       case SettingKind::FLOAT:  store->Set(descriptor.key, std::format("{}", static_cast<float>(descriptor.get(settings)))); break;
       case SettingKind::UINT:
       case SettingKind::CHOICE:
@@ -119,13 +127,13 @@ Settings Sanitized(Settings settings) {
 
 SourcePick SourcePickOf(const Settings& settings, bool explicit_dlss) {
   if (settings.source == PlacementSource::PRESENT) return SourcePick::PRESENT;
-  if (explicit_dlss && settings.source != PlacementSource::DLSS) return SourcePick::PRESENT;  // Plan 13: Auto stays at Present on Vulkan
+  if (explicit_dlss && settings.source != PlacementSource::DLSS) return SourcePick::PRESENT;  // Auto stays at Present on Vulkan
   if (settings.pre_upscale) return SourcePick::BEFORE_UPSCALING;
   return SourcePick::AFTER_DLSS;
 }
 
 void SetSourcePick(Settings* settings, SourcePick pick, bool explicit_dlss) {
-  // Plan 13: on Vulkan the DLSS picks are the explicit PlacementSource::DLSS, and Present is the default Auto.
+  // On Vulkan the DLSS picks are the explicit PlacementSource::DLSS, and Present is the default Auto.
   const PlacementSource dlss_source = (explicit_dlss ? PlacementSource::DLSS : PlacementSource::AUTO);
   switch (pick) {
     case SourcePick::BEFORE_UPSCALING:

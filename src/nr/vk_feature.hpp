@@ -5,7 +5,7 @@
 
 namespace uplift::nr {
 
-// Plan 13 (design §3.2): nr::Feature's body on a Vulkan-bound Snippet. The command list is a VkCommandBuffer and every ID3D12Resource* an
+// nr::Feature's body on a Vulkan-bound Snippet. The command list is a VkCommandBuffer and every ID3D12Resource* an
 // EvaluateInputs carries is a pointer to an Uplift-owned NVSDK_NGX_Resource_VK that outlives the call (nr/vk_handles.hpp turns them back, and
 // nothing else here may). The keys are exactly Feature's (the research probe checked them on Vulkan). Direct3D 12's Feature is untouched.
 class VkFeature final : public FeatureInterface {

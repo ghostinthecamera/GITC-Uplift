@@ -6,7 +6,9 @@
 #include <optional>
 
 #include "addon/environment.hpp"
+#include "gl/functions.hpp"
 #include "gl/state_guard.hpp"
+#include "text/nr_messages.hpp"
 
 namespace uplift::addon {
 namespace {
@@ -29,15 +31,15 @@ gl::ImageInfo GlImageInfo(api::device* device, api::resource resource) {
 bool GlAdapterLuid(const gl::Functions& gl, LUID* luid, std::string* error) {
   const auto* const vendor = reinterpret_cast<const char*>(gl.GetString(GL_VENDOR));
   if (vendor == nullptr || std::string_view(vendor).find("NVIDIA") == std::string_view::npos) {
-    *error = "Uplift needs an NVIDIA GPU; this game renders on another adapter";
+    *error = uplift::text::NVIDIA_GPU_REQUIRED_LINE;
     return false;
   }
   bool found = false;
   if (gl.GetUnsignedBytevEXT != nullptr) {
     LUID native = {};
     gl.GetUnsignedBytevEXT(gl::GL_DEVICE_LUID_EXT, reinterpret_cast<GLubyte*>(&native));
-    for (int drained = 0; drained < 16 && gl.GetError() != GL_NO_ERROR; ++drained) {
-      // A driver that refuses the query leaves GL_INVALID_ENUM in the game's flag: drained here, as around an import (design §3.1), once per device.
+    for (uint32_t drained = 0u; drained < gl::ERROR_DRAIN_LIMIT && gl.GetError() != GL_NO_ERROR; ++drained) {
+      // A driver that refuses the query leaves GL_INVALID_ENUM in the game's flag: drained here, as around an import, once per device.
     }
     if (native.LowPart != 0u || native.HighPart != 0) {
       *luid = native;
@@ -67,7 +69,7 @@ RuntimeContext CheckRuntimeContext(api::command_queue* queue, api::command_queue
   if (queue == nullptr || queue->get_immediate_command_list() == nullptr) return RuntimeContext::NONE;
   if (present_queue != nullptr && present_queue != queue) return RuntimeContext::OTHER;
   const HGLRC current = gl::CurrentContext();
-  if (current == nullptr) return RuntimeContext::NONE;  // a present with no context current is not "another OpenGL context" (R63)
+  if (current == nullptr) return RuntimeContext::NONE;  // a present with no context current is not "another OpenGL context"
   return (current == reinterpret_cast<HGLRC>(static_cast<uintptr_t>(queue->get_native())) ? RuntimeContext::CURRENT : RuntimeContext::OTHER);
 }
 

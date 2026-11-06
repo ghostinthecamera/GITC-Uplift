@@ -6,7 +6,7 @@
 
 namespace uplift::vk {
 
-// Plan 11 (Vulkan design §3.6): the VkFormat that shares memory with a Direct3D 12 texture of `format`. Covers the display formats (BGRA8 and RGBA8,
+// The VkFormat that shares memory with a Direct3D 12 texture of `format`. Covers the display formats (BGRA8 and RGBA8,
 // UNORM and sRGB, RGB10A2, RGBA16F) and the UPLIFT_MASK and UPLIFT_MV formats (color::DescribeMaskFormat's set). VK_FORMAT_UNDEFINED for anything else,
 // typeless ones included: see SharedFormatOf.
 [[nodiscard]] VkFormat VkFormatOf(DXGI_FORMAT format);

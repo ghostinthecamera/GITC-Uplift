@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "addon/reshade_api.hpp"
+#include "memory_units.hpp"
 #include "ui/settings_schema.hpp"
 #include "sources/work_size.hpp"
 #include "ui/overlay_widgets.hpp"
@@ -18,7 +19,7 @@
 namespace uplift::ui {
 namespace {
 
-// Plan 14 (R90): the tooltip line of a highlighted option while the highlight is not the stored preference (what runs differs from what ReShade.ini holds).
+// The tooltip line of a highlighted option while the highlight is not the stored preference (what runs differs from what ReShade.ini holds).
 std::string SavedNote(std::string_view preference) {
   return std::format("Saved: {}; it runs again by itself when it can.", preference);
 }
@@ -51,7 +52,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   std::string label(descriptor.label);
   if (descriptor.key == "ResolutionPresent") label = std::format("Resolution at {}", view.SharedPresentName(*settings));
   if (descriptor.key == "ResolutionScalePresent") label = std::format("Custom scale at {} (%)", view.SharedPresentName(*settings));
-  // Plan 6 (D6): with Compare = Built-in, a look-group row shows its built-in value, read-only: edits never reach `settings`.
+  // With Compare = Built-in, a look-group row shows its built-in value, read-only: edits never reach `settings`.
   const bool read_only = (state->defaults_view && InDefaultsView(descriptor));
   Settings built_in;
   if (read_only) {
@@ -65,9 +66,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                             && descriptor.key != "ShapeResult" && !settings->look.enabled);
   const bool stabilize_off = ((descriptor.key == "StabilizeMs" || descriptor.key == "StabilizeDetail")
                               && settings->look.stabilize == look::StabilizeMode::OFF);
-  // Plan 17: the Adaptation rows only where the meter can be used; 2026-10-09: Auto's own rows only under Auto.
+  // The Adaptation rows only where the meter can be used; Auto's own rows only under Auto.
   const bool exposure_hidden = ExposureRowHidden(descriptor, *settings);
-  // Split chain (Task 3): a later stage group's Custom scale as Setup's, and Upsampling also while a later group works below Full.
+  // Split chain: a later stage group's Custom scale as Setup's, and Upsampling also while a later group works below Full.
   const bool resolution_scale_hidden =
       ((descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM)
        || (descriptor.key == "ResolutionScaleAfterDlss" && settings->resolution_mode_after_dlss != ResolutionMode::CUSTOM)
@@ -81,35 +82,41 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   };
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && !reduced(settings->resolution_mode, settings->resolution_scale)
                                   && std::ranges::none_of(view.setup.pass_stages, later_group_scaled));
-  // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
+  // Keep faces' own rows, and its mask's tuning in Advanced, only while it is on.
   const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
                                  || descriptor.key == "FaceLightingDensity" || descriptor.key == "FaceSpeckSize";
-  // Split chain (Task 3, decision Q5a): a later stage's Keep faces here too.
+  // Split chain: a later stage's Keep faces here too.
   const bool keep_faces_here = (descriptor.key == "KeepFacesAfterDlss" || descriptor.key == "KeepFacesPresent");
   const bool keep_faces_off =
       ((descriptor.key == "FaceProtection" || descriptor.key == "LightingScale" || keep_faces_tuning || keep_faces_here) && !settings->keep_faces);
-  // Round 5: the fill's radius and tolerance only while it is on.
+  // The fill's radius and tolerance only while it is on.
   const bool fill_off = ((descriptor.key == "FaceFillRadius" || descriptor.key == "FaceFillTolerance") && !settings->face_tuning.fill_skin);
-  // ui-review.md §3 rule 1: these rows matter only after a choice in the row just above them, so they
+  // These rows matter only after a choice in the row just above them, so they
   // are hidden -- not merely greyed -- until that choice is made.
   if (pass_follows || shaping_off || stabilize_off || exposure_hidden || resolution_scale_hidden || upsampling_hidden || keep_faces_off || fill_off) {
     return false;
   }
 
   gui::PushID(label.c_str());
-  // ui-review.md §3 rule 1 / §2 finding 5: Game state after NR only matters once NR can run inside the
+  // Game state after NR only matters once NR can run inside the
   // game's frame; while no DLSS placement can run this session, it is greyed and says why.
-  // Plan 9: the Direct3D 9Ex row is greyed the same way where it does nothing (every game but a Direct3D 9 one).
-  // Plan 19: the VulkanNr row likewise, everywhere but a 64-bit Vulkan game.
-  // Keep faces (2026-10-08): its rows where it cannot run, and the face mask's view (in Advanced, far from the switch) while it is off.
+  // The Direct3D 9Ex row is greyed the same way where it does nothing (every game but a Direct3D 9 one).
+  // The VulkanNr row likewise, everywhere but a 64-bit Vulkan game.
+  // The Diffuse white row on an sRGB image, where it does nothing (and the Manual exposure choice with it, below), and the Colour conversion rows
+  // that do nothing on the shown encoding (ColorFixUnavailable).
+  // Keep faces: its rows where it cannot run, and the face mask's view (in Advanced, far from the switch) while it is off.
   const bool keep_faces_row = (descriptor.key == "KeepFaces" || descriptor.key == "FaceProtection" || descriptor.key == "LightingScale"
                                || descriptor.key == "ShowFaceMask" || keep_faces_tuning || keep_faces_here);
+  const std::string_view white_unavailable = DiffuseWhiteUnavailable(view.encoding);
+  const std::string_view fix_unavailable = ColorFixUnavailable(descriptor.key, view.encoding);
   const std::string_view disabled_reason =
       ((descriptor.flags & setting_flags::NETWORK_PRESET) != 0u && view.legacy_runtime)                   ? std::string_view("NR 310.8 only provides the Legacy network.")
       : (descriptor.key == "MaskBlendMode" && view.legacy_runtime)            ? std::string_view("NR 310.8 does not support native mask blend mode.")
       : (descriptor.key == "StateRestore" && !view.dlss_unavailable.empty())   ? std::string_view(view.dlss_unavailable)
       : (descriptor.key == "UseD3D9Ex" && !view.d3d9ex_unavailable.empty())    ? std::string_view(view.d3d9ex_unavailable)
       : (descriptor.key == "VulkanNr" && !view.vulkan_nr_unavailable.empty()) ? std::string_view(view.vulkan_nr_unavailable)
+      : (descriptor.key == "DiffuseWhiteNits" && !white_unavailable.empty())  ? white_unavailable
+      : (!fix_unavailable.empty())                                               ? fix_unavailable
       : (descriptor.key == "AllowCrossQueuePasses" && !view.cross_queue_passes_available) ? std::string_view("Only for 64-bit Direct3D 12 games")
       : (keep_faces_row && !view.keep_faces_unavailable.empty())               ? std::string_view(view.keep_faces_unavailable)
       : (descriptor.key == "ShowFaceMask" && !settings->keep_faces)            ? std::string_view("Turn on Keep faces (Look) first")
@@ -152,7 +159,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     widgets::NextGap(style::LabelGap());
     label = "##value";
   }
-  std::string saved_note;  // Plan 14 (R90): the Resolution combo's tooltip, while the mode that runs is not the stored one
+  std::string saved_note;  // the Resolution combo's tooltip, while the mode that runs is not the stored one
   if (grouped && descriptor.key == "MaskBlendMode") {
     static constexpr std::array<const char*, 4> modes{"0", "1", "2", "3"};
     const std::array<std::string_view, 4> why{disabled_reason, disabled_reason, disabled_reason, disabled_reason};
@@ -175,7 +182,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     state->drag.skin_structure = gui::IsItemActive();
     gui::EndDisabled();
   } else if (descriptor.key == "DiffuseWhiteNits") {
-    // ui-review.md §3 rule 2 (the Skin pattern): an Automatic checkbox, the control greyed at the value
+    // An Automatic checkbox, the control greyed at the value
     // in use -- shown, not hidden, so the effective value always reads even while it is automatic.
     const bool automatic = settings->diffuse_white_nits <= 0.f;
     gui::BeginDisabled(automatic);
@@ -238,7 +245,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         break;
       }
       case SettingKind::FLOAT: {
-        // 2026-10-09: AutoExposureBlend is stored 0..1 and shown as 0-100 %.
+        // AutoExposureBlend is stored 0..1 and shown as 0-100 %.
         const float shown_scale = (descriptor.key == "AutoExposureBlend" ? 100.f : 1.f);
         float value = static_cast<float>(descriptor.get(*settings)) * shown_scale;
         const float high = static_cast<float>(SliderMax(descriptor)) * shown_scale;  // Ctrl+click may type past it (DescriptorMax)
@@ -264,7 +271,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         } else if (descriptor.key == "ResolutionScale") {
           state->drag.resolution_scale = active;
         } else if (descriptor.key == "ResolutionScaleAfterDlss") {
-          state->drag.resolution_scale_after_dlss = active;  // split chain (Task 3): the work size waits for the release, as Setup's
+          state->drag.resolution_scale_after_dlss = active;  // split chain: the work size waits for the release, as Setup's
         } else if (descriptor.key == "ResolutionScalePresent") {
           state->drag.resolution_scale_present = active;
         } else if (descriptor.key == "FaceProtection") {
@@ -288,7 +295,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           }
           if (descriptor.key == "PresentWithFrameGen") why[static_cast<size_t>(Settings::FgPresent::BEFORE)] = view.before_fg_unavailable;
           if (descriptor.key == "VulkanNr" && disabled_reason.empty()) {
-            // Plan 19 (the owner's UI rules): Native greyed where it cannot run, with why; the highlight is the route that runs. T5: Direct3D 12 too.
+            // Native greyed where it cannot run, with why; the highlight is the route that runs. Direct3D 12 too.
             why[static_cast<size_t>(VulkanNrMode::NATIVE)] = view.vulkan_native_unavailable;
             why[static_cast<size_t>(VulkanNrMode::DIRECT3D_12)] = view.vulkan_d3d12_unavailable;
             if (view.vulkan_nr_running) {
@@ -316,8 +323,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
             }
           }
         } else if (descriptor.key == "ResolutionMode" || descriptor.key == "ResolutionAfterDlss" || descriptor.key == "ResolutionPresent") {
-          // Plan 14 (the user's decision 1): the entries that cannot run now are greyed, each with its reason, and the preview is the mode that runs.
-          // Split chain (Task 3): a later stage group's Resolution greys the same entries (Match game reads the same DLSS render size); its preview is its
+          // The entries that cannot run now are greyed, each with its reason, and the preview is the mode that runs.
+          // Split chain: a later stage group's Resolution greys the same entries (Match game reads the same DLSS render size); its preview is its
           // stored mode, since Setup's highlight is pass 1's.
           const bool setup_row = (descriptor.key == "ResolutionMode");
           std::array<const char*, 6> labels = {};
@@ -333,7 +340,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           if (gui::BeginCombo(label.c_str(), labels[shown])) {
             for (size_t index = 0u; index < labels.size(); ++index) {
               const OptionState& option = view.setup.resolution_options[index];
-              // Fix round 1 (M5): Setup's row greys every entry that cannot run, its highlight included (as before the split chain); a later stage's row
+              // Setup's row greys every entry that cannot run, its highlight included (as before the split chain); a later stage's row
               // keeps its stored mode selectable, since its preview is that mode and not what runs.
               gui::BeginDisabled(!option.why.empty() && (setup_row || index != shown));
               if (gui::Selectable(labels[index], shown == index)) {
@@ -356,9 +363,29 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           for (size_t index = 0u; index < count; ++index) {
             labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
           }
-          if (gui::Combo(label.c_str(), &value, labels.data(), static_cast<int>(count))) {
-            descriptor.set(*settings, static_cast<double>(value));
-            changed = true;
+          // A choice that does nothing on the shown image is greyed with why, the stored one included (as Setup's Resolution row does): Manual
+          // exposure on an sRGB image. A row with no such choice keeps the plain combo.
+          std::array<std::string_view, 8> why = {};
+          if (descriptor.key == "InputExposure") why[static_cast<size_t>(color::InputExposure::MANUAL)] = white_unavailable;
+          const size_t shown = std::min(static_cast<size_t>(std::max(value, 0)), count - 1u);
+          if (std::ranges::all_of(why, [](std::string_view reason) { return reason.empty(); })) {
+            if (gui::Combo(label.c_str(), &value, labels.data(), static_cast<int>(count))) {
+              descriptor.set(*settings, static_cast<double>(value));
+              changed = true;
+            }
+          } else if (gui::BeginCombo(label.c_str(), labels[shown])) {
+            for (size_t index = 0u; index < count; ++index) {
+              gui::BeginDisabled(!why[index].empty());
+              if (gui::Selectable(labels[index], shown == index)) {
+                descriptor.set(*settings, static_cast<double>(index));
+                changed = true;
+              }
+              gui::EndDisabled();
+              if (!why[index].empty() && gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                gui::SetTooltip("Unavailable here: %s", std::string(why[index]).c_str());
+              }
+            }
+            gui::EndCombo();
           }
         }
         break;
@@ -441,7 +468,7 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
   return enable;
 }
 
-// Split chain (Task 3, design 6.2): pass n's Runs at row, as the NR stage row but a combo (four long choices): a choice that cannot run is greyed with why,
+// Split chain: pass n's Runs at row, as the NR stage row but a combo (four long choices): a choice that cannot run is greyed with why,
 // the preview is where the pass runs, and the stored pick is named while it runs elsewhere. Where every pass runs at one stage the whole row is greyed.
 // Not folded into DrawRow: its choices' states come from Setup's pass rows, not from the schema.
 bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state) {
@@ -449,7 +476,7 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
   const PassStageRow& row = view.setup.pass_stages[later];
   const std::string label(descriptor.label);
   gui::PushID(label.c_str());
-  gui::BeginDisabled(!view.setup.split_capable || view.setup.stopped);  // fix round 1 (M5): greyed with Setup's other rows once NR stopped (Plan 15)
+  gui::BeginDisabled(!view.setup.split_capable || view.setup.stopped);  // greyed with Setup's other rows once NR stopped
   const auto stored = static_cast<size_t>(settings->passes[later].stage);
   const auto shown = static_cast<size_t>(row.shown);
   const std::array names{descriptor.choices[0].data(), NR_STAGE_NAMES[0], NR_STAGE_NAMES[1], view.SharedPresentName(*settings)};
@@ -487,7 +514,7 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
   return changed;
 }
 
-// Plan 14: the Motion vectors row -- Off / DLSS / Launchpad / Lumenite (2026-10-08) -- from Setup, as the NR stage row.
+// The Motion vectors row -- Off / DLSS / Launchpad / Lumenite -- from Setup, as the NR stage row.
 bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* state) {
   gui::PushID("MotionVectors");
   static constexpr std::array<const char*, 4> OPTIONS = {"Off", "DLSS", "Launchpad", "Lumenite"};
@@ -616,12 +643,11 @@ bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* s
 
 // The VRAM line of the Details header and of the working status card.
 std::string VramLine(const OverlayView& view) {
-  constexpr double MIB = 1024.0 * 1024.0;
   if (view.runtime_bytes) {
-    return std::format("VRAM: NR runtime {:.0f} MiB, Uplift intermediates {:.0f} MiB", static_cast<double>(*view.runtime_bytes) / MIB,
-                       static_cast<double>(view.intermediate_bytes) / MIB);
+    return std::format("VRAM: NR runtime {:.0f} MiB, Uplift intermediates {:.0f} MiB", static_cast<double>(*view.runtime_bytes) / BYTES_PER_MIB,
+                       static_cast<double>(view.intermediate_bytes) / BYTES_PER_MIB);
   }
-  return std::format("VRAM: Uplift intermediates {:.0f} MiB", static_cast<double>(view.intermediate_bytes) / MIB);
+  return std::format("VRAM: Uplift intermediates {:.0f} MiB", static_cast<double>(view.intermediate_bytes) / BYTES_PER_MIB);
 }
 
 }  // namespace
@@ -882,7 +908,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   gui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {style::RowGap(), style::LabelGap()});
   widgets::Inset("##status_card", {card_inset, card_inset}, [&] {
     if (card.working) {
-      // Plan 14 (design §1): green while NR works, three rows that say what Setup highlights (keys muted on the left, values in normal text from one column),
+      // Green while NR works, three rows that say what Setup highlights (keys muted on the left, values in normal text from one column),
       // one muted Why line for a temporary fallback (else the note), and the footer. The height above is unchanged; whatever does not fit is left out.
       gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_CheckMark), "%s", card.title.c_str());
       const float value_x = gui::GetCursorPosX() + gui::CalcTextSize("Motion vectors").x + 2.f * gui::GetStyle().ItemSpacing.x;
@@ -909,8 +935,9 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
         if (gui::IsItemHovered()) {
           gui::SetTooltip("%s", why.c_str());
         }
-      } else if (!view.live.note.empty()) {
-        gui::TextDisabled("%s", view.live.note.c_str());
+      } else {
+        if (!view.live.note.empty()) gui::TextDisabled("%s", view.live.note.c_str());
+        if (!card.before_fg_note.empty()) gui::TextDisabled("%s", card.before_fg_note.c_str());
       }
       if (!view.live.footer.empty()) gui::TextDisabled("%s", view.live.footer.c_str());
     } else {
@@ -918,6 +945,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       if (!card.reason.empty()) {
         gui::TextWrapped("%s", card.reason.c_str());
       }
+      if (!card.before_fg_note.empty()) gui::TextDisabled("%s", card.before_fg_note.c_str());
       for (const std::string& fix : card.fixes) {
         gui::BulletText("%s", fix.c_str());
       }
@@ -942,8 +970,8 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   const auto rows = [&](std::initializer_list<std::string_view> keys) {
     for (const auto key : keys) changed |= DrawRow(*FindSetting(key), view, settings, state, true);
   };
-  // ui-review.md §2 finding 1 / §3: the NR stage and Motion vectors toggles, in pipeline order, at the top
-  // of the panel -- the decisions that shape everything else, instead of about the 45th line. Plan 14: Setup.
+  // The NR stage and Motion vectors toggles, in pipeline order, at the top
+  // of the panel -- the decisions that shape everything else, because they determine which later controls apply.
   widgets::NextGap(style::SectionGap());
   const bool placement_changed = SectionChanged(*settings, SettingSection::PLACEMENT);
   if (widgets::SectionHeading(placement_changed ? "Setup (changed)" : "Setup", "placement", placement_changed && !state->defaults_view)) {
@@ -959,7 +987,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   widgets::NextGap(style::BlockGap());
   changed |= DrawSetupGroups(view, settings, state);
 
-  // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look.
+  // Compare (Mine/Built-in) is the first row of Look.
   widgets::NextGap(style::SectionGap());
   const bool look_changed = SectionChanged(*settings, SettingSection::LOOK);
   if (widgets::SectionHeading(look_changed ? "Look (changed)" : "Look", "look", look_changed && !state->defaults_view)) {
@@ -973,9 +1001,9 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     gui::SeparatorText("Passes");
     widgets::NextGap(style::BlockGap());
   }
-  // Plan 5: pass 2..pass_count, each its own collapsible tree (P4-P13), so the per-pass rows do not
-  // flood the panel for the common one-pass case. ui-review.md §5: the tree's own label shows its state.
-  // Split chain (Task 3, design 6.2): Runs at first; on the first pass of a later stage group, that stage's Resolution (and Custom scale) and, while Keep
+  // Pass 2..pass_count, each its own collapsible tree, so the per-pass rows do not
+  // flood the panel for the common one-pass case. The tree's own label shows its state.
+  // Split chain: Runs at first; on the first pass of a later stage group, that stage's Resolution (and Custom scale) and, while Keep
   // faces is on, its Keep faces here; while the chain is split the tree's label names where the pass runs.
   for (uint32_t pass = 2u; pass <= settings->pass_count; ++pass) {
     const bool follows = settings->passes[pass - 2u].follow_pass1;
@@ -1062,12 +1090,16 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   }
   if (fixes) widgets::Panel("##fixes_body", [&] {
     gui::TextDisabled("Only change these if you know what you are doing.");
+    // Manual exposure is Diffuse white alone: its row moves under Input exposure then (DiffuseWhiteInExposureGroup), so the control sits with the choice.
     widgets::PairedGroups("##colour_groups", [&] {
       widgets::GroupHeading("Colour");
-      rows({"Encoding", "DiffuseWhiteNits", "TransferStrength", "ColorStrength"});
+      if (DiffuseWhiteInExposureGroup(*settings)) rows({"Encoding", "TransferStrength", "ColorStrength"});
+      else rows({"Encoding", "DiffuseWhiteNits", "TransferStrength", "ColorStrength"});
     }, [&] {
       widgets::GroupHeading("Exposure");
-      rows({"InputExposure", "AutoExposureMode", "AutoExposureBlend", "ExposureAdapt", "AdaptBrighterStops", "AdaptDarkerStops"});
+      rows({"InputExposure"});
+      if (DiffuseWhiteInExposureGroup(*settings)) rows({"DiffuseWhiteNits"});
+      rows({"AutoExposureMode", "AutoExposureBlend", "ExposureAdapt", "AdaptBrighterStops", "AdaptDarkerStops"});
     }, style::WellSurface());
     widgets::NextGap(style::BlockGap());
     widgets::PairedGroups("##guide_groups", [&] {
@@ -1103,7 +1135,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   if (widgets::Disclosure("Details", "Recorded passes")) widgets::Panel("##details_body", [&] { DrawDetails(view, *settings, *state); });
   widgets::NextGap(style::SectionGap());
 
-  // G2: Restore all defaults, confirmed once before it takes effect.
+  // Restore all defaults, confirmed once before it takes effect.
   gui::Separator();
   if (gui::Button("Restore all defaults")) {
     state->confirm_restore = true;

@@ -11,7 +11,7 @@
 namespace uplift::bridge {
 namespace {
 
-// Plan 18 (design §3): the private list as a DLSS stage's recording sees it: Uplift's own recording only (state known, nothing of the game's to replay), its
+// The private list as a DLSS stage's recording sees it: Uplift's own recording only (state known, nothing of the game's to replay), its
 // tokens kept for the context until the list is submitted.
 class BridgeDlssHost final : public sources::DlssFrameHost {
  public:
@@ -45,7 +45,7 @@ sources::PipelineResult RecordDlssStage(addon::DeviceContext& context, addon::Br
   frame.output = (after ? targets.image : nullptr);
   frame.depth = nullptr;
   frame.motion_vectors = targets.motion;
-  frame.motion_region = targets.motion_region;  // fix round 1 (M-4): at (0, 0) inside the vectors' whole-size share
+  frame.motion_region = targets.motion_region;  // at (0, 0) inside the vectors' whole-size share
   frame.exposure_texture = targets.exposure;
   if (after) {
     frame.output_region = {0u, 0u, targets.region.width, targets.region.height};
@@ -78,7 +78,7 @@ sources::PipelineResult RecordDlssStage(addon::DeviceContext& context, addon::Br
 bool RecordNr(addon::DeviceContext& context, addon::TriggerPoint point, ID3D12GraphicsCommandList* list,
               const BridgeTargets& targets) {
   if (targets.mask != nullptr) {
-    // Key decision b: a fresh UPLIFT_MASK into NR's own copy, which it binds from this recording on.
+    // A fresh UPLIFT_MASK into NR's own copy, which it binds from this recording on.
     const D3D12_RESOURCE_DESC description = targets.mask->GetDesc();
     if (ID3D12Resource* const copy = context.PrepareMaskCopy(&description)) {
       Transition(list, copy, SHADER_READ, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -88,7 +88,7 @@ bool RecordNr(addon::DeviceContext& context, addon::TriggerPoint point, ID3D12Gr
     }
   }
   ListFrameHost host(list, targets.color);
-  // Plan 18: Direct3D 11's ring slot carries DLSS's scale as values (1 for every other source).
+  // Direct3D 11's ring slot carries DLSS's scale as values (1 for every other source).
   return context
       .Run(&host, D3D12_RESOURCE_STATE_COMMON, point, targets.motion, targets.motion_is_dlss, targets.motion_scale_x, targets.motion_scale_y,
            targets.motion_region)
@@ -107,7 +107,7 @@ DlssHandoff RunDlssStage(D3D11Bridge& bridge, addon::DeviceContext& context, add
       .motion = motion,
       .motion_region = ResolveRegion11(motion, frame.motion_region),
       .exposure = nr::D3D11ResourceOf(frame.exposure_texture),
-      // Split chain (Task 4): a Before + After split runs both hand-offs every evaluate, so each keeps its own share.
+      // Split chain: a Before + After split runs both hand-offs every evaluate, so each keeps its own share.
       .keep_other_stage = (context.RunsAt(addon::Stage::BEFORE_UPSCALING) && context.RunsAt(addon::Stage::AFTER_DLSS)),
   };
   BridgeDlssHost host;
@@ -128,7 +128,7 @@ DlssHandoff RunDlssStage(D3D11Bridge& bridge, addon::DeviceContext& context, add
       context.DropTokens(host.tokens);
     }
   }
-  // Split chain (fix round 2, I2): three groups make three private lists per frame, beyond what 8 allocators cover at DXGI's frame latency; a busy skip
+  // Split chain: three groups make three private lists per frame, beyond what 8 allocators cover at DXGI's frame latency; a busy skip
   // while split says so too. The ring grows once, lazily; one group never grows it.
   const int stages = (context.RunsAt(addon::Stage::BEFORE_UPSCALING) ? 1 : 0) + (context.RunsAt(addon::Stage::AFTER_DLSS) ? 1 : 0)
                      + (context.RunsAt(addon::Stage::PRESENT) ? 1 : 0);
@@ -137,28 +137,28 @@ DlssHandoff RunDlssStage(D3D11Bridge& bridge, addon::DeviceContext& context, add
   }
   if (handoff.skipped == DlssSkip::UNSUPPORTED_FORMAT) {
     context.NoteStageProblem(work, handoff.problem);
-  } else if (recorded.reason == "unsupported format") {
+  } else if (recorded.reason == nr::SkipReason::UNSUPPORTED_FORMAT) {
     context.NoteStageProblem(work, "the private Direct3D 12 device cannot write DLSS's output format");
   }
-  // Fix round 1 (I-1): an evaluate whose NR never came back says so, and owes NR's history a reset, as Direct3D 12's own skips do.
-  if (const std::string_view reason = HandoffSkipReason(handoff, recorded.nr_applied); !reason.empty()) {
+  // An evaluate whose NR never came back says so, and owes NR's history a reset, as Direct3D 12's own skips do.
+  if (const nr::SkipReason reason = HandoffSkipReason(handoff, recorded.nr_applied); reason != nr::SkipReason::NONE) {
     context.NoteBridgedSkip(work, reason);
   }
   return handoff;
 }
 
-std::string_view HandoffSkipReason(const DlssHandoff& handoff, bool nr_applied) {
+nr::SkipReason HandoffSkipReason(const DlssHandoff& handoff, bool nr_applied) {
   switch (handoff.skipped) {
-    case DlssSkip::STOPPED:            return "bridge stopped";
-    case DlssSkip::BUSY:               return "bridge busy";
-    case DlssSkip::NO_INPUT:           return "DLSS's region lies outside its texture";
-    case DlssSkip::UNSUPPORTED_FORMAT: return "unsupported format";
-    case DlssSkip::SHARE_FAILED:       return "the bridge could not share DLSS's image";
+    case DlssSkip::STOPPED:            return nr::SkipReason::BRIDGE_STOPPED;
+    case DlssSkip::BUSY:               return nr::SkipReason::BRIDGE_BUSY;
+    case DlssSkip::NO_INPUT:           return nr::SkipReason::DLSS_REGION_OUTSIDE;
+    case DlssSkip::UNSUPPORTED_FORMAT: return nr::SkipReason::UNSUPPORTED_FORMAT;
+    case DlssSkip::SHARE_FAILED:       return nr::SkipReason::BRIDGE_SHARE_FAILED;
     case DlssSkip::NONE:               break;
   }
-  if (!handoff.executed) return "the private list was not submitted";  // the recording failed or threw: nothing ran
-  if (nr_applied && !handoff.wrote) return "NR's result did not come back";  // the game's wait was refused (the bridge stopped)
-  return {};
+  if (!handoff.executed) return nr::SkipReason::PRIVATE_LIST_NOT_SUBMITTED;  // the recording failed or threw: nothing ran
+  if (nr_applied && !handoff.wrote) return nr::SkipReason::NR_RESULT_LOST;  // the game's wait was refused (the bridge stopped)
+  return nr::SkipReason::NONE;
 }
 
 }  // namespace uplift::bridge

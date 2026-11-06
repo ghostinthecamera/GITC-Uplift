@@ -1,11 +1,11 @@
 #include "color/vk_color_pipeline.hpp"
 
-#include <bit>
 #include <cstring>
 #include <format>
 #include <vector>
 
 #include "color/color_pipeline.hpp"
+#include "color/shader_constants.hpp"
 #include "decode_vk_presr.h"
 #include "decode_vk_r11g11b10f.h"
 #include "decode_vk_rgb10a2.h"
@@ -35,8 +35,7 @@
 namespace uplift::color {
 namespace {
 
-constexpr uint32_t PASS_CONSTANTS = 16u;  // the encode's, the decode's, the motion copy's and the stabiliser's constant buffers: 16 dwords each
-// Ring slots per recording (Plan 14): one per dispatch, as each dispatch reads its own constants. The encode, the decode, the motion copy, the change
+// Ring slots per recording: one per dispatch, as each dispatch reads its own constants. The encode, the decode, the motion copy, the change
 // pass, the stabiliser's scene cut, levels and detail, the shape, the meter, one resolve per later pass, then one per pyramid level (look::MakeAtlas makes at
 // most 16).
 constexpr uint32_t ENCODE_PASS = 0u;
@@ -51,14 +50,14 @@ constexpr uint32_t METER_PASS = 8u;
 constexpr uint32_t RESOLVE_PASS = 9u;                                              // pass index 1 (the second NR pass); index n at RESOLVE_PASS + n - 1
 constexpr uint32_t PYRAMID_PASS = RESOLVE_PASS + VkColorPipeline::RESOLVE_PASSES;  // level 1; level k at PYRAMID_PASS + k - 1
 constexpr uint32_t PYRAMID_LEVELS = 24u;
-// Keep faces: pass 1's levels (round 5: their own, since they also write the fill's pyramid), the levels every later pass shares (their constants are the
+// Keep faces: pass 1's levels (their own, since they also write the fill's pyramid), the levels every later pass shares (their constants are the
 // same), pass 1's combine, the later passes' combine, Show the face mask and the despike.
 constexpr uint32_t FACES_LEVEL_FIRST_PASS = PYRAMID_PASS + PYRAMID_LEVELS;          // level k at FACES_LEVEL_FIRST_PASS + k - 1
 constexpr uint32_t FACES_LEVEL_PASS = FACES_LEVEL_FIRST_PASS + PYRAMID_LEVELS;  // level k at FACES_LEVEL_PASS + k - 1
 constexpr uint32_t FACES_FIRST_PASS = FACES_LEVEL_PASS + PYRAMID_LEVELS;
 constexpr uint32_t FACES_LATER_PASS = FACES_FIRST_PASS + 1u;
 constexpr uint32_t FACES_SHOW_PASS = FACES_LATER_PASS + 1u;
-constexpr uint32_t FACES_DESPIKE_PASS = FACES_SHOW_PASS + 1u;  // fix round 4: every pass's despike (the same constants)
+constexpr uint32_t FACES_DESPIKE_PASS = FACES_SHOW_PASS + 1u;  // every pass's despike (the same constants)
 constexpr uint32_t PASSES_PER_RECORDING = FACES_DESPIKE_PASS + 1u;
 constexpr VkDeviceSize CONSTANTS_STRIDE = 256u;  // at least minUniformBufferOffsetAlignment, whose maximum the spec fixes at 256
 constexpr VkDeviceSize RING_BYTES = VkDeviceSize{VkColorPipeline::RING_SLOTS} * PASSES_PER_RECORDING * CONSTANTS_STRIDE;
@@ -68,23 +67,9 @@ constexpr uint32_t STORAGE_BINDINGS = 3u;  // u0-u2 at 16-18
 constexpr uint32_t STORAGE_BASE = 16u;
 constexpr uint32_t CONSTANTS_BINDING = 32u;
 constexpr uint32_t GROUP = 8u;  // numthreads(8, 8, 1)
-// look_stabilize_cs.hlsl's modes and flags (ColorPipeline's).
-constexpr uint32_t STABILIZE_CUT = 0u;
-constexpr uint32_t STABILIZE_LEVELS = 1u;
-constexpr uint32_t STABILIZE_DETAIL = 2u;
-constexpr uint32_t STABILIZE_FLAG_RESET = 1u;
-constexpr uint32_t STABILIZE_FLAG_MOTION = 2u;
-constexpr uint32_t STABILIZE_FLAG_VECTORS = 4u;
-constexpr uint32_t FACES_MODE_LEVEL = 0u;  // faces_cs.hlsl's modes (ColorPipeline's)
-constexpr uint32_t FACES_MODE_FIRST = 1u;
-constexpr uint32_t FACES_MODE_LATER = 2u;
-constexpr uint32_t FACES_MODE_SHOW = 3u;
-constexpr uint32_t FACES_MODE_DESPIKE = 4u;
-constexpr uint32_t FACES_FLAG_FIRST = 1u;  // faces_cs.hlsl's flags
-constexpr uint32_t FACES_FLAG_FILL = 2u;
 
 // Pipeline slots: the sampled encode, the in-place encodes (one per output variant), the private-colour decode, the in-place decodes, the motion copy, and
-// (Plan 14) the look's pyramid, stabiliser and shape, the resolve, the sampled meter and the in-place meters (one per output variant).
+// The look's pyramid, stabiliser and shape, the resolve, the sampled meter and the in-place meters (one per output variant).
 constexpr uint32_t ENCODE_SAMPLED = 0u;
 constexpr uint32_t ENCODE_STORAGE = 1u;
 constexpr uint32_t DECODE_PRESR = ENCODE_STORAGE + VkColorPipeline::OUTPUT_VARIANTS;
@@ -103,7 +88,7 @@ struct Shader {
   size_t size = 0u;
 };
 
-// The five output formats, in the order of VkColorPipeline's variants (and of Task 4's headers).
+// The five output formats, in the order of VkColorPipeline's variants and their generated shader headers.
 struct OutputShaders {
   VkFormat format;
   Shader encode;
@@ -131,65 +116,46 @@ constexpr Shader METER_SAMPLED_SHADER = UPLIFT_VK_SHADER(g_meter_vk_sampled);
 constexpr Shader FACES_SHADER = UPLIFT_VK_SHADER(g_faces_vk);
 #undef UPLIFT_VK_SHADER
 
-uint32_t Bits(float value) {
-  return std::bit_cast<uint32_t>(value);
-}
-
 // faces_cs.hlsl's constants. A level dispatch's `first` matters at level 1 only.
-std::array<uint32_t, 16> FacesConstants(nr::Size size, uint32_t levels, uint32_t mode, uint32_t level, uint32_t flags,
+shader::FacesConstants FacesConstants(nr::Size size, uint32_t levels, uint32_t mode, uint32_t level, uint32_t flags,
                                         const look::FacesParameters& parameters) {
-  return {size.width, size.height, levels, mode, level, flags, Bits(parameters.low_level), Bits(parameters.mask_level),
-          Bits(parameters.edge_level), Bits(parameters.dead_zone), Bits(parameters.full_weight), Bits(parameters.coverage_gain), Bits(parameters.density),
-          parameters.speck_radius, Bits(parameters.fill_level), Bits(parameters.fill_tolerance)};
+  return {
+      .width = size.width, .height = size.height, .levels = levels,
+      .mode = mode, .level = level, .flags = flags,
+      .low_level = parameters.low_level, .mask_level = parameters.mask_level, .edge_level = parameters.edge_level,
+      .dead_zone = parameters.dead_zone, .full_weight = parameters.full_weight, .coverage_gain = parameters.coverage_gain,
+      .density = parameters.density, .speck_radius = parameters.speck_radius, .fill_level = parameters.fill_level,
+      .fill_tolerance = parameters.fill_tolerance,
+  };
 }
 
 // shaders/encode_cs.hlsl's constants, as ColorPipeline's EncodeConstants packs them: `change_mode` selects its change-field pass, `second_output` its u1
 // write (the zero motion, or the change mode's κ_M).
-std::array<uint32_t, PASS_CONSTANTS> EncodeConstants(const VkEncodePass& pass, uint32_t change_mode, bool second_output) {
+shader::EncodeConstants EncodeConstants(const VkEncodePass& pass, uint32_t change_mode, bool second_output) {
   const bool whole = (pass.region.width == 0u || pass.region.height == 0u);
   const bool unpadded = pass.canvas.Empty();
   return {
-      static_cast<uint32_t>(pass.encoding),
-      pass.width,
-      pass.height,
-      Bits(pass.input_scale),
-      (second_output ? 1u : 0u),
-      (pass.exposure.view != VK_NULL_HANDLE ? 1u : 0u),
-      Bits(pass.exposure_factor),
-      (whole ? 0u : pass.region.x),
-      (whole ? 0u : pass.region.y),
-      (whole ? pass.width : pass.region.width),
-      (whole ? pass.height : pass.region.height),
-      (unpadded ? pass.width : pass.canvas.width),
-      (unpadded ? pass.height : pass.canvas.height),
-      change_mode,
-      pass.options,
-      0u,
+      .encoding = static_cast<uint32_t>(pass.encoding), .width = pass.width, .height = pass.height,
+      .input_scale = pass.input_scale, .second_output = (second_output ? 1u : 0u), .has_exposure = (pass.exposure.view != VK_NULL_HANDLE ? 1u : 0u),
+      .exposure_factor = pass.exposure_factor, .source_x = (whole ? 0u : pass.region.x), .source_y = (whole ? 0u : pass.region.y),
+      .source_width = (whole ? pass.width : pass.region.width), .source_height = (whole ? pass.height : pass.region.height), .canvas_width = (unpadded ? pass.width : pass.canvas.width),
+      .canvas_height = (unpadded ? pass.height : pass.canvas.height), .change_mode = change_mode, .options = pass.options,
+      .reserved0 = 0u,
   };
 }
 
 // look_stabilize_cs.hlsl's constants for one mode (ColorPipeline's StabilizeConstants).
-std::array<uint32_t, PASS_CONSTANTS> StabilizeConstants(uint32_t mode, const VkStabilizePass& pass) {
+shader::StabilizeConstants StabilizeConstants(uint32_t mode, const VkStabilizePass& pass) {
   const VkStabilizeMotion& motion = pass.motion;
   const bool vectors = (motion.vectors.view != VK_NULL_HANDLE);
-  const uint32_t flags = (pass.reset ? STABILIZE_FLAG_RESET : 0u) | (pass.motion_mode ? STABILIZE_FLAG_MOTION : 0u) | (vectors ? STABILIZE_FLAG_VECTORS : 0u);
+  const uint32_t flags = (pass.reset ? shader::STABILIZE_FLAG_RESET : 0u) | (pass.motion_mode ? shader::STABILIZE_FLAG_MOTION : 0u) | (vectors ? shader::STABILIZE_FLAG_VECTORS : 0u);
   return {
-      pass.atlas.image.width,
-      pass.atlas.image.height,
-      pass.atlas.levels,
-      mode,
-      pass.bands.stable_level,
-      flags,
-      Bits(pass.rate),
-      Bits(pass.bands.low_level),
-      Bits(motion.scale_x),
-      Bits(motion.scale_y),
-      motion.rect.x,
-      motion.rect.y,
-      (vectors ? motion.rect.width : 1u),
-      (vectors ? motion.rect.height : 1u),
-      0u,
-      0u,
+      .image_width = pass.atlas.image.width, .image_height = pass.atlas.image.height, .levels = pass.atlas.levels,
+      .mode = mode, .level = pass.bands.stable_level, .flags = flags,
+      .rate = pass.rate, .low_level = pass.bands.low_level, .motion_scale_x = motion.scale_x,
+      .motion_scale_y = motion.scale_y, .motion_x = motion.rect.x, .motion_y = motion.rect.y,
+      .motion_width = (vectors ? motion.rect.width : 1u), .motion_height = (vectors ? motion.rect.height : 1u), .reserved0 = 0u,
+      .reserved1 = 0u,
   };
 }
 
@@ -343,7 +309,7 @@ bool VkColorPipeline::PrepareLook() {
   const bool pyramid = (PipelineFor(LOOK_PYRAMID) != VK_NULL_HANDLE);
   const bool stabilize = (PipelineFor(LOOK_STABILIZE) != VK_NULL_HANDLE);
   const bool shape = (PipelineFor(LOOK_SHAPE) != VK_NULL_HANDLE);
-  // Keep faces: built here too, outside the hooked evaluate. A failure only keeps Keep faces from running (FacesReady), never NR; fix round 1 (M3): it is
+  // Keep faces: built here too, outside the hooked evaluate. A failure only keeps Keep faces from running (FacesReady), never NR; it is
   // said once, as a warning.
   if (pipelines_[FACES] == VK_NULL_HANDLE && !failed_[FACES] && PipelineFor(FACES) == VK_NULL_HANDLE) {
     nr::Log(nr::LogLevel::WARN, "Keep faces is unavailable on this device: its Vulkan pipeline could not be built");
@@ -413,7 +379,7 @@ VkPipeline VkColorPipeline::PipelineFor(uint32_t index) {
   } else if (index >= METER_STORAGE) {
     shader = OUTPUT_SHADERS[index - METER_STORAGE].meter;
   }
-  // Fix round 1 (M3): Keep faces' pipeline is optional, so its failure is a warning (PrepareLook says what it costs).
+  // Keep faces' pipeline is optional, so its failure is a warning (PrepareLook says what it costs).
   const nr::LogLevel failure_level = (index == FACES ? nr::LogLevel::WARN : nr::LogLevel::ERR);
   failed_[index] = true;  // until it works: a variant that cannot be built is logged once, not every frame
   // The header's array is bytes; vkCreateShaderModule wants 4-byte-aligned words.
@@ -451,7 +417,7 @@ VkPipeline VkColorPipeline::EncodePipelineFor(const VkEncodePass& pass) {
   return (variant ? PipelineFor(ENCODE_STORAGE + *variant) : VK_NULL_HANDLE);
 }
 
-void VkColorPipeline::Dispatch(VkCommandBuffer buffer, VkPipeline pipeline, uint32_t slot, uint32_t pass, std::span<const uint32_t> constants,
+void VkColorPipeline::Dispatch(VkCommandBuffer buffer, VkPipeline pipeline, uint32_t slot, uint32_t pass, std::span<const std::byte> constants,
                                const Bindings& bindings, uint32_t width, uint32_t height) {
   const VkDeviceSize offset = (VkDeviceSize{slot} * PASSES_PER_RECORDING + pass) * CONSTANTS_STRIDE;
   std::memcpy(ring_ + offset, constants.data(), constants.size_bytes());
@@ -487,7 +453,7 @@ void VkColorPipeline::ComputeBarrier(VkCommandBuffer buffer) const {
 }
 
 bool VkColorPipeline::RecordEncode(VkCommandBuffer buffer, uint32_t slot, const VkEncodePass& pass) {
-  if (!Initialized() || !SlotInRange(slot, "RecordEncode")) return false;  // batch 2 review, minor 5: never after a failed Initialize
+  if (!Initialized() || !SlotInRange(slot, "RecordEncode")) return false;  // never after a failed Initialize
   const VkPipeline pipeline = EncodePipelineFor(pass);
   if (pipeline == VK_NULL_HANDLE) return false;
   const bool in_place = (pass.source_format != VK_FORMAT_UNDEFINED);
@@ -496,7 +462,7 @@ bool VkColorPipeline::RecordEncode(VkCommandBuffer buffer, uint32_t slot, const 
   bindings.sampled[2] = pass.exposure;
   bindings.storage = {pass.model, pass.motion, (in_place ? pass.source : VK_NULL_HANDLE)};
   const bool unpadded = pass.canvas.Empty();
-  Dispatch(buffer, pipeline, slot, ENCODE_PASS, EncodeConstants(pass, 0u, pass.motion != VK_NULL_HANDLE), bindings,
+  Dispatch(buffer, pipeline, slot, ENCODE_PASS, shader::Bytes(EncodeConstants(pass, shader::ENCODE_INPUT, pass.motion != VK_NULL_HANDLE)), bindings,
            (unpadded ? pass.width : pass.canvas.width), (unpadded ? pass.height : pass.canvas.height));
   return true;
 }
@@ -514,12 +480,12 @@ bool VkColorPipeline::RecordChange(VkCommandBuffer buffer, uint32_t slot, const 
   bindings.sampled[3] = Own(pass.model_input);
   bindings.storage = {pass.change, pass.basis, (in_place ? encode.source : VK_NULL_HANDLE)};
   // The change mode runs at the work image, not the canvas.
-  Dispatch(buffer, pipeline, slot, CHANGE_PASS, EncodeConstants(encode, (pass.model_input != VK_NULL_HANDLE ? 2u : 1u), pass.basis != VK_NULL_HANDLE), bindings, encode.width, encode.height);
+  Dispatch(buffer, pipeline, slot, CHANGE_PASS, shader::Bytes(EncodeConstants(encode, (pass.model_input != VK_NULL_HANDLE ? shader::CHANGE_PRESERVED : shader::CHANGE_RECOMPUTED), pass.basis != VK_NULL_HANDLE)), bindings, encode.width, encode.height);
   return true;
 }
 
 bool VkColorPipeline::RecordDecode(VkCommandBuffer buffer, uint32_t slot, const VkDecodePass& pass) {
-  if (!Initialized() || !SlotInRange(slot, "RecordDecode")) return false;  // batch 2 review, minor 5: never after a failed Initialize
+  if (!Initialized() || !SlotInRange(slot, "RecordDecode")) return false;  // never after a failed Initialize
   const bool in_place = (pass.source.view == VK_NULL_HANDLE);
   uint32_t index = DECODE_PRESR;
   if (in_place) {
@@ -530,57 +496,37 @@ bool VkColorPipeline::RecordDecode(VkCommandBuffer buffer, uint32_t slot, const 
   const VkPipeline pipeline = PipelineFor(index);
   if (pipeline == VK_NULL_HANDLE) return false;
   // shaders/decode_common.hlsli's constants, as ColorPipeline's RecordComputeDecode packs them.
-  const std::array<uint32_t, PASS_CONSTANTS> constants = {
-      static_cast<uint32_t>(pass.encoding),
-      0u,
-      Bits(pass.input_scale),
-      Bits(pass.transfer_strength),
-      Bits(pass.color_strength),
-      (pass.exposure.view != VK_NULL_HANDLE ? 1u : 0u),
-      Bits(pass.exposure_factor),
-      pass.origin_x,
-      pass.origin_y,
-      pass.width,
-      pass.height,
-      (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
-      pass.source_x,
-      pass.source_y,
-      pass.options | (pass.mask.view != VK_NULL_HANDLE ? shader_options::MASK : 0u),
-      Bits(pass.chroma_clamp),
+  const shader::DecodeConstants constants = {
+      .encoding = static_cast<uint32_t>(pass.encoding), .target_srgb = 0u, .input_scale = pass.input_scale,
+      .transfer_strength = pass.transfer_strength, .color_strength = pass.color_strength, .has_exposure = (pass.exposure.view != VK_NULL_HANDLE ? 1u : 0u),
+      .exposure_factor = pass.exposure_factor, .origin_x = pass.origin_x, .origin_y = pass.origin_y,
+      .width = pass.width, .height = pass.height, .upsampling = (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
+      .source_x = pass.source_x, .source_y = pass.source_y, .options = pass.options | (pass.mask.view != VK_NULL_HANDLE ? shader_options::MASK : 0u),
+      .chroma_clamp = pass.chroma_clamp,
   };
   Bindings bindings;
   bindings.sampled = {pass.source, Own(pass.nr_output), pass.exposure, pass.mask, VkSampledView{}};
   bindings.storage[0] = pass.target;
-  Dispatch(buffer, pipeline, slot, DECODE_PASS, constants, bindings, pass.width, pass.height);
+  Dispatch(buffer, pipeline, slot, DECODE_PASS, shader::Bytes(constants), bindings, pass.width, pass.height);
   return true;
 }
 
 bool VkColorPipeline::RecordMotion(VkCommandBuffer buffer, uint32_t slot, const VkMotionPass& pass) {
-  if (!Initialized() || !SlotInRange(slot, "RecordMotion")) return false;  // batch 2 review, minor 5: never after a failed Initialize
+  if (!Initialized() || !SlotInRange(slot, "RecordMotion")) return false;  // never after a failed Initialize
   const VkPipeline pipeline = PipelineFor(MOTION_COPY);
   if (pipeline == VK_NULL_HANDLE) return false;
-  const std::array<uint32_t, PASS_CONSTANTS> constants = {
-      pass.region.x,
-      pass.region.y,
-      pass.region.width,
-      pass.region.height,
-      pass.image.width,
-      pass.image.height,
-      pass.canvas.width,
-      pass.canvas.height,
-      Bits(pass.scale_x),
-      Bits(pass.scale_y),
-      (pass.flip_y ? 1u : 0u),
-      Bits(pass.offset_x),
-      Bits(pass.offset_y),
-      0u,
-      0u,
-      0u,
+  const shader::MotionConstants constants = {
+      .region_x = pass.region.x, .region_y = pass.region.y, .region_width = pass.region.width,
+      .region_height = pass.region.height, .image_width = pass.image.width, .image_height = pass.image.height,
+      .canvas_width = pass.canvas.width, .canvas_height = pass.canvas.height, .scale_x = pass.scale_x,
+      .scale_y = pass.scale_y, .flip_y = (pass.flip_y ? 1u : 0u), .offset_x = pass.offset_x,
+      .offset_y = pass.offset_y, .reserved3 = 0u, .reserved4 = 0u,
+      .reserved5 = 0u,
   };
   Bindings bindings;
   bindings.sampled[1] = pass.source;
   bindings.storage[1] = pass.target;
-  Dispatch(buffer, pipeline, slot, MOTION_PASS, constants, bindings, pass.canvas.width, pass.canvas.height);
+  Dispatch(buffer, pipeline, slot, MOTION_PASS, shader::Bytes(constants), bindings, pass.canvas.width, pass.canvas.height);
   return true;
 }
 
@@ -596,8 +542,11 @@ bool VkColorPipeline::RecordPyramid(VkCommandBuffer buffer, uint32_t slot, const
       ComputeBarrier(buffer);  // level reads level - 1
     }
     const nr::Size size = look::LevelSize(pass.atlas.image, level);
-    const std::array<uint32_t, 4> constants = {pass.atlas.image.width, pass.atlas.image.height, level, 0u};
-    Dispatch(buffer, pipeline, slot, PYRAMID_PASS + level - 1u, constants, bindings, size.width, size.height);
+    const shader::PyramidConstants constants = {
+        .image_width = pass.atlas.image.width, .image_height = pass.atlas.image.height, .level = level,
+        .reserved0 = 0u,
+    };
+    Dispatch(buffer, pipeline, slot, PYRAMID_PASS + level - 1u, shader::Bytes(constants), bindings, size.width, size.height);
   }
   return true;
 }
@@ -609,10 +558,10 @@ bool VkColorPipeline::RecordStabilize(VkCommandBuffer buffer, uint32_t slot, con
   Bindings bindings;
   bindings.sampled = {Own(pass.gauss), Own(pass.previous), pass.motion.vectors, VkSampledView{}, VkSampledView{}};
   bindings.storage = {pass.current, pass.state, VK_NULL_HANDLE};
-  Dispatch(buffer, pipeline, slot, STABILIZE_CUT_PASS, StabilizeConstants(STABILIZE_CUT, pass), bindings, 1u, 1u);
+  Dispatch(buffer, pipeline, slot, STABILIZE_CUT_PASS, shader::Bytes(StabilizeConstants(shader::STABILIZE_CUT, pass)), bindings, 1u, 1u);
   ComputeBarrier(buffer);  // the levels read the scene cut
   const nr::Size size = look::LevelSize(pass.atlas.image, pass.bands.stable_level);
-  Dispatch(buffer, pipeline, slot, STABILIZE_LEVELS_PASS, StabilizeConstants(STABILIZE_LEVELS, pass), bindings, size.width, size.height);
+  Dispatch(buffer, pipeline, slot, STABILIZE_LEVELS_PASS, shader::Bytes(StabilizeConstants(shader::STABILIZE_LEVELS, pass)), bindings, size.width, size.height);
   return true;
 }
 
@@ -623,7 +572,7 @@ bool VkColorPipeline::RecordDetail(VkCommandBuffer buffer, uint32_t slot, const 
   Bindings bindings;
   bindings.sampled = {Own(pass.gauss), Own(pass.previous), pass.motion.vectors, Own(pass.change), VkSampledView{}};
   bindings.storage = {pass.current, pass.state, VK_NULL_HANDLE};
-  Dispatch(buffer, pipeline, slot, DETAIL_PASS, StabilizeConstants(STABILIZE_DETAIL, pass), bindings, pass.atlas.image.width, pass.atlas.image.height);
+  Dispatch(buffer, pipeline, slot, DETAIL_PASS, shader::Bytes(StabilizeConstants(shader::STABILIZE_DETAIL, pass)), bindings, pass.atlas.image.width, pass.atlas.image.height);
   return true;
 }
 
@@ -635,30 +584,17 @@ bool VkColorPipeline::RecordShape(VkCommandBuffer buffer, uint32_t slot, const V
   bindings.sampled = {Own(pass.gauss), Own(pass.peaks), Own(pass.history), Own(pass.basis), Own(pass.detail)};
   bindings.storage[0] = pass.change;
   const look::ShapeSettings& shape = pass.settings;
-  const uint32_t flags = (pass.sdr ? 1u : 0u) | (pass.history != VK_NULL_HANDLE ? 2u : 0u) | (pass.detail != VK_NULL_HANDLE ? 4u : 0u);
-  const std::array<uint32_t, 20> constants = {
-      pass.atlas.image.width,
-      pass.atlas.image.height,
-      pass.atlas.levels,
-      flags,
-      Bits(pass.bands.low_level),
-      pass.bands.peak_level,
-      Bits(shape.tone),
-      Bits(shape.detail),
-      Bits(shape.halo),
-      Bits(shape.brighten),
-      Bits(shape.darken),
-      Bits(shape.color),
-      Bits(shape.hue),
-      Bits(shape.shadows),
-      Bits(shape.midtones),
-      Bits(shape.highlights),
-      Bits(shape.edit_strength),
-      Bits(shape.max_brighten),
-      Bits(shape.max_darken),
-      Bits(shape.max_color),
+  const uint32_t flags = (pass.sdr ? shader::SHAPE_FLAG_SDR : 0u) | (pass.history != VK_NULL_HANDLE ? shader::SHAPE_FLAG_STABILIZED : 0u) | (pass.detail != VK_NULL_HANDLE ? shader::SHAPE_FLAG_DETAIL : 0u);
+  const shader::ShapeConstants constants = {
+      .image_width = pass.atlas.image.width, .image_height = pass.atlas.image.height, .levels = pass.atlas.levels,
+      .flags = flags, .low_level = pass.bands.low_level, .peak_level = pass.bands.peak_level,
+      .tone = shape.tone, .detail = shape.detail, .halo = shape.halo,
+      .brighten = shape.brighten, .darken = shape.darken, .color = shape.color,
+      .hue = shape.hue, .shadows = shape.shadows, .midtones = shape.midtones,
+      .highlights = shape.highlights, .edit_strength = shape.edit_strength, .max_brighten = shape.max_brighten,
+      .max_darken = shape.max_darken, .max_color = shape.max_color,
   };
-  Dispatch(buffer, pipeline, slot, SHAPE_PASS, constants, bindings, pass.atlas.image.width, pass.atlas.image.height);
+  Dispatch(buffer, pipeline, slot, SHAPE_PASS, shader::Bytes(constants), bindings, pass.atlas.image.width, pass.atlas.image.height);
   return true;
 }
 
@@ -674,31 +610,21 @@ bool VkColorPipeline::RecordMeter(VkCommandBuffer buffer, uint32_t slot, const V
   const VkPipeline pipeline = PipelineFor(index);
   if (pipeline == VK_NULL_HANDLE) return false;
   // shaders/meter_cs.hlsl's constants, as ColorPipeline's RecordMeter packs them.
-  const std::array<uint32_t, PASS_CONSTANTS> constants = {
-      static_cast<uint32_t>(pass.encoding),
-      pass.primaries,
-      Bits(pass.input_scale),
-      pass.region.x,
-      pass.region.y,
-      pass.region.width,
-      pass.region.height,
-      (pass.snap ? 1u : 0u),
-      (pass.smooth ? 1u : 0u),
-      Bits(pass.brighter_rate),
-      Bits(pass.darker_rate),
-      Bits(pass.frame_seconds),
-      (pass.probe ? 1u : 0u),
-      (pass.probe && pass.game_exposure.view != VK_NULL_HANDLE ? 1u : 0u),
-      Bits(pass.game_exposure_factor),
-      Bits(pass.probe ? pass.game_weight : 0.f),
+  const shader::MeterConstants constants = {
+      .encoding = static_cast<uint32_t>(pass.encoding), .primaries = pass.primaries, .input_scale = pass.input_scale,
+      .source_x = pass.region.x, .source_y = pass.region.y, .source_width = pass.region.width,
+      .source_height = pass.region.height, .snap = (pass.snap ? 1u : 0u), .smooth = (pass.smooth ? 1u : 0u),
+      .brighter_rate = pass.brighter_rate, .darker_rate = pass.darker_rate, .frame_seconds = pass.frame_seconds,
+      .probe = (pass.probe ? 1u : 0u), .has_game_texture = (pass.probe && pass.game_exposure.view != VK_NULL_HANDLE ? 1u : 0u), .game_factor = pass.game_exposure_factor,
+      .game_weight = pass.probe ? pass.game_weight : 0.f,
   };
   Bindings bindings;
   bindings.sampled[0] = (in_place ? VkSampledView{} : VkSampledView{.view = pass.source, .layout = pass.source_layout});
   if (pass.probe) {
-    bindings.sampled[2] = pass.game_exposure;  // Plan 17: t2, as the encode binds it; a null view takes the placeholder, which the shader never reads
+    bindings.sampled[2] = pass.game_exposure;  // t2, as the encode binds it; a null view takes the placeholder, which the shader never reads
   }
   bindings.storage = {pass.state, VK_NULL_HANDLE, (in_place ? pass.source : VK_NULL_HANDLE)};
-  Dispatch(buffer, pipeline, slot, METER_PASS, constants, bindings, 1u, 1u);  // one group of 256 threads
+  Dispatch(buffer, pipeline, slot, METER_PASS, shader::Bytes(constants), bindings, 1u, 1u);  // one group of 256 threads
   return true;
 }
 
@@ -706,11 +632,14 @@ bool VkColorPipeline::RecordResolve(VkCommandBuffer buffer, uint32_t slot, uint3
   if (!Initialized() || !SlotInRange(slot, "RecordResolve") || index == 0u || index > RESOLVE_PASSES) return false;
   const VkPipeline pipeline = PipelineFor(RESOLVE);
   if (pipeline == VK_NULL_HANDLE) return false;
-  const std::array<uint32_t, 4> constants = {pass.size.width, pass.size.height, Bits(pass.transfer_strength), Bits(pass.color_strength)};
+  const shader::ResolveConstants constants = {
+      .width = pass.size.width, .height = pass.size.height, .transfer_strength = pass.transfer_strength,
+      .color_strength = pass.color_strength,
+  };
   Bindings bindings;
   bindings.sampled[0] = Own(pass.given);
   bindings.storage[0] = pass.returned;
-  Dispatch(buffer, pipeline, slot, RESOLVE_PASS + index - 1u, constants, bindings, pass.size.width, pass.size.height);
+  Dispatch(buffer, pipeline, slot, RESOLVE_PASS + index - 1u, shader::Bytes(constants), bindings, pass.size.width, pass.size.height);
   return true;
 }
 
@@ -727,8 +656,8 @@ bool VkColorPipeline::RecordFacesPyramid(VkCommandBuffer buffer, uint32_t slot, 
   const VkPipeline pipeline = PipelineFor(FACES);
   if (pipeline == VK_NULL_HANDLE || pass.layout.levels > PYRAMID_LEVELS) return false;
   const bool first = (pass.mask == VK_NULL_HANDLE);
-  const bool fill = (first && pass.parameters.fill);  // round 5: pass 1 with the fill writes the fill's pyramid too (u1, the set's third storage binding)
-  const uint32_t flags = (first ? FACES_FLAG_FIRST : 0u) | (fill ? FACES_FLAG_FILL : 0u);
+  const bool fill = (first && pass.parameters.fill);  // pass 1 with the fill writes the fill's pyramid too (u1, the set's third storage binding)
+  const uint32_t flags = (first ? shader::FACES_FLAG_FIRST : 0u) | (fill ? shader::FACES_FLAG_FILL : 0u);
   Bindings bindings;
   bindings.sampled = {Own(pass.changed), Own(pass.reference), Own(pass.mask), VkSampledView{}, VkSampledView{}};
   bindings.storage = {pass.atlas, VK_NULL_HANDLE, (fill ? pass.fill : VK_NULL_HANDLE)};
@@ -738,7 +667,7 @@ bool VkColorPipeline::RecordFacesPyramid(VkCommandBuffer buffer, uint32_t slot, 
     }
     const nr::Size size = look::LevelSize(pass.layout.image, level);
     Dispatch(buffer, pipeline, slot, (first ? FACES_LEVEL_FIRST_PASS : FACES_LEVEL_PASS) + level - 1u,
-             FacesConstants(pass.layout.image, pass.layout.levels, FACES_MODE_LEVEL, level, flags, pass.parameters), bindings, size.width, size.height);
+             shader::Bytes(FacesConstants(pass.layout.image, pass.layout.levels, shader::FACES_MODE_LEVEL, level, flags, pass.parameters)), bindings, size.width, size.height);
   }
   return true;
 }
@@ -757,8 +686,8 @@ bool VkColorPipeline::RecordFacesCombine(VkCommandBuffer buffer, uint32_t slot, 
     bindings.storage[0] = pass.changed;
   }
   Dispatch(buffer, pipeline, slot, (first ? FACES_FIRST_PASS : FACES_LATER_PASS),
-           FacesConstants(pass.layout.image, pass.layout.levels, (first ? FACES_MODE_FIRST : FACES_MODE_LATER), 0u,
-                          ((first && pass.parameters.fill) ? FACES_FLAG_FILL : 0u), pass.parameters),
+           shader::Bytes(FacesConstants(pass.layout.image, pass.layout.levels, (first ? shader::FACES_MODE_FIRST : shader::FACES_MODE_LATER), 0u,
+                          ((first && pass.parameters.fill) ? shader::FACES_FLAG_FILL : 0u), pass.parameters)),
            bindings,
            pass.layout.image.width, pass.layout.image.height);
   return true;
@@ -771,7 +700,7 @@ bool VkColorPipeline::RecordFacesDespike(VkCommandBuffer buffer, uint32_t slot, 
   Bindings bindings;
   bindings.sampled = {Own(pass.changed), Own(pass.reference), VkSampledView{}, VkSampledView{}, VkSampledView{}};
   bindings.storage[0] = pass.detail;
-  Dispatch(buffer, pipeline, slot, FACES_DESPIKE_PASS, FacesConstants(pass.layout.image, pass.layout.levels, FACES_MODE_DESPIKE, 0u, 0u, pass.parameters),
+  Dispatch(buffer, pipeline, slot, FACES_DESPIKE_PASS, shader::Bytes(FacesConstants(pass.layout.image, pass.layout.levels, shader::FACES_MODE_DESPIKE, 0u, 0u, pass.parameters)),
            bindings, pass.layout.image.width, pass.layout.image.height);
   return true;
 }
@@ -783,7 +712,7 @@ bool VkColorPipeline::RecordFacesShow(VkCommandBuffer buffer, uint32_t slot, VkI
   Bindings bindings;
   bindings.sampled[1] = Own(mask);
   bindings.storage[0] = target;
-  Dispatch(buffer, pipeline, slot, FACES_SHOW_PASS, FacesConstants(size, 1u, FACES_MODE_SHOW, 0u, 0u, {}), bindings, size.width, size.height);
+  Dispatch(buffer, pipeline, slot, FACES_SHOW_PASS, shader::Bytes(FacesConstants(size, 1u, shader::FACES_MODE_SHOW, 0u, 0u, {})), bindings, size.width, size.height);
   return true;
 }
 

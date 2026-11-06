@@ -8,15 +8,9 @@
 
 #include "nr/log.hpp"
 #include "nr/vk_handles.hpp"
+#include "text/nr_messages.hpp"
 
 namespace uplift::vk {
-namespace {
-
-// A recording that was never submitted cannot run; one still unsubmitted this long (and this many presents) after its token was issued is dropped.
-constexpr auto STALE_AGE = std::chrono::seconds(2);
-constexpr uint64_t STALE_FRAMES = 8u;
-
-}  // namespace
 
 NrCompletion::NrCompletion(const NrFunctions& functions, VkDevice device, QueueSignal signal)
     : functions_(functions), device_(device), signal_(std::move(signal)) {}
@@ -44,8 +38,8 @@ std::unique_ptr<NrCompletion> NrCompletion::Create(const NrFunctions& functions,
   NrCompletion* const self = completion.get();
   completion->timeline_ = std::make_unique<nr::Timeline>(
       [self]() -> uint64_t {
-        // Freed or idle: nothing is in flight any more. Lost: batch 1 review, minor 2, D3D12's reading of a removed device's fence, so no mark
-        // ever waits on a semaphore the lost device can no longer signal.
+        // Freed or idle means no work remains in flight. A lost device reports maximum completion, as a removed D3D12 fence does,
+        // so marks never wait on a semaphore that can no longer be signalled.
         if (self->freed_.load(std::memory_order_acquire) || self->idle_.load(std::memory_order_acquire) || self->lost_.load(std::memory_order_acquire)) {
           return UINT64_MAX;
         }
@@ -119,7 +113,7 @@ bool NrCompletion::PollDeviceLost() {
 VkEvent NrCompletion::EventFor(uint64_t token, std::chrono::steady_clock::time_point now) {
   const std::scoped_lock lock(mutex_);
   if (freed_.load(std::memory_order_acquire) || lost_.load(std::memory_order_acquire)) return VK_NULL_HANDLE;
-  // Batch 1 review, minor 5: one event per token, whoever asks twice.
+  // One event per token, whoever asks twice.
   if (const auto found = entries_.find(token); found != entries_.end() && found->second.event != VK_NULL_HANDLE) return found->second.event;
   VkEvent event = VK_NULL_HANDLE;
   if (!pool_.empty()) {
@@ -141,10 +135,10 @@ void NrCompletion::Executed(std::span<const uint64_t> tokens) {
   for (const uint64_t token : tokens) {
     if (const auto found = entries_.find(token); found != entries_.end()) {
       if (found->second.dropped && !late_submit_logged_) {
-        // Batch 1 review, minor 6: R77's accepted gap. The token completed when it was dropped, so a release may have run before this submission:
+        // Late-submission limit: the token completed when it was dropped, so a release may have run before this submission:
         // a device removal soon after is traced here.
         late_submit_logged_ = true;
-        Log(nr::LogLevel::WARN, "Vulkan: a recording was submitted after its token was dropped as stale (more than 2 s and 8 frames after it was made)");
+        nr::Logf(nr::LogLevel::WARN, uplift::text::VK_LATE_SUBMISSION_LINE, STALE_AGE.count(), STALE_FRAMES);
       }
       found->second.executed = true;
     }
@@ -175,8 +169,7 @@ void NrCompletion::Reexecuted(std::span<const uint64_t> tokens, uint64_t first_t
   const uint64_t fresh = timeline_->Resubmit(first_token, nr::AsQueue(queue), GetCurrentThreadId(), std::chrono::steady_clock::now());
   const std::scoped_lock lock(mutex_);
   if (!freed_.load(std::memory_order_acquire)) {
-    // A failed reset maps the fresh token to no event and leaves it unexecuted: DropStale completes it after 2 s and 8 frames, long after the GPU
-    // has run this submission, instead of the SET event completing it at once.
+    // A failed reset leaves the fresh token without an event. DropStale applies both age guards, so a stale SET event cannot complete it immediately.
     entries_[fresh] = {
         .event = (reset_failed ? VK_NULL_HANDLE : last),
         .issued = std::chrono::steady_clock::now(),
@@ -215,7 +208,7 @@ void NrCompletion::Recycle(std::span<const uint64_t> tokens) {
         } else if (functions_.vkResetEvent(device_, event) == VK_SUCCESS) {
           pool_.push_back(event);
         } else {
-          functions_.vkDestroyEvent(device_, event, nullptr);  // batch 1 review, minor 1: a SET event must never serve a later token
+          functions_.vkDestroyEvent(device_, event, nullptr);  // a SET event must never serve a later token
         }
       }
     }
@@ -239,7 +232,7 @@ void NrCompletion::DropStale(std::chrono::steady_clock::time_point now, uint64_t
   timeline_->Drop(stale);
   if (!stale_logged_) {
     stale_logged_ = true;
-    Log(nr::LogLevel::INFO, "Vulkan: a recording was never submitted; its token was dropped after 2 s");
+    nr::Logf(nr::LogLevel::INFO, uplift::text::VK_STALE_TOKEN_DROPPED_LINE, STALE_AGE.count());
   }
 }
 

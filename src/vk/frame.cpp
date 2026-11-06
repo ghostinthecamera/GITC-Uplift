@@ -9,7 +9,7 @@
 namespace uplift::vk {
 namespace {
 
-// Batch 2 review I-1. The accesses a game's (or ReShade's) writes to the back buffer can have, and every access ReShade's effects, its overlay or
+// The accesses a game's (or ReShade's) writes to the back buffer can have, and every access ReShade's effects, its overlay or
 // a screenshot may start with. The global barriers name them so the dependency is a real one: ReShade's own barrier from the present state
 // (TOP_OF_PIPE source, access 0) orders nothing (vulkan_impl_type_convert.cpp:736-739, 808-814).
 constexpr Usage FRAME_WRITES = Usage::RENDER_TARGET | Usage::UNORDERED_ACCESS | Usage::COPY_DEST;
@@ -43,10 +43,10 @@ void RecordOpeningBarrier(GameHost& host) {
 }
 
 void RecordCopyIn(GameHost& host, VkImage back_buffer, Usage entry_state, VkImage shared_color, VkImage motion, VkImage shared_motion) {
-  // Design §3.4 case 1: a real execution and memory dependency on everything the game submitted on this queue, before the copy reads the frame.
+  // A real execution and memory dependency on everything the game submitted on this queue, before the copy reads the frame.
   // The per-image transition alone carries only a TOP_OF_PIPE source stage and no source access for the present state (ReShade's mapping), which
   // orders nothing by itself; a game's last writes to its back buffer are colour attachment, storage image or transfer ones. So the global barrier
-  // and the back buffer's transition are one two-entry call (batch 2 review, minor 3): the transition takes the global barrier's ALL_COMMANDS
+  // and the back buffer's transition are one two-entry call: the transition takes the global barrier's ALL_COMMANDS
   // source scope. The opening barrier already covers the game's frame; this one also covers what the effects wrote since.
   host.BarrierWithGlobal(back_buffer, entry_state, Usage::COPY_SOURCE, FRAME_WRITES, Usage::COPY_SOURCE);
   host.Barrier(shared_color, Usage::UNDEFINED, Usage::COPY_DEST);
@@ -68,7 +68,7 @@ void RecordCopyOut(GameHost& host, VkImage back_buffer, Usage entry_state, VkIma
   host.Barrier(back_buffer, entry_state, Usage::COPY_DEST);
   host.Copy(shared_color, back_buffer);
   host.Barrier(shared_color, Usage::COPY_SOURCE, Usage::GENERAL);
-  // Batch 2 review I-1 (b): the closing global barrier, chained with the back buffer's return to `entry_state`. What ReShade records next (its
+  // The closing global barrier, chained with the back buffer's return to `entry_state`. What ReShade records next (its
   // effects after the Present point, its overlay, a screenshot) starts from the present state, which orders nothing after NR's transfer write;
   // this barrier does, and makes the write visible to every access those can start with.
   host.BarrierWithGlobal(back_buffer, Usage::COPY_DEST, entry_state, Usage::COPY_DEST, FRAME_ACCESSES);

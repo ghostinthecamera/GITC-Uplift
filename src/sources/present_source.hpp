@@ -13,8 +13,8 @@ namespace uplift::sources {
 
 using PresentResult = PipelineResult;
 
-// Spec §8.1's Present source: NrPipeline::RecordPresent on the primary swap chain's back buffer.
-// It owns the device's one NrPipeline; the After-DLSS source (Task 9) shares it through Pipeline().
+// Present source: NrPipeline::RecordPresent on the primary swap chain's back buffer.
+// It owns the device's one NrPipeline; the After-DLSS source shares it through Pipeline().
 class PresentSource {
  public:
   PresentSource(ID3D12Device* device, nr::Session& session, nr::Timeline& timeline);

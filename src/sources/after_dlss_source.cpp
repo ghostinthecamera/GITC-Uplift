@@ -49,18 +49,18 @@ GameFrame ReadGameFrame(const ngx_hooks::DlssFrame& frame, ID3D12Resource* resou
 
 PipelineResult AfterDlssSource::Run(DlssFrameHost& host, const ngx_hooks::DlssFrame& frame, bool reset_hint,
                                     const AfterDlssConfig& config) {
-  // Plan 3, Minor 4: pessimistic; only a frame that applies NR clears the owed reset.
+  // Pessimistic; only a frame that applies NR clears the owed reset.
   const bool reset_was_owed = std::exchange(reset_owed_, true);
   ID3D12GraphicsCommandList* const list = host.NativeList();
-  if (list == nullptr || frame.output == nullptr) return {.reason = "invalid input"};
-  if (!host.StateKnown()) return {.reason = "list state unknown"};
-  // A COMPUTE list is declined until E11 shows the runtime is safe there (v2 design §3.4).
-  if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return {.reason = "DLSS runs on a compute queue"};
+  if (list == nullptr || frame.output == nullptr) return {.reason = nr::SkipReason::INVALID_INPUT};
+  if (!host.StateKnown()) return {.reason = nr::SkipReason::LIST_STATE_UNKNOWN};
+  // Only direct lists are supported; runtime safety on compute lists is unverified.
+  if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return {.reason = nr::SkipReason::COMPUTE_QUEUE};
   const nr::Rect region = ResolveOutputRegion(frame);
-  if (!nr::MeetsNrFloor({region.width, region.height})) return {.reason = "frame too small"};
-  if (!pipeline_.SupportsUavTarget(frame.output->GetDesc().Format)) return {.reason = "unsupported format"};
-  // Exact pass-through (v2 design §3.4): nothing is recorded, so the Output stays bit-identical.
-  if (config.controls.intensity <= 0.f) return {.reason = "intensity 0"};
+  if (!nr::MeetsNrFloor({region.width, region.height})) return {.reason = nr::SkipReason::FRAME_TOO_SMALL};
+  if (!pipeline_.SupportsUavTarget(frame.output->GetDesc().Format)) return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
+  // Exact pass-through: nothing is recorded, so the Output stays bit-identical.
+  if (config.controls.intensity <= 0.f) return {.reason = nr::SkipReason::INTENSITY_ZERO};
   const GameFrame game = ReadGameFrame(frame, frame.output, region, (reset_hint || reset_was_owed), config);
   const PipelineResult result = RecordOnGameList(host, timeline_, config.restore, [&] {
     return pipeline_.RecordUav(list, game.target, game.inputs, config.controls, config.layout, config.part);

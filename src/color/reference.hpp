@@ -44,15 +44,15 @@ struct Lab {
 [[nodiscard]] float QuantizeHalf(float value);
 [[nodiscard]] Rgb QuantizeHalf(Rgb value);
 // Stored value → linear BT.709 with diffuse white at 1.0 (identity for sRGB/AUTO), and back.
-// `primaries`: SourcePrimaries (Plan 5).
+// `primaries`: SourcePrimaries.
 [[nodiscard]] Rgb ToSceneLinear(Encoding encoding, Rgb value, float input_scale, Primaries primaries = Primaries::AUTO);
 [[nodiscard]] Rgb FromSceneLinear(Encoding encoding, Rgb scene, float input_scale, Primaries primaries = Primaries::AUTO);
-// v2 design §3.4: the game's exposure on the After-DLSS path, ExposureTexture ÷ DLSS.Pre.Exposure ×
+// The game's exposure on the After-DLSS path, ExposureTexture ÷ DLSS.Pre.Exposure ×
 // DLSS.Exposure.Scale, where `factor` is the last two. 1 when missing, non-finite or not positive.
 [[nodiscard]] float GameExposure(bool has_texture, float texture_value, float factor);
-// Model domain (spike E3): sRGB-encoded BT.709 in [0,1]. `primaries`: SourcePrimaries (Plan 5).
+// Model domain: sRGB-encoded BT.709 in [0,1]. `primaries`: SourcePrimaries.
 [[nodiscard]] Rgb EncodeModel(Encoding encoding, Rgb value, float input_scale, Primaries primaries = Primaries::AUTO);
-// shaders/change_common.hlsli (v2 design §3.7, §3.10, §3.14): NR's change, the compose, the per-pass resolve.
+// shaders/change_common.hlsli: NR's change, the compose, the per-pass resolve.
 struct ChangeTexel {
   float stops = 0.f;     // a
   float chroma_a = 0.f;  // δ
@@ -60,23 +60,23 @@ struct ChangeTexel {
   float guide = 0.f;     // ℓ_M
 };
 // NR's edit from what it was given to what it returned (both model domain). An unchanged or non-finite output
-// gives exactly zero. `near_black_guard` (F16) fades δ where either is near black.
+// gives exactly zero. `near_black_guard` fades δ where either is near black.
 [[nodiscard]] ChangeTexel ChangeField(Encoding encoding, Rgb model_in, Rgb model_out, bool near_black_guard);
 struct RebuildOptions {
   float transfer_strength = 1.f;
   float color_strength = 1.f;
-  bool consistent = false;   // F15, NeuralTransfer = Consistent: HDR paths only
-  float chroma_clamp = 0.f;  // F14, stops; 0 = off
+  bool consistent = false;   // NeuralTransfer = Consistent: HDR paths only
+  float chroma_clamp = 0.f;  // stops; 0 = off
 };
 // One output pixel from its stored `value` and the final change; a zero change returns `value` exactly, and so
 // does a non-finite original or result.
 [[nodiscard]] Rgb Compose(Encoding encoding, Rgb value, const ChangeTexel& change, float input_scale,
                           const RebuildOptions& options, Primaries primaries = Primaries::AUTO);
-// v2 design §3.10: pass n's own Transfer and Colour strength, from its input to its raw output, in the model domain.
+// Each pass's own Transfer and Colour strength, from its input to its raw output, in the model domain.
 // An unchanged or non-finite output returns `given` exactly.
 [[nodiscard]] Rgb ResolveStrengths(Rgb given, Rgb returned, float transfer_strength, float color_strength);
 
-// shaders/meter_cs.hlsl (v2 design §3.14): 96 bins of log2 luminance over [-16, +8] stops.
+// shaders/meter_cs.hlsl: a log2-luminance histogram with the bin count, lower bound and step below.
 inline constexpr uint32_t METER_BINS = 96u;
 inline constexpr float METER_LOW_STOPS = -16.f;
 inline constexpr float METER_BIN_STOPS = 0.25f;

@@ -40,7 +40,7 @@ void FeatureRegistry::OnCreate(const NVSDK_NGX_Handle* handle, NVSDK_NGX_Feature
   const std::unique_lock lock(mutex_);
   features_.insert_or_assign(handle,
                              FeatureRecord{.feature = feature, .device = device, .snapshot = snapshot, .serial = next_serial_++, .api = api});
-  not_adopted_.erase(handle);  // Plan 18 fix round 1 (I-1): a reused handle
+  not_adopted_.erase(handle);  // a reused handle
   if (device != nullptr && KindOf(feature) == FeatureKind::UPSCALER) {
     ++upscaler_creates_[device];
   }
@@ -78,12 +78,12 @@ bool FeatureRegistry::NotAdopted(const NVSDK_NGX_Handle* handle) const {
 void FeatureRegistry::OnRelease(const NVSDK_NGX_Handle* handle) {
   const std::unique_lock lock(mutex_);
   features_.erase(handle);
-  not_adopted_.erase(handle);  // Plan 18 fix round 1 (I-1): the core may hand the handle out again
+  not_adopted_.erase(handle);  // the core may hand the handle out again
 }
 
 size_t FeatureRegistry::OnCoreShutdown(NgxApi api, const void* device) {
   const std::unique_lock lock(mutex_);
-  not_adopted_.clear();  // Plan 18 fix round 1 (I-1): every handle the shutdown ended may come back
+  not_adopted_.clear();  // every handle the shutdown ended may come back
   return std::erase_if(features_, [api, device](const auto& entry) {
     const FeatureRecord& record = entry.second;
     return record.api == api && (device == nullptr || record.device == device || record.device == nullptr);
@@ -145,7 +145,7 @@ const NVSDK_NGX_Handle* FeatureRegistry::MainHandle(const void* device, nr::Size
   nr::Size best_output;
   for (const auto& [handle, record] : features_) {
     if (KindOf(record.feature) != FeatureKind::UPSCALER) continue;
-    if (record.api != api) continue;  // Plan 18
+    if (record.api != api) continue;
     if (record.device != nullptr && record.device != device) continue;
     // Inlined from the brief's AspectMatches (controller ruling: a single-call-site helper is
     // inlined at its call site): whether this feature's output shares the swap chain's aspect

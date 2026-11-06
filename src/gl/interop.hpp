@@ -34,16 +34,16 @@ struct ImportResult {
 
 enum class WaitResult {
   DONE,
-  TIMEOUT,  // the cap ran out: skip this frame (Plan 9 M-2). A single one never latches; the bridge stops after a few in a row
+  TIMEOUT,  // the cap ran out: skip this frame. A single one never latches; the bridge stops after a few in a row
   BUSY,     // an earlier wait is still in flight and nothing was submitted or waited for: skip this frame, never latch
   FAILED,   // the driver's wait reported a failure
 };
 
-// Plan 12 (OpenGL design §3.4, §3.6): one context share group's imports, semaphores and the capped CPU wait. ReShade-free. Every call is made with the
+// One context share group's imports, semaphores and the capped CPU wait. ReShade-free. Every call is made with the
 // runtime's context current, which the caller has checked (GameHost::Valid()). Nothing in it waits on the GPU except FlushAndWait, which is capped.
 //
 // Frees: GL defers the real release until the queue has passed a name's last use, so Release is a delete and a glFlush, with no wait. A delete needs the
-// context (key decision g): while the host is invalid the names wait in `pending_`, and FlushPending deletes them at the next valid frame. After every
+// context: while the host is invalid the names wait in `pending_`, and FlushPending deletes them at the next valid frame. After every
 // texture delete the host is told (GameHost::TextureDeleted), so ReShade's blit FBO cache forgets the name. Forget is destroy_device: every name is dropped
 // without a GL call (they die with the share group).
 // Not thread-safe: the caller's lock.

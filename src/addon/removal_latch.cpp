@@ -32,7 +32,7 @@ std::filesystem::path UpliftStateDirectory() {
 std::filesystem::path LatchMarkerPath(const std::filesystem::path& state_directory, const std::filesystem::path& game_exe_path) {
   // FNV-1a 32-bit over the full exe path's UTF-8 bytes: enough entropy to tell two game installs
   // apart, no cryptographic hash needed for a file name.
-  // Minor (fix round 2): case-folded first (LOCALE_INVARIANT, so this does not depend on the system's
+  // Case-folded first (LOCALE_INVARIANT, so this does not depend on the system's
   // display language) -- Windows paths are case-insensitive, but the hash was comparing raw bytes, so
   // a launch through a differently-cased path or a junction missed the marker an earlier session wrote.
   std::wstring folded = game_exe_path.wstring();
@@ -56,7 +56,7 @@ std::filesystem::path LatchMarkerPath(const std::filesystem::path& state_directo
   for (const char digit : std::format("{:08x}", hash)) {  // ASCII hex digits: safe to widen one by one
     file_name += static_cast<wchar_t>(digit);
   }
-  file_name += L".latch";
+  file_name += REMOVAL_LATCH_EXTENSION;
   return state_directory / L"latch" / file_name;
 }
 

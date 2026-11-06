@@ -13,7 +13,7 @@
 
 namespace uplift::helper {
 
-// Plan 9 (design §2.3, §2.4): how one game API's frame crosses into the helper and back, on the helper's D3D12Side. One
+// How one game API's frame crosses into the helper and back, on the helper's D3D12Side. One
 // transport per attach: BLOCK (plain D3D9, a shared-memory block opened as a D3D12 heap), KMT (D3D9Ex, and D3D11 without
 // fences: a legacy shared texture, CPU-ordered by the add-on) and FENCED (D3D11.4: NT textures and two shared fences).
 // Not thread-safe: the helper's one thread.
@@ -23,7 +23,7 @@ class Transport {
 
   // First thing at every FRAME: frees what the queue has passed, then describes this frame's target. While `running` (NR's
   // state is not OFF) it also makes the helper-side texture NR runs on, or opens the add-on's; otherwise, and after a
-  // latch, it retires them (Plan 7 final review C-1 and Minor 2). New NT handles go into `handles`. `problem` in the result
+  // latch, it retires them. New NT handles go into `handles`. `problem` in the result
   // views a string this transport owns until its next call. It is reported while NR is off too (the latch, the add-on's own
   // problem, then a share failure of this size), so the Session does not load for an image this side cannot take and unload
   // again; a share failure is forgotten only when the user's `enabled` is off (as D3D11Bridge does).
@@ -33,12 +33,12 @@ class Transport {
   // their list signals: the caller sets the reply event when the GPU has passed it, and only after it has written the whole
   // reply, so the add-on never reads a reply that is still being written.
   virtual void Run(const ipc::Run& run, addon::DeviceContext& context, ipc::Reply* reply, uint64_t* complete_at) = 0;
-  // UPLIFT_MASK went away (no enabled effect writes it), so the shared mask is retired (every transport, Plan 10).
+  // UPLIFT_MASK went away (no enabled effect writes it), so the shared mask is retired (every transport).
   virtual void ReleaseMask() {}
-  // SHARE_MASK and SHARE_MOTION (Plan 10: every transport): FENCED makes the shared texture and hands its NT handle back, BLOCK makes a
+  // SHARE_MASK and SHARE_MOTION (every transport): FENCED makes the shared texture and hands its NT handle back, BLOCK makes a
   // block (a file mapping opened as a heap) and hands its mapping, size and row pitch back, KMT opens the add-on's shared texture.
   virtual void Share(ipc::RequestKind kind, const ipc::Share& share, ipc::Reply* reply);
-  // Plan 12: the two shared fences' completed values right now, for every reply (Reply::to12_completed and to11_completed). FENCED reads them
+  // The two shared fences' completed values right now, for every reply (Reply::to12_completed and to11_completed). FENCED reads them
   // (UINT64_MAX once its device was removed); every other transport has no fences and answers 0 and 0.
   virtual void FenceValues(uint64_t* to12, uint64_t* to11) const {
     *to12 = 0u;
