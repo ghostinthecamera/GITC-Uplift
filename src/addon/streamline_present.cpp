@@ -1,11 +1,13 @@
 #include "addon/streamline_present.hpp"
 
 #include <MinHook.h>
+#include <array>
 #include <atomic>
 #include <algorithm>
 #include <cstring>
 #include <cwchar>
 #include <mutex>
+#include <string>
 #include <vector>
 #include <utility>
 #include <wrl/client.h>
@@ -26,13 +28,71 @@ using CreateHwnd = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, HWND, 
 using CreateComposition = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, const DXGI_SWAP_CHAIN_DESC1*, IDXGIOutput*, IDXGISwapChain1**);
 using Present = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 using Present1 = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
+using Resize = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+using Resize1 = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
+using Color = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, DXGI_COLOR_SPACE_TYPE);
+
+// COM method slots, numbered as in the IDXGIFactory2 and IDXGISwapChain3 vtables.
+constexpr size_t CREATE_SWAPCHAIN_SLOT = 10u;                  // IDXGIFactory::CreateSwapChain
+constexpr size_t CREATE_SWAPCHAIN_FOR_HWND_SLOT = 15u;         // IDXGIFactory2::CreateSwapChainForHwnd
+constexpr size_t CREATE_SWAPCHAIN_FOR_COMPOSITION_SLOT = 24u;  // IDXGIFactory2::CreateSwapChainForComposition
+constexpr size_t PRESENT_SLOT = 8u;                            // IDXGISwapChain::Present
+constexpr size_t RESIZE_BUFFERS_SLOT = 13u;                    // IDXGISwapChain::ResizeBuffers
+constexpr size_t PRESENT1_SLOT = 22u;                          // IDXGISwapChain1::Present1
+constexpr size_t SET_COLOR_SPACE1_SLOT = 38u;                  // IDXGISwapChain3::SetColorSpace1
+constexpr size_t RESIZE_BUFFERS1_SLOT = 39u;                   // IDXGISwapChain3::ResizeBuffers1
+
+// Streamline implements each DXGI method at least twice: on its proxy objects, and as a vtable hook on the object a proxy
+// wraps, which the proxy's implementation calls. This many distinct implementations of one method can be hooked at once.
+constexpr size_t PROVIDER_IMPLEMENTATIONS = 4u;
+// A method has more Streamline implementations than PROVIDER_IMPLEMENTATIONS: the method's name, then the refused address.
+constexpr char PROVIDER_TABLE_FULL_LINE[] = "Before FG: no free hook for {} at {}";
 
 std::mutex install_mutex;
 std::atomic<bool> enabled;
 std::atomic<HMODULE> interposer;
 Observer observer{};
 thread_local bool inside_present;
-thread_local void** creating_chain;
+
+// One provider call that may make ReShade create or resize its swapchain: a hooked Streamline create or resize, possibly
+// nested inside another one. ReShade's init event (NoteReshade) records its chain in the innermost open scope, and closing
+// a scope hands that chain to the scope around it, so the outermost call always learns the ReShade chain beneath it.
+// This is the only link between a game-facing chain and ReShade's inner chain; nothing else names the slot.
+class ProviderScope {
+ public:
+  template<class Result>
+  struct Outcome {
+    Result result;
+    void* inner;     // ReShade's chain created or resized beneath this call, or nullptr
+    bool outermost;  // no provider call encloses this one on the thread
+  };
+
+  // Runs one provider call inside a scope; the scope is closed again before the caller acts on the outcome.
+  template<class Call>
+  static auto Run(Call&& call) {
+    ProviderScope scope;  // not const: NoteReshade writes inner_ through current_
+    auto result = std::forward<Call>(call)();
+    return Outcome<decltype(result)>{result, scope.inner_, scope.parent_ == nullptr};
+  }
+  static void NoteReshade(void* chain) {
+    if (current_) current_->inner_ = chain;
+  }
+  static bool Open() { return current_ != nullptr; }
+
+ private:
+  ProviderScope() : parent_(std::exchange(current_, this)) {}
+  ~ProviderScope() {
+    current_ = parent_;
+    if (parent_ && inner_) parent_->inner_ = inner_;
+  }
+  ProviderScope(const ProviderScope&) = delete;
+  ProviderScope& operator=(const ProviderScope&) = delete;
+
+  static thread_local ProviderScope* current_;
+  ProviderScope* parent_;
+  void* inner_ = nullptr;
+};
+thread_local ProviderScope* ProviderScope::current_ = nullptr;
 
 template<class Fn>
 struct Hook {
@@ -44,6 +104,70 @@ struct Hook {
   Fn InstalledOriginal() const {
     return target.load(std::memory_order_acquire) ? original.load(std::memory_order_acquire) : Fn{};
   }
+};
+
+// The DXGI methods Streamline implements more than once. A spec names its method and vtable slot and declares the detour
+// that each entry of the method's hook table instantiates once, so every entry calls its own original.
+struct CreateMethod {
+  using Fn = Create;
+  static constexpr const char* NAME = "CreateSwapChain";
+  static constexpr size_t SLOT = CREATE_SWAPCHAIN_SLOT;
+  template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**);
+};
+struct CreateHwndMethod {
+  using Fn = CreateHwnd;
+  static constexpr const char* NAME = "CreateSwapChainForHwnd";
+  static constexpr size_t SLOT = CREATE_SWAPCHAIN_FOR_HWND_SLOT;
+  template<size_t Entry>
+  static HRESULT STDMETHODCALLTYPE Detour(IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**);
+};
+struct CreateCompositionMethod {
+  using Fn = CreateComposition;
+  static constexpr const char* NAME = "CreateSwapChainForComposition";
+  static constexpr size_t SLOT = CREATE_SWAPCHAIN_FOR_COMPOSITION_SLOT;
+  template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGIFactory2*, IUnknown*, const DXGI_SWAP_CHAIN_DESC1*, IDXGIOutput*, IDXGISwapChain1**);
+};
+struct PresentMethod {
+  using Fn = Present;
+  static constexpr const char* NAME = "Present";
+  static constexpr size_t SLOT = PRESENT_SLOT;
+  template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain*, UINT, UINT);
+};
+struct Present1Method {
+  using Fn = Present1;
+  static constexpr const char* NAME = "Present1";
+  static constexpr size_t SLOT = PRESENT1_SLOT;
+  template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
+};
+struct ResizeMethod {
+  using Fn = Resize;
+  static constexpr const char* NAME = "ResizeBuffers";
+  static constexpr size_t SLOT = RESIZE_BUFFERS_SLOT;
+  template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+};
+struct Resize1Method {
+  using Fn = Resize1;
+  static constexpr const char* NAME = "ResizeBuffers1";
+  static constexpr size_t SLOT = RESIZE_BUFFERS1_SLOT;
+  template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
+};
+struct ColorMethod {
+  using Fn = Color;
+  static constexpr const char* NAME = "SetColorSpace1";
+  static constexpr size_t SLOT = SET_COLOR_SPACE1_SLOT;
+  template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain3*, DXGI_COLOR_SPACE_TYPE);
+};
+
+// One DXGI method with every Streamline implementation of it that is hooked: one Hook per implementation. Entries fill in
+// order and, like every hook in this file, stay installed for the life of the process, so a filled entry never empties.
+template<class Spec>
+struct ProviderMethod {
+  using Fn = typename Spec::Fn;
+  std::array<Hook<Fn>, PROVIDER_IMPLEMENTATIONS> entries{};
+  std::atomic_flag warned_full{};
+
+  Fn Original(size_t entry) const { return entries[entry].original.load(std::memory_order_acquire); }
+  bool Attached() const { return entries.front().target.load(std::memory_order_acquire) != nullptr; }
 };
 
 // Stable prefix of sl::DLSSGOptions from the public Streamline v2 ABI.
@@ -58,17 +182,14 @@ std::atomic<FgMode> mode = FgMode::UNKNOWN;
 Hook<Upgrade> upgrade;
 Hook<Factory> factory, factory1;
 Hook<Factory2> factory2;
-Hook<Create> create;
-Hook<CreateHwnd> create_hwnd;
-Hook<CreateComposition> create_composition;
-Hook<Present> present;
-Hook<Present1> present1;
-using Resize = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
-using Resize1 = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
-using Color = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, DXGI_COLOR_SPACE_TYPE);
-Hook<Resize> resize;
-Hook<Resize1> resize1;
-Hook<Color> color;
+ProviderMethod<CreateMethod> create;
+ProviderMethod<CreateHwndMethod> create_hwnd;
+ProviderMethod<CreateCompositionMethod> create_composition;
+ProviderMethod<PresentMethod> present;
+ProviderMethod<Present1Method> present1;
+ProviderMethod<ResizeMethod> resize;
+ProviderMethod<Resize1Method> resize1;
+ProviderMethod<ColorMethod> color;
 Hook<PFN_vkCreateSwapchainKHR> vk_create;
 Hook<PFN_vkDestroySwapchainKHR> vk_destroy;
 Hook<PFN_vkGetSwapchainImagesKHR> vk_images;
@@ -114,16 +235,57 @@ bool InstallDetour(Hook<Fn>& hook, void* address, Fn detour) {
 }
 
 // A forwarded export or a shared native DXGI/vulkan-loader method is never an outer Streamline call.
+bool ProviderOwned(void* address, HMODULE feature_module) {
+  const HMODULE module = Owner(address);
+  return IsInterposer(module) || (feature_module && module == feature_module);
+}
+
+bool PinOwner(void* address) {
+  HMODULE pin{};
+  return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(address), &pin);
+}
+
+// An export: one address by definition, so the first one attached is the only one.
 template<class Fn>
 bool Attach(Hook<Fn>& hook, void* address, Fn detour, HMODULE feature_module = nullptr) {
-  if (!address) return false;
-  const HMODULE module = Owner(address);
-  if (!IsInterposer(module) && (!feature_module || module != feature_module)) return false;
+  if (!address || !ProviderOwned(address, feature_module)) return false;
   std::lock_guard guard(install_mutex);
   if (hook.target) return hook.target == address;
-  HMODULE pin{};
-  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(address), &pin)) return false;
-  return InstallDetour(hook, address, detour);
+  return PinOwner(address) && InstallDetour(hook, address, detour);
+}
+
+enum class ClaimResult { ATTACHED, NO_METHOD, OUTSIDE_INTERPOSER, NO_FREE_HOOK, INSTALL_FAILED };
+struct Claim {
+  ClaimResult result;
+  size_t entry = PROVIDER_IMPLEMENTATIONS;  // the table entry that holds or was to hold the address; PROVIDER_IMPLEMENTATIONS when none
+  bool Attached() const { return result == ClaimResult::ATTACHED; }
+};
+
+template<class Spec, size_t... Entry>
+constexpr std::array<typename Spec::Fn, sizeof...(Entry)> DetourTable(std::index_sequence<Entry...>) {
+  return {&Spec::template Detour<Entry>...};
+}
+
+// A DXGI method: an address already in the table is attached; a new one takes the first free entry, with that entry's detour.
+template<class Spec>
+Claim Attach(ProviderMethod<Spec>& method, void* address) {
+  static constexpr auto detours = DetourTable<Spec>(std::make_index_sequence<PROVIDER_IMPLEMENTATIONS>{});
+  if (!address) return {ClaimResult::NO_METHOD};
+  if (!ProviderOwned(address, nullptr)) return {ClaimResult::OUTSIDE_INTERPOSER};
+  std::lock_guard guard(install_mutex);
+  for (size_t entry{}; entry < method.entries.size(); ++entry) {
+    auto& hook = method.entries[entry];
+    if (const void* target = hook.target.load(std::memory_order_relaxed)) {
+      if (target == address) return {ClaimResult::ATTACHED, entry};
+      continue;
+    }
+    const bool installed = PinOwner(address) && InstallDetour(hook, address, detours[entry]);
+    return {installed ? ClaimResult::ATTACHED : ClaimResult::INSTALL_FAILED, entry};
+  }
+  if (!method.warned_full.test_and_set(std::memory_order_relaxed)) {
+    try { nr::Logf(nr::LogLevel::WARN, PROVIDER_TABLE_FULL_LINE, Spec::NAME, address); } catch (...) {}
+  }
+  return {ClaimResult::NO_FREE_HOOK};
 }
 
 template<class... Args>
@@ -132,24 +294,27 @@ void TraceDxgi(std::format_string<Args...> format, Args&&... args) noexcept {
   try { nr::Logf(nr::LogLevel::INFO, format, std::forward<Args>(args)...); } catch (...) {}
 }
 
-void TraceMethod(const char* method, void* address, void* target, bool attached) {
+void TraceMethod(const char* method, void* address, const Claim& claim) {
   char path[MAX_PATH + 1]{};
   const HMODULE module = address ? Owner(address) : nullptr;
   if (module) GetModuleFileNameA(module, path, MAX_PATH);
   const char* file = std::strrchr(path, '\\');
-  const char* result = attached ? "attached" : !address ? "no method" : !IsInterposer(module) ? "outside interposer"
-      : target && target != address ? "different target already hooked" : "hook installation failed";
-  TraceDxgi("Before FG DX12: {} method={} owner={} target={} result={}", method, address, file ? file + 1 : path, target, result);
-}
-
-template<class Fn>
-bool AttachDxgi(const char* method, Hook<Fn>& hook, void* address, Fn detour) {
-  const bool attached = Attach(hook, address, detour);
-  if (observer.diagnostic_dxgi) TraceMethod(method, address, hook.target.load(), attached);
-  return attached;
+  const char* result = claim.result == ClaimResult::ATTACHED ? "attached" : claim.result == ClaimResult::NO_METHOD ? "no method"
+      : claim.result == ClaimResult::OUTSIDE_INTERPOSER ? "outside interposer" : claim.result == ClaimResult::NO_FREE_HOOK ? "no free hook"
+      : "hook installation failed";
+  const std::string entry = claim.entry < PROVIDER_IMPLEMENTATIONS ? std::to_string(claim.entry) : "none";
+  TraceDxgi("Before FG DX12: {} method={} owner={} entry={} result={}", method, address, file ? file + 1 : path, entry, result);
 }
 
 void** Vtable(void* object) { return *static_cast<void***>(object); }
+
+template<class Spec>
+bool AttachDxgi(ProviderMethod<Spec>& method, void* object) {
+  void* const address = Vtable(object)[Spec::SLOT];
+  const Claim claim = Attach(method, address);
+  if (observer.diagnostic_dxgi) TraceMethod(Spec::NAME, address, claim);
+  return claim.Attached();
+}
 
 class PresentScope {
  public:
@@ -160,50 +325,51 @@ class PresentScope {
   bool nested_;
 };
 
-HRESULT STDMETHODCALLTYPE OnPresent(IDXGISwapChain* chain, UINT interval, UINT flags) {
-  const PresentScope scope;
-  const bool observe = !scope.Nested() && !(flags & DXGI_PRESENT_TEST);
-  if (observe) observer.dxgi_present(chain, flags, nullptr);
-  const HRESULT result = present.original.load(std::memory_order_acquire)(chain, interval, flags);
-  if (observe && result != S_OK && observer.dxgi_retry) observer.dxgi_retry(chain);
-  return result;
-}
-
-HRESULT STDMETHODCALLTYPE OnPresent1(IDXGISwapChain1* chain, UINT interval, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters) {
+// Only the outermost Present observes: a Streamline implementation it calls, hooked or not, runs inside its scope.
+template<class Call>
+HRESULT ObservedPresent(IDXGISwapChain* chain, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters, Call&& call) {
   const PresentScope scope;
   const bool observe = !scope.Nested() && !(flags & DXGI_PRESENT_TEST);
   if (observe) observer.dxgi_present(chain, flags, parameters);
-  const HRESULT result = present1.original.load(std::memory_order_acquire)(chain, interval, flags, parameters);
+  const HRESULT result = std::forward<Call>(call)();
   if (observe && result != S_OK && observer.dxgi_retry) observer.dxgi_retry(chain);
   return result;
 }
 
-HRESULT STDMETHODCALLTYPE OnResize(IDXGISwapChain* chain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
-  void* inner = nullptr;
-  void** parent = std::exchange(creating_chain, &inner);
-  const HRESULT hr = resize.original.load(std::memory_order_acquire)(chain, count, width, height, format, flags);
-  creating_chain = parent;
-  if (SUCCEEDED(hr) && observer.dxgi_resize) observer.dxgi_resize(chain, count, nullptr, inner);
-  return hr;
+template<size_t Entry>
+HRESULT STDMETHODCALLTYPE PresentMethod::Detour(IDXGISwapChain* chain, UINT interval, UINT flags) {
+  return ObservedPresent(chain, flags, nullptr, [&] { return present.Original(Entry)(chain, interval, flags); });
 }
 
-HRESULT STDMETHODCALLTYPE OnResize1(IDXGISwapChain3* chain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* nodes, IUnknown* const* queues) {
-  void* inner = nullptr;
-  void** parent = std::exchange(creating_chain, &inner);
-  const HRESULT hr = resize1.original.load(std::memory_order_acquire)(chain, count, width, height, format, flags, nodes, queues);
-  creating_chain = parent;
-  if (SUCCEEDED(hr) && observer.dxgi_resize) {
+template<size_t Entry>
+HRESULT STDMETHODCALLTYPE Present1Method::Detour(IDXGISwapChain1* chain, UINT interval, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters) {
+  return ObservedPresent(chain, flags, parameters, [&] { return present1.Original(Entry)(chain, interval, flags, parameters); });
+}
+
+template<size_t Entry>
+HRESULT STDMETHODCALLTYPE ResizeMethod::Detour(IDXGISwapChain* chain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
+  const auto call = ProviderScope::Run([&] { return resize.Original(Entry)(chain, count, width, height, format, flags); });
+  if (SUCCEEDED(call.result) && call.outermost && observer.dxgi_resize) observer.dxgi_resize(chain, count, nullptr, call.inner);
+  return call.result;
+}
+
+template<size_t Entry>
+HRESULT STDMETHODCALLTYPE Resize1Method::Detour(IDXGISwapChain3* chain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* nodes,
+                                               IUnknown* const* queues) {
+  const auto call = ProviderScope::Run([&] { return resize1.Original(Entry)(chain, count, width, height, format, flags, nodes, queues); });
+  if (SUCCEEDED(call.result) && call.outermost && observer.dxgi_resize) {
     if (count == 0u && queues) {
       DXGI_SWAP_CHAIN_DESC1 desc{};
       if (SUCCEEDED(chain->GetDesc1(&desc))) count = desc.BufferCount;
     }
-    observer.dxgi_resize(chain, count, queues, inner);
+    observer.dxgi_resize(chain, count, queues, call.inner);
   }
-  return hr;
+  return call.result;
 }
 
-HRESULT STDMETHODCALLTYPE OnColor(IDXGISwapChain3* chain, DXGI_COLOR_SPACE_TYPE space) {
-  const HRESULT hr = color.original.load(std::memory_order_acquire)(chain, space);
+template<size_t Entry>
+HRESULT STDMETHODCALLTYPE ColorMethod::Detour(IDXGISwapChain3* chain, DXGI_COLOR_SPACE_TYPE space) {
+  const HRESULT hr = color.Original(Entry)(chain, space);
   if (SUCCEEDED(hr) && observer.dxgi_color) observer.dxgi_color(chain, space);
   return hr;
 }
@@ -211,13 +377,12 @@ HRESULT STDMETHODCALLTYPE OnColor(IDXGISwapChain3* chain, DXGI_COLOR_SPACE_TYPE 
 void BindChain(IDXGISwapChain* chain, IUnknown* device, void* inner) {
   if (!chain) return;
   ComPtr<IDXGISwapChain1> chain1;
-  const bool regular = AttachDxgi("Present", present, Vtable(chain)[8], &OnPresent);
-  if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain1)))) AttachDxgi("Present1", present1, Vtable(chain1.Get())[22], &OnPresent1);
+  const bool regular = AttachDxgi(present, chain);
+  if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain1)))) AttachDxgi(present1, chain1.Get());
   if (observer.dxgi_resize && observer.dxgi_color) {
     ComPtr<IDXGISwapChain3> chain3;
     if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain3)))) {
-      if (!AttachDxgi("ResizeBuffers", resize, Vtable(chain)[13], &OnResize) || !AttachDxgi("SetColorSpace1", color, Vtable(chain3.Get())[38], &OnColor)
-          || !AttachDxgi("ResizeBuffers1", resize1, Vtable(chain3.Get())[39], &OnResize1)) return;
+      if (!AttachDxgi(resize, chain) || !AttachDxgi(color, chain3.Get()) || !AttachDxgi(resize1, chain3.Get())) return;
     }
   }
   if (regular) observer.dxgi_created(chain, device, inner);
@@ -226,28 +391,29 @@ void BindChain(IDXGISwapChain* chain, IUnknown* device, void* inner) {
 template<class Chain, class Call>
 HRESULT Created(const char* method, void* factory_object, IUnknown* device, Chain** output, Call&& original) {
   TraceDxgi("Before FG DX12: enter {} factory={} device={}", method, factory_object, static_cast<void*>(device));
-  void* inner = nullptr;
-  void** parent = std::exchange(creating_chain, &inner);
-  const HRESULT result = original();
-  creating_chain = parent;
-  if (parent && inner) *parent = inner;
-  TraceDxgi("Before FG DX12: return {} hr={:#x} outer={} ReShade={}", method, static_cast<unsigned>(result), SUCCEEDED(result) && output ? static_cast<void*>(*output) : nullptr, inner);
-  if (SUCCEEDED(result) && output) BindChain(*output, device, inner);
-  return result;
+  const auto call = ProviderScope::Run(std::forward<Call>(original));
+  TraceDxgi("Before FG DX12: return {} hr={:#x} outer={} ReShade={} outermost={}", method, static_cast<unsigned>(call.result),
+            SUCCEEDED(call.result) && output ? static_cast<void*>(*output) : nullptr, call.inner, call.outermost);
+  // Only the outermost provider call returns the chain the application presents on; an inner one returns a wrapped chain.
+  if (SUCCEEDED(call.result) && output && call.outermost) BindChain(*output, device, call.inner);
+  return call.result;
 }
 
-HRESULT STDMETHODCALLTYPE OnCreate(IDXGIFactory* self, IUnknown* device, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** output) {
-  return Created("CreateSwapChain", self, device, output, [&] { return create.original.load(std::memory_order_acquire)(self, device, desc, output); });
+template<size_t Entry>
+HRESULT STDMETHODCALLTYPE CreateMethod::Detour(IDXGIFactory* self, IUnknown* device, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** output) {
+  return Created(NAME, self, device, output, [&] { return create.Original(Entry)(self, device, desc, output); });
 }
 
-HRESULT STDMETHODCALLTYPE OnCreateHwnd(IDXGIFactory2* self, IUnknown* device, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1* desc,
-                                       const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen, IDXGIOutput* restrict_output, IDXGISwapChain1** output) {
-  return Created("CreateSwapChainForHwnd", self, device, output, [&] { return create_hwnd.original.load(std::memory_order_acquire)(self, device, hwnd, desc, fullscreen, restrict_output, output); });
+template<size_t Entry>
+HRESULT STDMETHODCALLTYPE CreateHwndMethod::Detour(IDXGIFactory2* self, IUnknown* device, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1* desc,
+                                                  const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen, IDXGIOutput* restrict_output, IDXGISwapChain1** output) {
+  return Created(NAME, self, device, output, [&] { return create_hwnd.Original(Entry)(self, device, hwnd, desc, fullscreen, restrict_output, output); });
 }
 
-HRESULT STDMETHODCALLTYPE OnCreateComposition(IDXGIFactory2* self, IUnknown* device, const DXGI_SWAP_CHAIN_DESC1* desc, IDXGIOutput* restrict_output,
-                                               IDXGISwapChain1** output) {
-  return Created("CreateSwapChainForComposition", self, device, output, [&] { return create_composition.original.load(std::memory_order_acquire)(self, device, desc, restrict_output, output); });
+template<size_t Entry>
+HRESULT STDMETHODCALLTYPE CreateCompositionMethod::Detour(IDXGIFactory2* self, IUnknown* device, const DXGI_SWAP_CHAIN_DESC1* desc, IDXGIOutput* restrict_output,
+                                                         IDXGISwapChain1** output) {
+  return Created(NAME, self, device, output, [&] { return create_composition.Original(Entry)(self, device, desc, restrict_output, output); });
 }
 
 void BindFactory(void* object, const char* source) {
@@ -259,11 +425,11 @@ void BindFactory(void* object, const char* source) {
     TraceDxgi("Before FG DX12: object={} has no IDXGIFactory hr={:#x}", object, static_cast<unsigned>(hr));
     return;
   }
-  AttachDxgi("CreateSwapChain", create, Vtable(base.Get())[10], &OnCreate);
+  AttachDxgi(create, base.Get());
   ComPtr<IDXGIFactory2> extended;
   if (SUCCEEDED(base.As(&extended))) {
-    AttachDxgi("CreateSwapChainForHwnd", create_hwnd, Vtable(extended.Get())[15], &OnCreateHwnd);
-    AttachDxgi("CreateSwapChainForComposition", create_composition, Vtable(extended.Get())[24], &OnCreateComposition);
+    AttachDxgi(create_hwnd, extended.Get());
+    AttachDxgi(create_composition, extended.Get());
   }
 }
 
@@ -330,15 +496,14 @@ VKAPI_ATTR VkResult VKAPI_CALL OnVkAcquire2(VkDevice device, const VkAcquireNext
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL OnVkCreate(VkDevice device, const VkSwapchainCreateInfoKHR* info, const VkAllocationCallbacks* allocator, VkSwapchainKHR* chain) {
-  void* inner = nullptr;
-  void** parent = std::exchange(creating_chain, &inner);
   VkSwapchainCreateInfoKHR adjusted = *info;
-  if (observer.vk_usage) adjusted.imageUsage |= observer.vk_usage(device, *info);
-  const VkResult result = vk_create.original.load(std::memory_order_acquire)(device, &adjusted, allocator, chain);
-  creating_chain = parent;
-  if (parent && inner) *parent = inner;
-  if (result == VK_SUCCESS && !parent) {
-    if (observer.vk_created) observer.vk_created(device, *chain, adjusted, inner);
+  const auto call = ProviderScope::Run([&] {
+    if (observer.vk_usage) adjusted.imageUsage |= observer.vk_usage(device, *info);
+    return vk_create.original.load(std::memory_order_acquire)(device, &adjusted, allocator, chain);
+  });
+  const VkResult result = call.result;
+  if (result == VK_SUCCESS && call.outermost) {
+    if (observer.vk_created) observer.vk_created(device, *chain, adjusted, call.inner);
     if (const auto resolve = vk_device_proc.InstalledOriginal()) {
       Attach(vk_images, reinterpret_cast<void*>(resolve(device, "vkGetSwapchainImagesKHR")), &OnVkImages);
       Attach(vk_acquire, reinterpret_cast<void*>(resolve(device, "vkAcquireNextImageKHR")), &OnVkAcquire);
@@ -486,29 +651,31 @@ void Poll() {
   TraceDxgi("Before FG DX12: binding Streamline interposer={}", static_cast<void*>(module));
   BindExports(module);
   // ReShade loads add-ons at device creation, after a statically linked application may already have obtained its factory.
-  // A separate Streamline factory exposes the same provider methods without upgrading or replacing the application's object.
+  // A separate Streamline factory exposes provider methods without upgrading or replacing the application's object. Where
+  // Streamline also proxies the factory, this binds the wrapped (inner) implementation; it takes one table entry and leaves
+  // the proxy's implementation to the application's own upgraded factory.
   if (const auto create_factory = factory1.InstalledOriginal()) {
     ComPtr<IDXGIFactory2> probe;
     if (SUCCEEDED(create_factory(IID_PPV_ARGS(&probe)))) BindFactory(probe.Get(), "Uplift probe");
   }
   nr::Logf(nr::LogLevel::INFO, "Before FG hooks: upgrade={} DXGI factories={}/{}/{} creation={}/{}/{} Vulkan resolver={}/{} vkQueuePresentKHR={}",
            upgrade.target != nullptr, factory.target != nullptr, factory1.target != nullptr, factory2.target != nullptr,
-           create.target != nullptr, create_hwnd.target != nullptr, create_composition.target != nullptr,
+           create.Attached(), create_hwnd.Attached(), create_composition.Attached(),
            vk_instance_proc.target != nullptr, vk_device_proc.target != nullptr, vk_present.target != nullptr);
 }
 
 void NoteReshadeSwapchain(void* chain) {
-  if (creating_chain) *creating_chain = chain;
-  if (Installed()) TraceDxgi("Before FG trace: ReShade init swapchain={} inside provider creation={}", chain, creating_chain != nullptr);
+  ProviderScope::NoteReshade(chain);
+  if (Installed()) TraceDxgi("Before FG trace: ReShade init swapchain={} inside provider creation={}", chain, ProviderScope::Open());
 }
 bool WatchGameFacing(IDXGISwapChain* chain, bool trace_method) {
   if (!chain || !Installed() || inside_present) return false;
-  void* method = Vtable(chain)[8];
-  const bool attached = IsInterposer(Owner(method)) && Attach(present, method, &OnPresent);
-  if (trace_method && observer.diagnostic_dxgi) TraceMethod("ReShade native Present", method, present.target.load(), attached);
-  if (!attached) return false;
+  void* method = Vtable(chain)[PresentMethod::SLOT];
+  const Claim claim = Attach(present, method);
+  if (trace_method && observer.diagnostic_dxgi) TraceMethod("ReShade native Present", method, claim);
+  if (!claim.Attached()) return false;
   ComPtr<IDXGISwapChain1> chain1;
-  if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain1)))) Attach(present1, Vtable(chain1.Get())[22], &OnPresent1);
+  if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain1)))) Attach(present1, Vtable(chain1.Get())[Present1Method::SLOT]);
   return true;
 }
 bool InsideOuterPresent() { return inside_present; }
