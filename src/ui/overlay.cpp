@@ -19,19 +19,27 @@
 namespace uplift::ui {
 namespace {
 
+// A FLOAT slider's printf format when its descriptor names none.
+constexpr const char* DEFAULT_SLIDER_FORMAT = "%.2f";
+// Layout: the status card's least height (style units; it keeps the card from jumping as its lines change), the Details table's
+// narrowest five-column width (style units), and the widths of the warning popup, the language combo and the Compare choices (font heights).
+constexpr float STATUS_CARD_MIN_HEIGHT_UNITS = 22.f;
+constexpr float DETAILS_COLUMNS_MIN_WIDTH_UNITS = 112.f;
+constexpr float WARNING_POPUP_WIDTH_EM = 34.f;
+constexpr float LANGUAGE_COMBO_WIDTH_EM = 12.f;
+constexpr float COMPARE_CHOICES_WIDTH_EM = 12.f;
+
 // The tooltip line of a highlighted option while the highlight is not the stored preference (what runs differs from what ReShade.ini holds).
 std::string SavedNote(std::string_view preference) {
   return std::format("Saved: {}; it runs again by itself when it can.", preference);
 }
 
-bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayState& state, bool align_right, const SetupView& setup) {
-  if (descriptor.section == SettingSection::TOP || IsDefault(settings, descriptor)) return false;
-  gui::SameLine();
-  if (align_right) {
-    if (gui::GetContentRegionAvail().x + 1.f < gui::ResetButtonWidth()) gui::NewLine();
-    const float remaining = gui::GetContentRegionAvail().x - gui::ResetButtonWidth();
-    if (remaining > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + remaining);
-  }
+bool HasReset(const SettingDescriptor& descriptor, const Settings& settings) {
+  return descriptor.section != SettingSection::TOP && !IsDefault(settings, descriptor);
+}
+
+// The reset button where the cursor is, its tooltip and its action.
+bool ResetHere(const SettingDescriptor& descriptor, Settings& settings, OverlayState& state, const SetupView& setup) {
   const bool reset = gui::ResetButton();
   if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
     const std::string value = descriptor.key == "MotionVectors" ? "DLSS" : FormatSettingValue(descriptor, DefaultSettings());
@@ -45,10 +53,58 @@ bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayS
   return reset;
 }
 
+bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayState& state, bool align_right, const SetupView& setup) {
+  if (!HasReset(descriptor, settings)) return false;
+  gui::SameLine();
+  if (align_right) {
+    if (gui::GetContentRegionAvail().x + 1.f < gui::ResetButtonWidth()) gui::NewLine();
+    const float remaining = gui::GetContentRegionAvail().x - gui::ResetButtonWidth();
+    if (remaining > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + remaining);
+  }
+  return ResetHere(descriptor, settings, state, setup);
+}
+
+// Whether a grouped row draws `descriptor` with RailSlider: every FLOAT, and a UINT up to 100 but the native mask blend mode (four buttons).
+// The dispatch in DrawRow and its caption read this one rule.
+[[nodiscard]] bool UsesRailSlider(const SettingDescriptor& descriptor) {
+  if (descriptor.kind == SettingKind::FLOAT) return true;
+  return descriptor.kind == SettingKind::UINT && descriptor.max <= 100.0 && descriptor.key != "MaskBlendMode";
+}
+
+// A rail slider's value text at both ends of its range, as FormatSettingValue writes it: its row's value column fits the wider.
+[[nodiscard]] std::array<std::string, 2> SliderBounds(const SettingDescriptor& descriptor) {
+  Settings low = DefaultSettings(), high = DefaultSettings();
+  descriptor.set(low, descriptor.min);
+  descriptor.set(high, SliderMax(descriptor));
+  return {FormatSettingValue(descriptor, low), FormatSettingValue(descriptor, high)};
+}
+
+// A grouped row's caption with its value and reset button: on one line with its rail slider where they fit (`row` says where the slider
+// goes; the next item is the slider), else above the control.
+bool DrawCaption(const SettingDescriptor& descriptor, const char* caption, const std::string& value, bool dimmed, Settings& settings,
+                 OverlayState& state, const SetupView& setup, widgets::SliderRowPlan& row) {
+  row = UsesRailSlider(descriptor) ? widgets::PlanSliderRow(caption, value, SliderBounds(descriptor)) : widgets::SliderRowPlan{};
+  gui::BeginDisabled(dimmed);
+  if (row.one_line) widgets::SliderRowCaption(row, value);
+  else widgets::SettingCaption(caption, value, !IsDefault(settings, descriptor));
+  gui::EndDisabled();
+  if (!row.one_line) {
+    const bool reset = DrawReset(descriptor, settings, state, true, setup);
+    widgets::NextGap(style::LabelGap());
+    return reset;
+  }
+  bool reset = false;
+  if (HasReset(descriptor, settings)) {
+    widgets::ToSliderRowControl(row, row.reset_x);
+    reset = ResetHere(descriptor, settings, state, setup);
+  }
+  widgets::ToSliderRowControl(row, row.slider_x);
+  gui::SetNextItemWidth(row.slider_width);
+  return reset;
+}
+
 // Draw a settings-schema row with its normal availability, reset and commit rules.
 bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state, bool grouped = false) {
-  if (descriptor.key == "BeforeFGMotion" && (settings->fg_present != Settings::FgPresent::BEFORE
-      || (settings->motion_vectors != MotionVectorSource::LAUNCHPAD && settings->motion_vectors != MotionVectorSource::LUMENITE))) return false;
   std::string label(descriptor.label);
   if (descriptor.key == "ResolutionPresent") label = std::format("Resolution at {}", view.SharedPresentName(*settings));
   if (descriptor.key == "ResolutionScalePresent") label = std::format("Custom scale at {} (%)", view.SharedPresentName(*settings));
@@ -64,15 +120,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                              && settings->passes[descriptor.pass - 2u].follow_pass1);
   const bool shaping_off = ((descriptor.section == SettingSection::RESULT || descriptor.section == SettingSection::LIMITS)
                             && descriptor.key != "ShapeResult" && !settings->look.enabled);
-  const bool stabilize_off = ((descriptor.key == "StabilizeMs" || descriptor.key == "StabilizeDetail")
-                              && settings->look.stabilize == look::StabilizeMode::OFF);
-  // The Adaptation rows only where the meter can be used; Auto's own rows only under Auto.
-  const bool exposure_hidden = ExposureRowHidden(descriptor, *settings);
-  // Split chain: a later stage group's Custom scale as Setup's, and Upsampling also while a later group works below Full.
-  const bool resolution_scale_hidden =
-      ((descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM)
-       || (descriptor.key == "ResolutionScaleAfterDlss" && settings->resolution_mode_after_dlss != ResolutionMode::CUSTOM)
-       || (descriptor.key == "ResolutionScalePresent" && settings->resolution_mode_present != ResolutionMode::CUSTOM));
+  // Split chain: Upsampling is shown also while a later stage group works below Full.
   const auto reduced = [](ResolutionMode mode, float percent) {
     return mode != ResolutionMode::FULL && (mode != ResolutionMode::CUSTOM || percent < 100.f);
   };
@@ -82,18 +130,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   };
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && !reduced(settings->resolution_mode, settings->resolution_scale)
                                   && std::ranges::none_of(view.setup.pass_stages, later_group_scaled));
-  // Keep faces' own rows, and its mask's tuning in Advanced, only while it is on.
-  const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
-                                 || descriptor.key == "FaceLightingDensity" || descriptor.key == "FaceSpeckSize";
-  // Split chain: a later stage's Keep faces here too.
-  const bool keep_faces_here = (descriptor.key == "KeepFacesAfterDlss" || descriptor.key == "KeepFacesPresent");
-  const bool keep_faces_off =
-      ((descriptor.key == "FaceProtection" || descriptor.key == "LightingScale" || keep_faces_tuning || keep_faces_here) && !settings->keep_faces);
-  // The fill's radius and tolerance only while it is on.
-  const bool fill_off = ((descriptor.key == "FaceFillRadius" || descriptor.key == "FaceFillTolerance") && !settings->face_tuning.fill_skin);
   // These rows matter only after a choice in the row just above them, so they
   // are hidden -- not merely greyed -- until that choice is made.
-  if (pass_follows || shaping_off || stabilize_off || exposure_hidden || resolution_scale_hidden || upsampling_hidden || keep_faces_off || fill_off) {
+  if (pass_follows || shaping_off || RowHidden(descriptor, *settings) || upsampling_hidden) {
     return false;
   }
 
@@ -105,8 +144,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   // The Diffuse white row on an sRGB image, where it does nothing (and the Manual exposure choice with it, below), and the Colour conversion rows
   // that do nothing on the shown encoding (ColorFixUnavailable).
   // Keep faces: its rows where it cannot run, and the face mask's view (in Advanced, far from the switch) while it is off.
-  const bool keep_faces_row = (descriptor.key == "KeepFaces" || descriptor.key == "FaceProtection" || descriptor.key == "LightingScale"
-                               || descriptor.key == "ShowFaceMask" || keep_faces_tuning || keep_faces_here);
+  const bool keep_faces_row =
+      ((descriptor.flags & (setting_flags::KEEP_FACES_ROW | setting_flags::KEEP_FACES_OWN | setting_flags::KEEP_FACES_TUNING | setting_flags::KEEP_FACES_HERE)) != 0u);
   const std::string_view white_unavailable = DiffuseWhiteUnavailable(view.encoding);
   const std::string_view fix_unavailable = ColorFixUnavailable(descriptor.key, view.encoding);
   const std::string_view disabled_reason =
@@ -138,6 +177,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     }
   }
   const bool captioned = grouped && descriptor.kind != SettingKind::BOOL;
+  widgets::SliderRowPlan slider_row;  // where a one-line row put its slider
   if (captioned) {
     const char* caption = descriptor.key == "ResolutionMode" ? "Working resolution" : descriptor.key == "ResolutionScale" ? "Custom scale" : label.c_str();
     std::string value;
@@ -150,13 +190,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     else if (descriptor.key == "AutoExposureBlend") value = std::format("{:.0f}%", settings->auto_exposure_blend * 100.f);
     else if (inherited_skin) value = std::format("{:.2f}", settings->local_structure);
     else if (descriptor.kind == SettingKind::FLOAT) value = FormatSettingValue(descriptor, *settings);
-    else if (descriptor.kind == SettingKind::UINT && descriptor.key != "MaskBlendMode" && descriptor.max <= 100.0)
+    else if (UsesRailSlider(descriptor))
       value = state->pending_key == descriptor.key && state->pending_release ? std::to_string(*state->pending_release) : FormatSettingValue(descriptor, *settings);
-    gui::BeginDisabled(inherited_skin);
-    widgets::SettingCaption(caption, value, !IsDefault(*settings, descriptor));
-    gui::EndDisabled();
-    changed |= DrawReset(descriptor, *settings, *state, true, view.setup);
-    widgets::NextGap(style::LabelGap());
+    changed |= DrawCaption(descriptor, caption, value, inherited_skin, *settings, *state, view.setup, slider_row);
     label = "##value";
   }
   std::string saved_note;  // the Resolution combo's tooltip, while the mode that runs is not the stored one
@@ -173,7 +209,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     const bool follows = settings->skin_structure < 0.f;
     gui::BeginDisabled(follows);
     float skin = (follows ? settings->local_structure : settings->skin_structure);
-    const bool edited = grouped ? widgets::RailSlider(label.c_str(), skin, static_cast<float>(descriptor.min), static_cast<float>(SliderMax(descriptor)), "%.2f")
+    const bool edited = grouped && UsesRailSlider(descriptor) ? widgets::RailSlider(label.c_str(), skin, static_cast<float>(descriptor.min), static_cast<float>(SliderMax(descriptor)), "%.2f")
                                 : gui::SliderFloat(label.c_str(), &skin, 0.f, 1.f);
     if (edited) {
       settings->skin_structure = skin;
@@ -213,7 +249,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         int value = (held_here ? *state->pending_release : applied);
         const int low = static_cast<int>(descriptor.min), high = static_cast<int>(descriptor.max);
         const bool edited = descriptor.max > 100.0 ? gui::InputInt(label.c_str(), &value, 64, 512)
-            : grouped ? widgets::RailSlider(label.c_str(), value, low, high, "%d")
+            : grouped && UsesRailSlider(descriptor) ? widgets::RailSlider(label.c_str(), value, low, high, "%d")
                       : gui::SliderInt(label.c_str(), &value, low, high);
         if (!on_release) {
           if (edited) {
@@ -245,19 +281,13 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         break;
       }
       case SettingKind::FLOAT: {
-        // AutoExposureBlend is stored 0..1 and shown as 0-100 %.
-        const float shown_scale = (descriptor.key == "AutoExposureBlend" ? 100.f : 1.f);
+        const float shown_scale = static_cast<float>(descriptor.display_scale);
         float value = static_cast<float>(descriptor.get(*settings)) * shown_scale;
         const float high = static_cast<float>(SliderMax(descriptor)) * shown_scale;  // Ctrl+click may type past it (DescriptorMax)
-        const bool resolution_scale = (descriptor.key == "ResolutionScale" || descriptor.key == "ResolutionScaleAfterDlss"
-                                       || descriptor.key == "ResolutionScalePresent");
-        const char* const format = (descriptor.key == "GraceSeconds" ? "%.1f"
-                                    : resolution_scale                      ? "%.0f %%"
-                                    : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
-                                    : descriptor.key == "StabilizeMs"       ? "%.0f ms"
-                                                                            : "%.2f");
-        const bool edited = grouped
-            ? widgets::RailSlider(label.c_str(), value, static_cast<float>(descriptor.min) * shown_scale, high, format, resolution_scale ? ImGuiSliderFlags_AlwaysClamp : ImGuiSliderFlags_None)
+        const bool always_clamp = ((descriptor.flags & setting_flags::SLIDER_ALWAYS_CLAMP) != 0u);
+        const char* const format = (descriptor.slider_format != nullptr ? descriptor.slider_format : DEFAULT_SLIDER_FORMAT);
+        const bool edited = grouped && UsesRailSlider(descriptor)
+            ? widgets::RailSlider(label.c_str(), value, static_cast<float>(descriptor.min) * shown_scale, high, format, always_clamp ? ImGuiSliderFlags_AlwaysClamp : ImGuiSliderFlags_None)
             : gui::SliderFloat(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format);
         if (edited) {
           descriptor.set(*settings, static_cast<double>(value / shown_scale));
@@ -431,7 +461,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty() && !view.vulkan_nr_note.empty()) {
     gui::TextDisabled("%s", view.vulkan_nr_note.c_str());
   }
-  if (grouped && descriptor.key == "ResolutionScale") widgets::PercentTicks(descriptor.min, descriptor.max);
+  if (grouped && descriptor.key == "ResolutionScale") widgets::PercentTicks(descriptor.min, descriptor.max, slider_row);
   if (!captioned) changed |= DrawReset(descriptor, *settings, *state, grouped, view.setup);
   gui::EndDisabled();
   gui::PopID();
@@ -445,7 +475,7 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
     gui::OpenPopup(title.c_str());
   }
   if (!gui::IsPopupOpen(title.c_str())) return false;
-  gui::SetNextWindowSize(ImVec2(gui::GetFontSize() * 34.f, 0.f), ImGuiCond_Appearing);
+  gui::SetNextWindowSize(ImVec2(gui::GetFontSize() * WARNING_POPUP_WIDTH_EM, 0.f), ImGuiCond_Appearing);
   bool open = true;
   if (!gui::BeginPopupModal(title.c_str(), &open, ImGuiWindowFlags_AlwaysAutoResize)) return false;
   gui::TextWrapped("%s", descriptor.enable_warning.data());
@@ -563,7 +593,7 @@ void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
     size = input;
   }
   const bool pending = !size.Empty() && !view.first_stage_canvas.Empty() && size != view.first_stage_canvas;
-  gui::Separator();
+  widgets::GroupRule();
   gui::TextUnformatted(pending ? "Target NR size" : "NR working size");
   const std::string dimensions = size.Empty() ? gui::Display("Unknown") : std::format("{} × {}", size.width, size.height);
   const float remaining = gui::GetContentRegionAvail().x - ImGui::CalcTextSize(dimensions.c_str()).x;
@@ -606,7 +636,7 @@ bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* s
     if (gui::BeginTable("##compare", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings)) {
       gui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, gui::CalcTextSize("Compare").x);
       const float choices_width = gui::CalcTextSize(options[0]).x + gui::CalcTextSize(options[1]).x + 4.f * gui::GetStyle().FramePadding.x + gui::GetStyle().ItemInnerSpacing.x;
-      gui::TableSetupColumn("##choices", ImGuiTableColumnFlags_WidthFixed, std::max(choices_width, 12.f * gui::GetFontSize()));
+      gui::TableSetupColumn("##choices", ImGuiTableColumnFlags_WidthFixed, std::max(choices_width, COMPARE_CHOICES_WIDTH_EM * gui::GetFontSize()));
       gui::TableNextRow();
       gui::TableSetColumnIndex(0);
       gui::AlignTextToFramePadding();
@@ -633,7 +663,7 @@ bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* s
     widgets::GroupHeading("Characters");
     row("AutoMask");
     row("SkinStructure");
-    gui::Separator();
+    widgets::GroupRule();
     row("KeepFaces");
     row("FaceProtection");
     row("LightingScale");
@@ -697,7 +727,7 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
 
   gui::PopStyleVar();
   widgets::NextGap(style::BlockGap());
-  const bool compact = gui::GetContentRegionAvail().x < style::Units(112);
+  const bool compact = gui::GetContentRegionAvail().x < style::Units(DETAILS_COLUMNS_MIN_WIDTH_UNITS);
   gui::PushStyleVar(ImGuiStyleVar_CellPadding, {style::RowGap(), style::LabelGap()});
   if (gui::BeginTable("##executed_passes", compact ? 2 : 5, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) {
     const auto column = [](const char* label, float weight) { gui::TableSetupColumn(gui::Display(label).c_str(), ImGuiTableColumnFlags_WidthStretch, weight); };
@@ -856,7 +886,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   gui::SameLine();
   const float min_language_width = ImGui::CalcTextSize(settings->language == Language::ENGLISH ? "English" : "简体中文 / Chinese").x + gui::GetFrameHeight() + style::RowGap();
   if (gui::GetContentRegionAvail().x < min_language_width) gui::NewLine();
-  const float language_width = std::min(gui::GetContentRegionAvail().x, std::max(min_language_width, 12.f * gui::GetFontSize()));
+  const float language_width = std::min(gui::GetContentRegionAvail().x, std::max(min_language_width, LANGUAGE_COMBO_WIDTH_EM * gui::GetFontSize()));
   gui::SetCursorPosX(gui::GetCursorPosX() + gui::GetContentRegionAvail().x - language_width);
   gui::SetNextItemWidth(language_width);
   int selected_language = static_cast<int>(settings->language);
@@ -867,7 +897,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   }
   if (ImGui::IsItemHovered()) {
     const gui::LanguageScope tooltip_language(settings->language);
-    gui::SetTooltip("English / Simplified Chinese. If Chinese appears as boxes, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc). No extra Uplift files are needed.");
+    gui::SetTooltip("Choose language. If Chinese not visible, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc)");
   }
 
   widgets::NextGap(style::BlockGap());
@@ -964,7 +994,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       case CardButton::CLEAR_LATCH:  // Each blocked feature has its own explicit recovery action above the card.
         break;
     }
-  }, style::GroupSurface(), style::Units(27));
+  }, style::GroupSurface(), style::Units(STATUS_CARD_MIN_HEIGHT_UNITS));
   gui::PopStyleVar();
 
   const auto rows = [&](std::initializer_list<std::string_view> keys) {

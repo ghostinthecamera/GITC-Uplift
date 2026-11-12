@@ -15,6 +15,7 @@
 
 #include "bridge/d3d11_bridge.hpp"
 #include "bridge/keyed_relay.hpp"
+#include "bridge/motion_share_keep.hpp"
 #include "bridge/private_device_bridge.hpp"
 #include "bridge/share_failure.hpp"
 #include "nr/types.hpp"
@@ -28,8 +29,9 @@ namespace uplift::bridge {
 // - ReShade-free, with D3D11Bridge's public face over the game's D3D10 resources.
 // - The CPU never waits for the GPU: a keyed-mutex acquire only waits for a release this same thread made just before
 //   (capped all the same), and only the D3D11 bridge's destructor waits (2 s cap per queue).
-// - One latch: the D3D11 bridge's. A key that did not come (KeyedRelay's latch) is passed into it before the call that saw it
-//   returns, and a stopped D3D11 bridge stops the relay's operations too. Not thread-safe: the add-on's lock.
+// - One latch, the D3D11 bridge's text: the relay's and the D3D11 bridge's are joined by the handlers Create sets, so a latch on either side
+//   (a key that did not come, the watchdog, a failed recording, an external Stop) reaches the other inside the call that set it, and the
+//   relay's operations stop with it. Not thread-safe: the add-on's lock.
 class D3D10Bridge final : public PrivateDeviceBridge {
  public:
   // nullptr, with `error` set, when the adapter is not NVIDIA's, or the relay or the D3D11 bridge cannot be made.
@@ -38,10 +40,10 @@ class D3D10Bridge final : public PrivateDeviceBridge {
   // release raises destroy_device, so the caller releases them only outside its own lock.
   static std::unique_ptr<D3D10Bridge> Create(ID3D10Device* device, Microsoft::WRL::ComPtr<ID3D11Device>* relay_created,
                                              Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
-  // The keyed textures, then the D3D11 bridge (its 2 s wait), then the relay (one last flush, since its releases are destroyed only
-  // by a Flush, then its proxy). Under ReShade, destroy it only outside the add-on's lock, and Stop it first, before
-  // DeviceContext::Teardown.
-  ~D3D10Bridge() = default;
+  // The latch handlers go first (they name both members), then the keyed textures, then the D3D11 bridge (its 2 s wait), then the relay (one
+  // last flush, since its releases are destroyed only by a Flush, then its proxy). Under ReShade, destroy it only outside the add-on's lock,
+  // and Stop it first, before DeviceContext::Teardown.
+  ~D3D10Bridge();
   D3D10Bridge(const D3D10Bridge&) = delete;
   D3D10Bridge& operator=(const D3D10Bridge&) = delete;
 
@@ -64,7 +66,7 @@ class D3D10Bridge final : public PrivateDeviceBridge {
   [[nodiscard]] uint64_t SharedBytes() const override;
   [[nodiscard]] std::string StatusLine() const;
   [[nodiscard]] bool Stopped() const override { return bridge_->Stopped() || relay_->Stopped(); }
-  [[nodiscard]] std::string_view Latch() const override { return bridge_->Latch(); }  // the card's reason (the relay's reaches it at the next BeginFrame)
+  [[nodiscard]] std::string_view Latch() const override { return bridge_->Latch(); }  // the card's reason (the relay's reaches it through its handler)
   [[nodiscard]] uint64_t BusySkips() const override { return bridge_->BusySkips(); }  // the D3D11 bridge's, which StatusLine prints
   [[nodiscard]] std::string_view Label() const override { return bridge_->Label(); }  // the relay's D3D11 bridge is made with its label
 
@@ -89,9 +91,6 @@ class D3D10Bridge final : public PrivateDeviceBridge {
     std::string text;
   };
 
-  // Passes the relay's latch (a key that did not come) into the D3D11 bridge, whose Stop also signals its fences, and the D3D11
-  // bridge's latch into the relay, so a key released after either says nothing more. Called before the call that saw a latch returns.
-  void SyncLatches();
   // Submits the relay's queued work, which is also what destroys what it released: the relay has no Present to do it. The D3D11
   // bridge's own releases are destroyed by the same flush.
   void FlushRelay();
@@ -103,6 +102,7 @@ class D3D10Bridge final : public PrivateDeviceBridge {
   Keyed color_;
   Keyed mask_;
   Keyed motion_;
+  MotionShareKeep motion_keep_;  // the run of recordings without UPLIFT_MV while motion_ is held
   std::optional<ShareFailure> color_failure_;
   std::optional<ShareFailure> mask_failure_;
   std::optional<ShareFailure> motion_failure_;

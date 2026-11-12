@@ -54,6 +54,18 @@ std::filesystem::path ModulePath(HMODULE handle) {
 
 bool VulkanLoaderLoaded() { return GetModuleHandleW(VULKAN_LOADER) != nullptr; }
 
+std::string_view ApiName(api::device_api device_api) {
+  switch (device_api) {
+    case api::device_api::d3d9:   return "Direct3D 9";
+    case api::device_api::d3d10:  return "Direct3D 10";
+    case api::device_api::d3d11:  return "Direct3D 11";
+    case api::device_api::d3d12:  return "Direct3D 12";
+    case api::device_api::opengl: return "OpenGL";
+    case api::device_api::vulkan: return "Vulkan";
+  }
+  return "an unknown API";
+}
+
 std::filesystem::path VkDevicePendingMarkerPath(const std::filesystem::path& state_directory, const std::filesystem::path& game_exe_path) {
   return LatchMarkerPath(state_directory, game_exe_path).replace_extension(VK_DEVICE_PENDING_EXTENSION);
 }

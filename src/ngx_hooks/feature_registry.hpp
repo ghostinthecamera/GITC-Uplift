@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -60,6 +62,13 @@ class FeatureRegistry {
   void NoteNotAdopted(const NVSDK_NGX_Handle* handle);
   [[nodiscard]] bool NotAdopted(const NVSDK_NGX_Handle* handle) const;
   void OnRelease(const NVSDK_NGX_Handle* handle);
+  // An evaluate of `handle` returned at `when`. Recorded for a registered NEURAL_RENDERING feature only (Uplift never registers its own
+  // NR); any other handle, known or not, is ignored. Takes the shared lock, so every game thread may call it.
+  void OnEvaluate(const NVSDK_NGX_Handle* handle, std::chrono::steady_clock::time_point when = std::chrono::steady_clock::now());
+  // When a registered NEURAL_RENDERING feature last evaluated; nullopt when none has. A release keeps the time (the reader ages it out), and so
+  // does a core shutdown. Limit: a feature the game created before Uplift's hooks were installed is never registered, so its
+  // evaluations are not seen. Other kinds are not recorded and read as nullopt.
+  [[nodiscard]] std::optional<std::chrono::steady_clock::time_point> LastEvaluated(FeatureKind kind) const;
   // The game shut NGX down for `api`: drops `api`'s features of `device` and of the unknown device (null); a null `device` drops every
   // feature of `api`. Another API's features are never touched, and the sticky create counts stay (as after a release). Returns how many went.
   size_t OnCoreShutdown(NgxApi api, const void* device);
@@ -94,6 +103,8 @@ class FeatureRegistry {
   std::unordered_map<const void*, uint64_t> upscaler_creates_;  // devices an upscaler was ever created on, with how many
   std::unordered_set<const NVSDK_NGX_Handle*> not_adopted_;     // unknown handles already probed; reset when an identity can be reused
   uint64_t next_serial_ = 1u;
+  // The steady_clock tick count of the last NEURAL_RENDERING evaluate (0: none yet). Atomic: OnEvaluate writes it under the shared lock.
+  std::atomic<std::chrono::steady_clock::rep> last_nr_evaluate_{0};
 };
 
 }  // namespace uplift::ngx_hooks

@@ -18,6 +18,7 @@
 #include "addon/device_context.hpp"
 #include "addon/placement.hpp"
 #include "addon/recording_status.hpp"
+#include "addon/stage_book.hpp"
 #include "addon/stage_math.hpp"
 #include "addon/vk_route.hpp"
 #include "addon/vk_stage_work.hpp"
@@ -26,6 +27,7 @@
 #include "nr/session.hpp"
 #include "nr/snippet.hpp"
 #include "nr/vk_host.hpp"
+#include "sources/present_motion_counts.hpp"
 #include "sources/vk_nr_pipeline.hpp"
 #include "sources/work_size.hpp"
 #include "vk/command_ring.hpp"
@@ -233,7 +235,7 @@ class VkDlssContext {
   [[nodiscard]] std::string DetailsLine() const;
   // The copy of DLSS's motion vectors made in the game's frame for the present now running, in SHADER_READ_ONLY_OPTIMAL, or an empty
   // image (none was made: the Present path's recording takes UPLIFT_MV, or none; always empty once CanCopy is false). Reading it stamps the slot's last use
-  // (the bridge's copy-in follows). Flicker fix: a present whose own copy was skipped (the GPU ran behind) gets the newest copy at most
+  // (the bridge's copy-in follows). A present whose own copy was skipped (the GPU ran behind) gets the newest copy at most
   // sources::PRESENT_MOTION_MAX_AGE frames older, so the motion stays DLSS's; empty only with none that recent.
   [[nodiscard]] vk::NrImage PresentMotion();
   // Why that copy is missing, for Setup: GAME_PASSED_NONE (the latest evaluate seen carried no readable float vectors; kept while the copies are not asked
@@ -351,19 +353,13 @@ class VkDlssContext {
   // Split chain: what each stage (Stage order) keeps of its own: its settled work size, its latest recording's result (Status's
   // groups), its owed reset (a frame that did not apply NR: the next that does starts NR's history afresh), and
   // the motion input its features were first evaluated with in this load and the different ones in a row since.
-  struct StageState {
-    sources::WorkSizeSettle settle;
-    nr::Size work;
-    nr::Size canvas;
-    bool nr_applied = false;
-    uint32_t passes_run = 0u;
-    nr::SkipReason skip_reason = nr::SkipReason::NONE;
-    sources::MotionSource motion_source = sources::MotionSource::NONE;
-    bool reset_owed = false;
-    std::optional<VkMotionShape> motion;
-    uint32_t motion_mismatches = 0u;
+  struct VkStageExtra {
+    bool reset_owed = false;               // a frame that did not apply NR: the next that does starts NR's history afresh
+    std::optional<VkMotionShape> motion;   // the motion input its features were first evaluated with in this load
+    uint32_t motion_mismatches = 0u;       // the different ones in a row since
   };
-  std::array<StageState, STAGE_COUNT> stages_;
+  using StageState = StageEntry<VkStageExtra>;
+  StageBook<VkStageExtra> stages_;
   std::array<uint64_t, STAGE_COUNT> stage_recordings_ = {};  // StageRecordings
   // Split chain: UpdateChain's; groups[0] is pass 1's, at `placement_`. `slices_` are the Session's, per group: the last runs to the end of the
   // passes, so a one-group chain is exactly the single chain of before.
@@ -393,23 +389,11 @@ class VkDlssContext {
   bool logged_after_dlss_ = false;  // "NR trigger: after DLSS (Vulkan)" was logged in this activation
   bool present_motion_logged_ = false;                      // "DLSS's motion vectors copied for Present" was logged since the add-on last asked for the copies
   ui::MotionGap present_motion_gap_ = ui::MotionGap::NONE;  // the latest evaluate seen: GAME_PASSED_NONE when it had no readable vectors (kept between them)
-  // Flicker fix: one DEBUG line a second (LogLevel::TRACE, which the log bridge writes at ReShade's debug level) while the add-on asks for the Present copies
+  // One DEBUG line a second (LogLevel::TRACE, which the log bridge writes at ReShade's debug level) while the add-on asks for the Present copies
   // (NotePresentMotionSecond; reset when it stops asking, so a line never mixes in an old window): the evaluates and presents, the copies made,
   // the copies skipped by gate, what each present bound, and the GPU lag at the evaluates (CurrentFrame minus the frame the GPU has passed).
-  struct PresentMotionCounters {
-    uint64_t evaluates = 0u;
-    uint64_t presents = 0u;
-    uint64_t copies = 0u;
-    uint64_t skipped_input = 0u;  // no readable vectors, or the copy could not be made
-    uint64_t skipped_ring = 0u;   // the copy pipeline's constants ring slot was busy
-    uint64_t skipped_slot = 0u;   // the copy slot's last reader was not complete
-    uint64_t own = 0u;            // presents that bound their own frame's copy
-    uint64_t older = 0u;          // presents that bound an older copy (PRESENT_MOTION_MAX_AGE)
-    uint64_t missed = 0u;         // presents with no copy that recent
-    float offset_x = 0.f;
-    float offset_y = 0.f;
+  struct PresentMotionCounters : sources::PresentMotionCounts {
     uint64_t lag_min = UINT64_MAX;
-    uint64_t lag_max = 0u;
     std::optional<std::chrono::steady_clock::time_point> since;
   };
   PresentMotionCounters present_motion_counters_;

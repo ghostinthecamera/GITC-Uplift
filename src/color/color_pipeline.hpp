@@ -220,7 +220,7 @@ class ColorPipeline {
  public:
   // Sized for Timeline's own AGED_SUBMISSION_TIME (250 ms) at up to 240 fps
   // on a submit-only thread (a common engine shape, e.g. Unreal Engine 5's D3D12 RHI), so the ring
-  // never starves NR into "descriptors busy" there: 128 slots of 21 tables of 7 descriptors (Keep faces' ten included), about 600 KB.
+  // never starves NR into nr::SkipReason::DESCRIPTORS_BUSY there: 128 slots of 21 tables of 7 descriptors (Keep faces' ten included), about 600 KB.
   static constexpr uint32_t RING_SLOTS = 128u;
 
   ColorPipeline() = default;

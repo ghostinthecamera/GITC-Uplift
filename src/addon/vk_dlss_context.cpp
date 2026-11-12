@@ -144,7 +144,7 @@ std::unique_ptr<VkDlssContext> VkDlssContext::Create(VkContextSetup setup, std::
   }
   // NR's own images are RGBA16F and RG16F storage images, and DLSS's output is written in place as one of the variants'
   // formats. A format that is not a storage format on this physical device is refused before any shader module exists (its variant reads
-  // "unsupported format"); RGBA16F or RG16F missing refuses native NR as a whole.
+  // nr::SkipReason::UNSUPPORTED_FORMAT); RGBA16F or RG16F missing refuses native NR as a whole.
   const auto storage = [&loader, &setup](VkFormat format) {
     if (loader->get_physical_device_format_properties == nullptr) return true;  // nothing to ask: NVIDIA's drivers support all of them
     VkFormatProperties properties = {};
@@ -548,7 +548,7 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   const vk::NrImage dlss_motion = ((settings_.motion_vectors && facts_.present_motion_copy) ? PresentMotion() : vk::NrImage{});
   const bool launchpad_wanted = (settings_.launchpad_motion && launchpad.view != VK_NULL_HANDLE);
   if (!settings_.motion_vectors || !facts_.present_motion_copy) {
-    present_motion_bound_ = (launchpad_wanted ? BoundMotion::LAUNCHPAD : BoundMotion::NONE);  // flicker fix: the per-frame trace names the motion
+    present_motion_bound_ = (launchpad_wanted ? BoundMotion::LAUNCHPAD : BoundMotion::NONE);  // the per-frame trace names the motion
   }
   // The motion input this present is meant to have, from the settings, not from what arrived. DLSS's copies while
   // MotionVectors wants them (a present whose copy is missing gets zeros of the copies' own shape: VkPresentTarget::dlss_motion_gap_size), else Launchpad's
@@ -800,7 +800,7 @@ void VkDlssContext::UpdateChain() {
   facts.cannot[static_cast<size_t>(Stage::BEFORE_UPSCALING)] =
       BeforeUpscalingCause(dlss_cause, (pre_sr_unbuildable_ ? VK_PRE_SR_PIPELINES_PROBLEM : NO_STAGE_PROBLEM), BeforeUpscaling());
   // DLSS's output format is known only at the evaluate (output_message_), after the present decided the chain: the After DLSS group skips that evaluate
-  // ("unsupported format") instead of the chain moving it, so the stage brings no problem of its own here.
+  // (nr::SkipReason::UNSUPPORTED_FORMAT) instead of the chain moving it, so the stage brings no problem of its own here.
   facts.cannot[static_cast<size_t>(Stage::AFTER_DLSS)] = AfterDlssCause(dlss_cause, NO_STAGE_PROBLEM);
   // As on Direct3D 12, DLSS-stage NR of a split seen on another queue than the effect queue (where a later Present group records) keeps
   // Present off for later groups: their passes join the DLSS stage, so NR never runs on two queues at once (no GPU wait can order them safely). Checked only
@@ -1560,16 +1560,7 @@ ContextStatus VkDlssContext::Status() const {
   });
   status.nr_applied = status_.nr_applied;
   status.passes_run = status_.passes_run;
-  if (chain_.Split()) {
-    // Split chain (as Direct3D 12's): the card and Details count every group's passes, a group whose latest recording skipped none, and a group's latest
-    // recording at most its own passes (it may predate a chain change).
-    status.passes_run = 0u;
-    for (uint32_t index = 0u; index < chain_.group_count; ++index) {
-      const StageGroup& group = chain_.groups[index];
-      const StageState& stage = stages_[static_cast<size_t>(group.stage)];
-      status.passes_run += (stage.nr_applied ? std::min(stage.passes_run, group.count) : 0u);
-    }
-  }
+  if (chain_.Split()) status.passes_run = stages_.SplitPassesRun(chain_);
   status.frame = (before_upscaling ? frame_size_ : output_size_);  // Before upscaling: the render size NR works on, not DLSS's output
   if (native_present) {
     // As Direct3D 12's Present path reports itself.
@@ -1620,23 +1611,7 @@ ContextStatus VkDlssContext::Status() const {
   if (status_.nr_applied && pipeline_) {
     status.exposure_line = sources::ExposureLine(pipeline_->LastExposure());
   }
-  // Split chain: the chain line and note, and each group's latest recording.
-  std::array<nr::Size, STAGE_COUNT> canvases = {};
-  for (size_t stage = 0u; stage < STAGE_COUNT; ++stage) {
-    canvases[stage] = stages_[stage].canvas;
-  }
-  if (chain_.Split()) {
-    status.chain_line = std::format("Chain: {}", FormatChainLine(chain_, canvases));
-  }
-  status.chain_note = chain_.note;
-  status.group_count = chain_.group_count;
-  for (uint32_t index = 0u; index < chain_.group_count; ++index) {
-    const StageGroup& group = chain_.groups[index];
-    const StageState& stage = stages_[static_cast<size_t>(group.stage)];
-    status.groups[index] = {.stage = group.stage, .first = group.first, .count = group.count, .nr_applied = stage.nr_applied,
-                            .passes_run = stage.passes_run, .skip_reason = stage.skip_reason, .motion_source = stage.motion_source,
-                            .work = stage.work, .canvas = stage.canvas};
-  }
+  stages_.WriteChain(chain_, status);
   status.motion_source = status_.motion_source;
   if (native_present) {
     // The Present path's lines, as Direct3D 12's bridged Vulkan context gives them.

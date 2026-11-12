@@ -56,7 +56,7 @@ The card at the top of the Uplift tab tells you what's wrong. The usual ones:
 | The card says | What to do |
 |---|---|
 | "The NR runtime was not found" | Put `nvngx_dlssnr.dll` into the `GITC-Uplift` folder next to the add-ons and restart the game. |
-| "Move nvngx_dlssnr.dll" | Move `nvngx_dlssnr.dll` away from the game's .exe into the `GITC-Uplift` folder next to the add-ons, and restart the game. |
+| "Copy nvngx_dlssnr.dll into GITC-Uplift" | NVIDIA's DLSS loaded the very file Uplift would use (a copy next to the game's .exe). Copy `nvngx_dlssnr.dll` into the `GITC-Uplift` folder next to the add-ons, and restart the game. A DLSS 5 game's own copy next to the .exe is left alone: Uplift runs its own beside it. |
 | "NR failed", with an NVIDIA error code | Your `nvngx_dlssnr.dll` doesn't work with your card (see "What you need"), or your driver is out of date. |
 | "Uplift's 64-bit helper stopped" | Copy `gitc-uplift-helper64.exe` from the same release next to the add-ons, then press **Retry now**. |
 | "The GPU device was removed" | Press **Retry now** if the card has it; otherwise restart the game. After a stop, some video memory (1 GB or more at 4K) stays in use until you restart the game. If it happens twice, restart the game, and please report it with `ReShade.log`. |

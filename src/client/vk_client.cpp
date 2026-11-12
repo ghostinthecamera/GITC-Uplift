@@ -17,6 +17,9 @@
 namespace uplift::client {
 namespace {
 
+// Bytes per texel of the motion share: DXGI_FORMAT_R16G16_FLOAT, two 16-bit channels.
+constexpr uint32_t MOTION_BYTES_PER_TEXEL = 4u;
+
 std::string ShareFailureText(const char* what, DXGI_FORMAT format, std::string_view failure) {
   return std::format("{} could not be shared with Uplift's helper (DXGI_FORMAT {}, {})", what, static_cast<int>(format), failure);
 }
@@ -138,7 +141,7 @@ ipc::Target VkClient::Describe(vk::GameHost& host, const vk::ImageInfo& back_buf
     ReleaseShared(host);  // NR is off, or this image cannot go: the shared surfaces go with it
   }
   if (problem.empty() && color_failure_ && color_failure_->Matches(back_buffer.size, back_buffer.format)) {
-    problem = ShareFailureText("The back buffer", back_buffer.format, color_failure_->what);
+    problem = ShareFailureText("The back buffer", back_buffer.format, color_failure_->cause);
   }
   if (problem.empty() && running && host.Valid()) {
     // As VkBridge::BeginFrame: this event comes before ReShade records its effects, so the barrier leads the immediate list.
@@ -211,7 +214,7 @@ bool VkClient::Apply(const ipc::Reply& reply, NrLink& link, vk::GameHost& host) 
                  color::DescribeFormat(color_ask_.format).value_or(color::FormatInfo{}).bytes_per_pixel, &color_, &failure)) {
         color_failure_.reset();
       } else {
-        color_failure_ = ShareFailure{.size = color_ask_.size, .format = color_ask_.format, .what = failure};
+        color_failure_ = ShareFailure{.size = color_ask_.size, .format = color_ask_.format, .cause = failure};
         nr::Log(nr::LogLevel::WARN, ShareFailureText("The back buffer", color_ask_.format, failure));
       }
     }
@@ -221,13 +224,13 @@ bool VkClient::Apply(const ipc::Reply& reply, NrLink& link, vk::GameHost& host) 
       if (Import(host, mask, mask_ask_.size, mask_ask_.format, bytes, &mask_, &failure)) {
         mask_failure_.reset();
       } else {
-        mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .what = failure};
+        mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .cause = failure};
         nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MASK_TEXTURE, mask_ask_.format, failure));
       }
     }
     if (motion != nullptr && latch_.empty()) {
-      if (!Import(host, motion, motion_ask_size_, DXGI_FORMAT_R16G16_FLOAT, 4u, &motion_, &failure)) {
-        motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .what = failure};
+      if (!Import(host, motion, motion_ask_size_, DXGI_FORMAT_R16G16_FLOAT, MOTION_BYTES_PER_TEXEL, &motion_, &failure)) {
+        motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = failure};
         nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MOTION_TEXTURE, DXGI_FORMAT_R16G16_FLOAT, failure));
       }
     }
@@ -291,7 +294,7 @@ vk::ImageInfo VkClient::PrepareMotion(vk::GameHost& host, const vk::ImageInfo& m
       HANDLE handle = nullptr;
       std::string failure = "the helper refused";
       const bool opened = (shared->ok != 0u && shared->handles.motion != 0u && link.Pull(shared->handles.motion, &handle)
-                           && Import(host, handle, motion.size, DXGI_FORMAT_R16G16_FLOAT, 4u, &motion_, &failure));
+                           && Import(host, handle, motion.size, DXGI_FORMAT_R16G16_FLOAT, MOTION_BYTES_PER_TEXEL, &motion_, &failure));
       if (handle != nullptr) {
         CloseHandle(handle);
       }
@@ -299,7 +302,7 @@ vk::ImageInfo VkClient::PrepareMotion(vk::GameHost& host, const vk::ImageInfo& m
         motion_failure_.reset();
       } else {
         // Logged once: not retried for this size.
-        motion_failure_ = ShareFailure{.size = motion.size, .format = DXGI_FORMAT_R16G16_FLOAT, .what = failure};
+        motion_failure_ = ShareFailure{.size = motion.size, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = failure};
         nr::Logf(nr::LogLevel::WARN, "UPLIFT_MV could not be shared with Uplift's helper ({}); NR runs without LaunchPad's motion", failure);
       }
     }
@@ -512,7 +515,7 @@ MaskCopy VkClient::CopyMask(vk::GameHost& host, const vk::ImageInfo& mask, NrLin
     }
     if (!opened) {
       // Logged once: not retried for this size and format.
-      mask_failure_ = ShareFailure{.size = mask.size, .format = format->view_format, .what = failure};
+      mask_failure_ = ShareFailure{.size = mask.size, .format = format->view_format, .cause = failure};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, {})", static_cast<int>(format->view_format),
                failure);
       return {};

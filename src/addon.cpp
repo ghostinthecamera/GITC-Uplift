@@ -65,6 +65,7 @@
 #include "bridge/private_device_bridge.hpp"
 #include "bridge/record_nr.hpp"
 #include "bridge/vk_bridge.hpp"
+#include "build_id.hpp"
 #include "client/vk_client.hpp"
 #include "color/encoding.hpp"
 #include "gl/functions.hpp"
@@ -88,10 +89,8 @@
 #include "vk/loader.hpp"
 
 // The name ReShade shows in its Add-ons list. The log lines keep their "[Uplift]" prefix (addon/log_bridge.cpp).
-extern "C" __declspec(dllexport) const char* NAME = "GITC Uplift";
-extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "A virtual photography focused version of the DLSS 5 mod: NVIDIA DLSS Neural Rendering (DLSS-NR) with greater "
-    "flexibility, ease of use, stability and hassle-free compatibility across APIs.";
+extern "C" __declspec(dllexport) const char* NAME = uplift::addon::host::ADDON_NAME;
+extern "C" __declspec(dllexport) const char* DESCRIPTION = uplift::addon::host::ADDON_DESCRIPTION;
 
 namespace {
 
@@ -112,6 +111,9 @@ using uplift::text::BeforeFgNote;
 // devices of an instance older than Vulkan's core push descriptors, and NGX's device additions must know whether it will.
 constexpr addon::host::InstanceApiVersionSink NOTE_INSTANCE_API_VERSION = &vk::DeviceHook::NoteInstanceApiVersion;
 constexpr std::chrono::milliseconds DIAGNOSTIC_GAME_WAIT{500};
+// How often BlockedReason looks at the process's modules for foreign copies of the runtime: listing every module and its path each frame is too
+// costly, and a copy mapped mid-session is seen within a second.
+constexpr std::chrono::milliseconds MAPPED_RUNTIME_RECHECK_MS{1000};
 constexpr uint64_t BEFORE_FG_TRACE_INITIAL_PRESENTS = 2u;
 constexpr uint64_t BEFORE_FG_TRACE_INTERVAL = 240u;
 
@@ -167,6 +169,11 @@ struct DeviceEntry {
   std::string message;                                   // why this device has no context
   bool rejected = false;                                 // not NVIDIA, or the context failed to start: decided once
   std::filesystem::path snippet_path;                    // resolved once at context creation; empty when not found
+  // The foreign copies of the runtime mapped in the process, for snippet_path; looked up at most once per MAPPED_RUNTIME_RECHECK_MS.
+  nr::MappedRuntimeDecision mapped_runtime;
+  std::filesystem::path mapped_runtime_for;  // the snippet_path that mapped_runtime was decided for
+  std::chrono::steady_clock::time_point mapped_runtime_checked;
+  uint64_t mapped_runtime_load_count = 0u;  // nr::SnippetLoadCount() when mapped_runtime was decided
   std::string static_block;                              // a conflicting host or a missing runtime: decided at creation
   bool runtime_in_game_folder = false;                   // 1.1.4: the runtime is mapped from the game's own folder (NVIDIA's DLSS loaded it)
   ui::CardStage block_stage = ui::CardStage::CONFLICTS;  // which stage static_block fails
@@ -429,6 +436,8 @@ struct AddonState {
   // lock of their own, and the device's next present recycles them.
   std::mutex vk_orphans_mutex;
   std::vector<addon::StaleVkList> vk_orphans;
+  // Orders the Direct3D 12 token submissions against later Resets of any command list (OnExecuteCommandList).
+  addon::SubmitEpochs submit_epochs;
 };
 
 // Created in AddonInit and never freed: with the NGX hooks running the module is pinned, and at
@@ -436,6 +445,8 @@ struct AddonState {
 AddonState* g_state = nullptr;
 // The device whose tokens this thread submitted and has not stamped yet.
 thread_local api::device* t_unstamped_device = nullptr;
+// The submit epoch of this thread's latest token submission (valid while t_unstamped_device is set).
+thread_local uint64_t t_unstamped_epoch = addon::NO_SUBMIT_EPOCH;
 // Compute pipelines NVIDIA's DLSS bound on this thread inside its Vulkan evaluates since the last main-handle evaluate (OnVulkanBindPipeline).
 thread_local uint32_t t_dlss_compute_binds = 0u;
 // OnVulkanBindPipeline is registered (AddonInit), so the count above means something.
@@ -510,13 +521,13 @@ void PollHooks() {
 }
 
 // This thread's earlier ExecuteCommandLists calls have returned by its next Uplift event,
-// so one Signal per queue now follows them.
-void StampThisThread() {
+// so one Signal per queue now follows them. `later_call`: the event is an execute_command_list for a list that proves a later call.
+void StampThisThread(bool later_call = false) {
   api::device* const device = std::exchange(t_unstamped_device, nullptr);
   if (device == nullptr) return;
   const std::unique_lock lock(g_state->mutex);
   if (addon::DeviceContext* const context = ContextOf(device)) {
-    context->StampThread(GetCurrentThreadId());
+    context->StampThread(GetCurrentThreadId(), later_call);
   }
 }
 
@@ -1447,6 +1458,7 @@ void OnResetCommandList(api::command_list* cmd_list) {
     list_state->first_token = 0u;
     list_state->executed = false;
     list_state->shadow.OnReset(addon::TrackingEpoch());  // 0 while tracking is off: unknown until the next Reset
+    list_state->reset_epoch = g_state->submit_epochs.AtReset();
   }
   UPLIFT_CATCH("reset_command_list", )
 }
@@ -1474,9 +1486,13 @@ void OnExecuteCommandList(api::command_queue* queue, api::command_list* cmd_list
     addon::ListState* const list_state = addon::FindListState(cmd_list);
     if (list_state == nullptr) return;
     PollHooks();
-    // No StampThisThread() here: ReShade raises this event for every list of one
-    // ExecuteCommandLists call before the single native call, so a Signal now could precede the submission
-    // of an earlier list in the same batch. Reset, evaluate and present stamp instead.
+    // No stamp for a list of the same ExecuteCommandLists call as this thread's last submission: ReShade raises this event for every list of one
+    // call before the single native call, so a Signal now could precede the submission of an earlier list in the same batch. Reset, evaluate and
+    // present stamp instead. A list reset after that submission is not part of that call, so the call has returned and a Signal now follows it on
+    // its queue: a thread that only executes lists is stamped here, rather than by age.
+    if (addon::StampsAtExecute(t_unstamped_device != nullptr, list_state->reset_epoch, t_unstamped_epoch)) {
+      StampThisThread(true);
+    }
     const bool executed_again = (list_state->tokens.empty() && list_state->executed && list_state->first_token != 0u);
     if (list_state->tokens.empty() && !executed_again) return;
     const std::unique_lock lock(g_state->mutex);
@@ -1489,6 +1505,7 @@ void OnExecuteCommandList(api::command_queue* queue, api::command_list* cmd_list
         context->SubmitTokens(list_state->tokens, native_queue, GetCurrentThreadId(), now);
       }
       t_unstamped_device = list_state->device;  // this thread stamps it at its next event
+      t_unstamped_epoch = g_state->submit_epochs.AtSubmit();
     }
     list_state->tokens.clear();
     list_state->executed = true;
@@ -1792,6 +1809,684 @@ bool BeforeFgMaskConflicts(DeviceEntry& entry, const ui::Settings& settings) {
 
 std::string VulkanDlssReason(const AddonState& state, const DeviceEntry& entry);
 
+addon::BeforeFgDecision DecideBeforeFgFor(AddonState& state, DeviceEntry& entry, api::device* device, api::swapchain* swapchain,
+                                          const addon::BeforeFgInputs& before_fg_facts, addon::BeforeFgRoute route) {
+  auto inputs = before_fg_facts;
+  inputs.route = route;
+  inputs.handoff_pending = route == addon::BeforeFgRoute::VK_HELPER
+      ? entry.before_fg.helper_frame.has_value() : entry.before_fg.outer_config.has_value();
+  inputs.hooks_installed = addon::streamline::Installed();
+  if (route == addon::BeforeFgRoute::DX12) {
+    inputs.measured_cadence = entry.context->HasFrameGenerationCadence();
+    if (addon::BeforeFgActive(inputs) && inputs.early_confirmed) {
+      inputs.early_dxgi_matches = entry.before_fg.early_dxgi == reinterpret_cast<IDXGISwapChain*>(swapchain->get_native());
+      if (inputs.early_dxgi_matches) inputs.inside_outer_present = addon::streamline::InsideOuterPresent();
+    }
+  }
+  if (addon::BeforeFgChecksOuterInputs(inputs)) {
+    if (route != addon::BeforeFgRoute::VK_HELPER) {
+      inputs.upscaler_live = state.bridge.Registry().UpscalerLive(
+          device, route == addon::BeforeFgRoute::DX12 ? ngx_hooks::NgxApi::D3D12 : ngx_hooks::NgxApi::VULKAN);
+    }
+    inputs.mask_conflicts = BeforeFgMaskConflicts(entry, state.settings);
+  }
+  return addon::DecideBeforeFg(inputs);
+}
+
+// The NR runtime both of a device's contexts load (the bridge's and the native Vulkan one), and what keeps it from loading at all.
+std::optional<std::filesystem::path> LocateSnippetPath(AddonState& state) {
+  const std::string& configured = state.settings.snippet_path;
+  // A hand-edited SnippetPath can be invalid UTF-8; it is treated like an unset one.
+  const std::optional<std::filesystem::path> configured_path = addon::PathFromUtf8(configured);
+  if (!configured_path && !configured.empty() && !state.warned_invalid_snippet_path) {
+    state.warned_invalid_snippet_path = true;
+    nr::Log(nr::LogLevel::WARN,
+            "SnippetPath is not valid UTF-8; searching next to gitc-uplift.addon64 and the game instead");
+  }
+  return addon::LocateSnippet({
+      .configured = configured_path.value_or(std::filesystem::path()),
+      .addon_directory = state.addon_directory,
+      .game_directory = state.game_directory,
+  });
+}
+
+void NoteStaticBlock(AddonState& state, DeviceEntry& entry, const std::optional<std::filesystem::path>& snippet) {
+  const std::string& configured = state.settings.snippet_path;
+  if (const std::optional<std::wstring> host = addon::FindConflictingHost(addon::LoadedModuleFileNames())) {
+    entry.static_block = std::format("{} is loaded and runs NR too; remove it from the add-on folder to use Uplift",
+                                     addon::Utf8FromPath(*host));
+    entry.block_stage = ui::CardStage::CONFLICTS;
+    // NR can never load while the other host stays loaded, so the deferred SHA-256 below must not
+    // hash 166 MB for a runtime that never loads.
+    entry.snippet_path.clear();
+  } else if (!snippet) {
+    entry.static_block =
+        (configured.empty() ? "nvngx_dlssnr.dll not found next to gitc-uplift.addon64 or the game; copy it there or set Runtime path"
+                            : std::format("Runtime path not found: {}", configured));
+    entry.block_stage = ui::CardStage::RUNTIME;
+  }
+}
+
+void HashRuntimeOnce(AddonState& state, DeviceEntry& entry) {
+  if (state.settings.enabled && !state.snippet_hashed && !entry.snippet_path.empty()) {
+    state.snippet_hashed = true;
+    nr::Logf(nr::LogLevel::INFO, "NR runtime file {} (SHA-256 {})", addon::Utf8FromPath(entry.snippet_path),
+             addon::Sha256Hex(entry.snippet_path));
+  }
+}
+
+// Why NR stays off on this device whatever the placement: a static block, or another NR producer.
+std::string BlockedReason(AddonState& state, DeviceEntry& entry) {
+  // nvngx_dlssnr.dll mapped from the file Uplift would load, which sits in the game's own folder: NVIDIA's DLSS does that on RTX 50 cards, and NR cannot run
+  // on that copy (1.1.3 tried: the game crashed). Said plainly, whatever ForeignNr says. A copy mapped from any other file does not block: Uplift loads its own.
+  entry.runtime_in_game_folder = false;
+  const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+  const nr::MappedRuntimeDecision* decision = nullptr;
+  if (!entry.snippet_path.empty()) {
+    // Decided again at once when the path changed or a Load ran since (so the card never contradicts a load that just happened).
+    const uint64_t load_count = nr::SnippetLoadCount();
+    if (entry.mapped_runtime_for != entry.snippet_path || entry.mapped_runtime_load_count != load_count
+        || now - entry.mapped_runtime_checked >= MAPPED_RUNTIME_RECHECK_MS) {
+      entry.mapped_runtime_load_count = load_count;
+      entry.mapped_runtime = nr::DecideMappedRuntime(entry.snippet_path, nr::MappedRuntimeCopies(entry.snippet_path));
+      entry.mapped_runtime_for = entry.snippet_path;
+      entry.mapped_runtime_checked = now;
+    }
+    decision = &entry.mapped_runtime;
+  }
+  if (entry.static_block.empty() && !entry.snippet_path.empty() && !state.game_directory.empty()) {
+    std::error_code same_error;
+    if (decision != nullptr && decision->rule == nr::MappedRuntimeRule::SAME_FILE
+        && std::filesystem::equivalent(decision->same_file.parent_path(), state.game_directory, same_error) && !same_error) {
+      entry.runtime_in_game_folder = true;
+      return std::string(ui::RUNTIME_COPY_BODY);
+    }
+  }
+  // The same file mapped anywhere else: Snippet::Load refuses it whatever ForeignNr says, so the card says why whatever ForeignNr says.
+  if (entry.static_block.empty() && decision != nullptr && decision->rule == nr::MappedRuntimeRule::SAME_FILE) {
+    return std::format("{} ({})", uplift::text::RUNTIME_MAPPED_ELSEWHERE_LINE, addon::Utf8FromPath(decision->same_file));
+  }
+  std::optional<std::string> foreign;
+  if (state.settings.foreign_nr == ui::ForeignNrMode::YIELD) {
+    const std::optional<std::chrono::steady_clock::time_point> last_evaluated =
+        state.bridge.Registry().LastEvaluated(ngx_hooks::FeatureKind::NEURAL_RENDERING);
+    foreign = addon::ForeignNrProducer({
+        .foreign_nr_evaluating = last_evaluated && now - *last_evaluated < addon::FOREIGN_NR_IDLE_MS,
+        .renodx_marker = addon::IsEnvironmentMarkerSet(addon::RENODX_NR_MARKER),
+    });
+  }
+  return (!entry.static_block.empty() ? entry.static_block : (foreign ? std::format("{} (ForeignNr = Yield)", *foreign) : std::string()));
+}
+
+// Whether an UPLIFT_MASK is running on this device, and why not (the note). Looked up once per present, by the first path
+// that needs it. A declared UPLIFT_MASK variable also needs a technique of its effect still enabled.
+std::pair<bool, std::string_view> MaskState(AddonState& state, DeviceEntry& entry,
+                                            std::optional<std::pair<bool, std::string_view>>& mask_lookup) {
+  if (!mask_lookup) {
+    const api::effect_texture_variable variable =
+        (state.settings.mask == ui::MaskMode::AUTO && entry.runtime != nullptr && entry.runtime->get_effects_state())
+            ? entry.runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MASK_TEXTURE)
+            : api::effect_texture_variable{0u};
+    const bool declared = variable.handle != 0u;
+    mask_lookup.emplace(declared && MaskEffectRunning(entry.runtime, variable),
+                        (state.settings.mask != ui::MaskMode::AUTO) ? std::string_view()
+                        : declared                                  ? std::string_view("NR mask: the UPLIFT_MASK effect is off")
+                                                                    : std::string_view("NR mask: no effect writes UPLIFT_MASK"));
+  }
+  return *mask_lookup;
+}
+
+// What OnPresent hands a VkDeviceRouter: its locals the Vulkan block reads, and the two it writes for the code after it (by reference).
+struct VkPresentInputs {
+  api::device* device;
+  api::swapchain* swapchain;
+  std::chrono::steady_clock::time_point now;
+  bool outer_ticked;
+  const addon::BeforeFgInputs& before_fg_facts;
+  const addon::RenderedMarker& early_marker;
+  std::vector<std::unique_ptr<bridge::VkBridge>>& vk_after_unlock;
+  std::optional<std::pair<bool, std::string_view>>& mask_lookup;
+  bool& present_motion_wanted;
+  bool& vk_dlss_stages_off;
+};
+
+// NR after DLSS natively on the game's Vulkan device. Source = Auto stays at Present on Vulkan, and the
+// DLSS placements are the explicit choices, taken from the Present path (NrClaim) once the game's DLSS is seen. NR at
+// Present runs natively too, on the native route (addon::ChooseVkNrRoute: VulkanNr, and what makes native NR impossible here), else on the private
+// Direct3D 12 device (VkBridge) as before.
+// One router per OnPresent call on a Vulkan device, constructed and destroyed under OnPresent's lock, holding no state between presents.
+// Members set in Present() are scratch shared by its steps; anything that must persist lives in DeviceEntry or AddonState.
+// Present() is called once per instance. The members keep the names OnPresent's locals had, so each step reads as the block did.
+class VkDeviceRouter {
+ public:
+  VkDeviceRouter(AddonState& addon_state, DeviceEntry& device_entry, const VkPresentInputs& in)
+      : state(addon_state), entry(device_entry), device(in.device), swapchain(in.swapchain), now(in.now), outer_ticked(in.outer_ticked),
+        before_fg_facts(in.before_fg_facts), early_marker(in.early_marker), vk_after_unlock(in.vk_after_unlock), mask_lookup(in.mask_lookup),
+        present_motion_wanted(in.present_motion_wanted), vk_dlss_stages_off(in.vk_dlss_stages_off) {}
+
+  // The steps below, in order. True when OnPresent returns.
+  [[nodiscard]] bool Present();
+
+ private:
+  // The native context's facts for this present: what native NR needs, a creation failure or a stop latched, the device-loss latch, the Direct3D 12
+  // route's creation failure. True when the device was lost or its native NR abandoned (no route starts).
+  [[nodiscard]] bool NoteNativeFacts();
+  // The route, the DLSS stages, the helper's part and the one owner of NR on this device.
+  void ChooseRoute();
+  // The present through the helper front, as gitc-uplift.addon32 hosts it for a 32-bit Vulkan device (the client, the helper's FRAME, NR at the
+  // present point; the effect events reach the front through FindFrameEntry). Two claims: the helper serves one device (`helper_claim`, shared with the
+  // Direct3D 9 devices), and the in-process one keeps the helper's NR from running next to this device's native context at a DLSS placement (which takes
+  // it once the helper has drained). `route_wants_nr` false drains the helper's NR.
+  void PresentThroughHelper(bool route_wants_nr);
+  // The route left the helper (or the placement left Present): drain it, then detach it. True when this present goes without NR.
+  [[nodiscard]] bool LeaveHelper();
+  // The native or helper route: the Direct3D 12 route's bridge and context go first.
+  void StopBridgeOffRoute();
+  // Whether the native context copies DLSS's vectors for the Present path this present.
+  void DecidePresentMotion();
+  // The native context, made once it is wanted.
+  void EnsureNativeContext();
+  // The native context's per-present work. True when OnPresent returns (NR ran natively at Present, or natively alone).
+  [[nodiscard]] bool RunNativeContext();
+  // NR at Present in Uplift's helper process.
+  void RunHelperRoute();
+
+  // OnPresent's locals, bound once.
+  AddonState& state;
+  DeviceEntry& entry;
+  api::device* const device;
+  api::swapchain* const swapchain;
+  const std::chrono::steady_clock::time_point now;
+  const bool outer_ticked;
+  const addon::BeforeFgInputs& before_fg_facts;
+  const addon::RenderedMarker& early_marker;
+  std::vector<std::unique_ptr<bridge::VkBridge>>& vk_after_unlock;
+  std::optional<std::pair<bool, std::string_view>>& mask_lookup;
+  bool& present_motion_wanted;
+  bool& vk_dlss_stages_off;
+  // Scratch shared by the steps, set in the step that first decides it.
+  VkDevice vk_device = VK_NULL_HANDLE;  // NoteNativeFacts
+  addon::VkRouteChoice route;           // ChooseRoute, and the five below it
+  bool native_route = false;
+  bool helper_route = false;
+  bool native_at_dlss_stage = false;
+  bool helper_runs = false;
+  addon::VkNrOwner owner = addon::VkNrOwner::NONE;
+  bool replace_late_motion = false;  // DecidePresentMotion
+};
+
+bool VkDeviceRouter::Present() {
+  if (NoteNativeFacts()) return true;
+  ChooseRoute();
+  if (LeaveHelper()) return true;
+  StopBridgeOffRoute();
+  DecidePresentMotion();
+  EnsureNativeContext();
+  if (entry.vk_dlss && RunNativeContext()) return true;
+  if (native_route) return true;  // the native context could not start this present; the Direct3D 12 route takes over at the next one
+  if (helper_runs) {
+    RunHelperRoute();
+    return true;
+  }
+  return false;
+}
+
+bool VkDeviceRouter::NoteNativeFacts() {
+  vk_device = reinterpret_cast<VkDevice>(static_cast<uintptr_t>(device->get_native()));
+  entry.vk_native_present = false;
+  if (!entry.vk_native_checked) {
+    entry.vk_native_checked = true;
+    std::string needs = [&]() -> std::string {
+      if (!state.hooks.Started()) return "NGX hooks";
+      if (!state.reshade_vulkan_events) return "ReShade 6.8";
+      if (const std::string error = vk::DeviceHook::NativeHooksError(); !error.empty()) return std::format("Uplift's Vulkan hooks ({})", error);
+      const std::optional<vk::DeviceRecord> record = vk::DeviceHook::Find(vk_device);
+      if (!record) return "a device Uplift saw being created";
+      if (!record->ngx_ready) return std::format("a device with NGX's extensions (this one lacks {})", record->ngx_missing);
+      if (record->instance == VK_NULL_HANDLE) return "the game's Vulkan instance, which Uplift did not see";
+      if (!record->storage_extended_supported) return "a driver whose storage images include RG16F (shaderStorageImageExtendedFormats)";
+      return {};
+    }();
+    if (!needs.empty()) {
+      entry.vk_native_block = addon::VkNativeBlock{addon::VkNativeBlock::Cause::NEEDS, std::move(needs)};
+    }
+  }
+  // A creation failure on the game's device keeps NR at Present on the Direct3D 12 route for the rest of the session (logged once, with NGX's
+  // result; no retry ping-pong between the routes). A context without Uplift's own command buffers cannot run NR at Present at all.
+  if (entry.vk_dlss && !entry.vk_native_block) {
+    if (std::optional<addon::VkNativeBlock> block = entry.vk_dlss->PresentBlock(); block && block->cause == addon::VkNativeBlock::Cause::CREATE_FAILURE) {
+      nr::Logf(nr::LogLevel::WARN, VULKAN_NATIVE_CREATE_FAILED_WARN_LINE, block->detail);
+      entry.vk_native_block = std::move(block);
+    }
+  }
+  // Native NR at Present stopped on this device (second-queue timeouts, the game's NGX shutdown): the chain goes on for the session.
+  if (entry.vk_dlss && !entry.vk_native_stopped && entry.vk_dlss->PresentStopped()) {
+    entry.vk_native_stopped = std::format(VULKAN_NATIVE_STOPPED_LINE, *entry.vk_dlss->PresentStopped());
+    nr::Logf(nr::LogLevel::WARN, VULKAN_NATIVE_STOPPED_WARN_LINE, *entry.vk_dlss->PresentStopped());
+  }
+  // The device was lost soon after a native Present submission: native NR stays off from now on, and from the next start (VulkanNativeNr = 0).
+  if (entry.vk_dlss && entry.vk_dlss->PresentLatchTripped() && !entry.vk_native_latch_noted) {
+    entry.vk_native_latch_noted = true;
+    state.settings.vulkan_native_nr = false;
+    state.vk_native_off = std::string(VULKAN_NATIVE_OFF_REASON);
+    state.latch_save_pending = true;  // saved on this present thread, below
+    nr::Logf(nr::LogLevel::WARN, uplift::text::VK_PRESENT_DEVICE_LOST_LINE, addon::VkDlssContext::DLSS_LATCH_WINDOW.count());
+  }
+  // No route starts on a device its native context saw lost (the native runtime was left mapped there): NR stays off on it, as the loss's
+  // own message says. Only the latch's save, and the native marker's clear, still happen. The same for any native NR that
+  // was dropped (a switch or a shutdown whose GPU work did not finish): its runtime may still be mapped, and its context keeps the claim.
+  if (entry.vk_dlss && (entry.vk_dlss->DeviceLost() || entry.vk_dlss->Abandoned())) {
+    ClearNativePresentMarker(device, entry.vk_dlss->NrState());
+    if (state.latch_save_pending) {
+      state.latch_save_pending = false;
+      SaveAndApply(&state);
+    }
+    return true;
+  }
+  if (entry.vk_dlss && !entry.vk_native_block) {
+    entry.vk_native_block = entry.vk_dlss->PresentBlock();  // only Present's command buffers here: a creation failure was latched above
+  }
+  // The same for the Direct3D 12 route, whose creation failure (structured, never parsed from the message) sends NR at Present on to the helper.
+  if (entry.context && (!entry.vk_d3d12_block || entry.vk_d3d12_block->cause != addon::VkD3d12Block::Cause::CREATE_FAILURE)) {
+    if (std::string failure = entry.context->CreateFailure(); !failure.empty()) {
+      nr::Logf(nr::LogLevel::WARN, VULKAN_D3D12_CREATE_FAILED_WARN_LINE, failure);
+      entry.vk_d3d12_block = addon::VkD3d12Block{addon::VkD3d12Block::Cause::CREATE_FAILURE, std::move(failure)};
+    }
+  }
+  return false;
+}
+
+void VkDeviceRouter::ChooseRoute() {
+  route = addon::ChooseVkNrRoute({
+      .setting = state.settings.vulkan_nr,
+      .native = entry.vk_native_block,
+      .native_off = (entry.vk_native_stopped ? std::string_view(*entry.vk_native_stopped) : std::string_view(state.vk_native_off)),
+      .d3d12 = entry.vk_d3d12_block,
+  });
+  if (route.route == addon::VkNrRoute::DIRECT3D_12) {
+    addon::PrepareBeforeFgBridge(entry.before_fg, addon::BeforeFgActive(before_fg_facts));
+  }
+  native_route = (route.route == addon::VkNrRoute::NATIVE);
+  helper_route = (route.route == addon::VkNrRoute::HELPER);
+  // Only native Vulkan NR runs inside the game's DLSS. With VulkanNr Direct3D 12 or Helper, or a failure that stops native NR inside the game's DLSS too,
+  // the DLSS stages are greyed (the panel) and the native context gets Present (its config, below), so NR moves to Present at once, through the one owner
+  // hand-over. A failure of native Present alone leaves them native. While the native context runs a DLSS stage the helper is neither driven nor attached.
+  // The stage is this present's (WouldRunDlssStage), so the owner moves in the frame the stage does: one hand-over.
+  const addon::VkStageDecision stages = addon::DecideVkStages({
+      .setting = state.settings.vulkan_nr,
+      .native_dlss_off = VulkanDlssReason(state, entry),
+      .dlss_stage_wanted = (entry.vk_dlss && entry.vk_dlss->WouldRunDlssStage(state.settings.source)),
+      .stopped_at_dlss_stage = (entry.vk_dlss && !entry.vk_dlss->CanCopy() && entry.vk_dlss->AtDlssPlacement()),
+  });
+  entry.vk_stages_off = stages.stages_off;
+  vk_dlss_stages_off = stages.native_present_only;
+  native_at_dlss_stage = stages.native_at_dlss_stage;
+  helper_runs = addon::VkHelperRuns(route.route, native_at_dlss_stage);
+  if (!entry.vk_route || entry.vk_route->route != route.route || entry.vk_route->reason != route.reason) {
+    nr::Log(nr::LogLevel::INFO, addon::VkRouteLine(route));
+  }
+  entry.vk_route = route;
+  // One owner of NR per device (addon::ChooseVkNrOwner) and one hand-over for every change of it: whatever holds NR and is
+  // not the owner drains now, with no grace (VkHolderDrainsNow: the native context through its config, the bridge's context through its, the helper through
+  // its FRAME), its GPU work finished first, and the new owner loads from OFF once the claims are free. The owner keeps its grace (a plain NR off).
+  owner = addon::ChooseVkNrOwner({.native_at_dlss_stage = native_at_dlss_stage, .route = route.route});
+  if (const addon::VkOwnerChange change = addon::VkOwnerChangeOf(entry.vk_owner, owner, native_at_dlss_stage != entry.vk_owner_stage,
+                                                                 state.settings.vulkan_nr != entry.vk_owner_setting);
+      change.changed) {
+    nr::Log(nr::LogLevel::INFO, std::format("Vulkan: {}", addon::VkOwnerChangeLine(entry.vk_owner, owner, change.cause, route.reason)));
+  }
+  entry.vk_owner = owner;
+  entry.vk_owner_stage = native_at_dlss_stage;
+  entry.vk_owner_setting = state.settings.vulkan_nr;
+}
+
+void VkDeviceRouter::PresentThroughHelper(bool route_wants_nr) {
+  const bool wants_nr = (state.settings.enabled && route_wants_nr);
+  const bool helper_loaded = state.front->NrLoaded(device);
+  const bool helper_allowed = state.helper_claim.Update(device, wants_nr, false, helper_loaded);
+  const bool in_process_allowed = state.claim.Update(device, wants_nr, false, helper_loaded);
+  // The claims already keep the helper's NR from loading while NR in this process holds the device (the native context's own
+  // claim, the bridged context's teardown before this route). Checked here as well, so a slip there waits instead of loading NR twice.
+  const bool in_process_off = ((!entry.vk_dlss || entry.vk_dlss->NrState() == nr::SessionState::OFF)
+                               && (!entry.context || entry.context->NrState() == nr::SessionState::OFF));
+  if (helper_allowed && in_process_allowed && !in_process_off && !std::exchange(entry.helper_guard_noted, true)) {
+    nr::Log(nr::LogLevel::WARN, "Vulkan: the helper's NR waits for NR in the game's process to unload first (the claims allowed it early)");
+  }
+  std::string vk_hook_error;  // an unseen device's reason, read under its leaf lock
+  if (!entry.helper.HasClient()) {
+    const std::scoped_lock error_lock(state.vk_hook_error_mutex);
+    vk_hook_error = state.vk_hook_error;
+  }
+  addon::HelperFrame helper_frame = {
+                                         .device = device,
+                                         .swapchain = swapchain,
+                                         .runtime = entry.runtime,
+                                         .queue = entry.queue,
+                                         .present_queue = entry.present_queue,
+                                         .vk_hook_error = vk_hook_error,
+                                         .back_buffer = entry.back_buffer,
+                                         .marker = entry.marker,
+                                         .early_marker = early_marker,
+                                         .settings = &state.settings,
+                                         .overlay = &state.overlay,
+                                         .nr_allowed = (helper_allowed && in_process_allowed && in_process_off
+                                            ),
+                                         .claimed_elsewhere = (wants_nr && !helper_allowed && state.helper_claim.Owner() != device),
+                                         .drain_now = addon::VkHolderDrainsNow(owner, addon::VkNrHolder::HELPER),
+                                         .now = now,
+                                     };
+  if (route_wants_nr) {
+    const auto decision = DecideBeforeFgFor(state, entry, device, swapchain, before_fg_facts, addon::BeforeFgRoute::VK_HELPER);
+    addon::ApplyBeforeFgHelper(entry.before_fg, helper_frame, decision);
+    if (decision.state == addon::BeforeFgState::ARM_OUTER) return;
+  } else {
+    addon::DrainBeforeFgHelper(entry.before_fg, before_fg_facts.early_confirmed && addon::BeforeFgActive(before_fg_facts));
+  }
+  state.front->Present(entry.helper, helper_frame);
+}
+
+bool VkDeviceRouter::LeaveHelper() {
+  if (!helper_runs && entry.helper.HasClient()) {
+    // The route left the helper. Its NR drains there first (the claims refuse it), so it never runs next to NR in this process on this device; then
+    // the client's shares and fences retire behind the effect queue's fences, the helper is detached, and the new route starts at the next present.
+    // The same when the placement left Present for a DLSS stage, except that the native context's per-frame work goes on through
+    // the drain (its claim waits for the helper's NR to go).
+    // "unloaded" is known, never assumed: a FRAME sent without nr_allowed was answered with the helper's Session OFF (or the
+    // helper is gone). Until then FRAMEs drain it every present, and no route in this process loads NR on this device; a helper that answers but
+    // never gets there is reported once and still waited for (one that stops answering is ended by RemoteNr's own cap).
+    if (state.front->NrLoaded(device) || entry.queue == nullptr) {
+      if (!entry.helper_drain_since) {
+        entry.helper_drain_since = now;
+      } else if (now - *entry.helper_drain_since > HELPER_DRAIN_WARN && !std::exchange(entry.helper_drain_warned, true)) {
+        nr::Logf(nr::LogLevel::WARN, uplift::text::NR_DRAIN_TIMEOUT_LINE, HELPER_DRAIN_WARN.count());
+      }
+      PresentThroughHelper(false);
+      if (!native_at_dlss_stage) return true;
+    } else {
+      if (entry.helper_drain_since) {
+        nr::Logf(nr::LogLevel::INFO, "Vulkan: Uplift's helper process released NR {} ms after NR moved away from it",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(now - *entry.helper_drain_since).count());
+      }
+      entry.helper_drain_since.reset();
+      entry.helper_drain_warned = false;
+      addon::ReshadeVkHost host(device, entry.queue, entry.helper.vulkan->VulkanDevice().vkQueueSubmit);
+      entry.helper.vulkan->ReleaseAll(host);
+      entry.retiring_clients.push_back(std::move(entry.helper.vulkan));
+      state.front->Detach(device);
+      state.helper_claim.Forget(device);
+      state.claim.Forget(device);
+      entry.helper = {};
+      if (native_at_dlss_stage) {
+        nr::Log(nr::LogLevel::INFO, "Vulkan: NR runs at a DLSS stage natively; Uplift's helper process waits until the placement is Present again");
+      } else {
+        nr::Logf(nr::LogLevel::INFO, "Vulkan: the helper route is gone; NR at Present starts {}",
+                 (native_route ? "natively on the game's device" : "on a private Direct3D 12 device"));
+        return true;  // this frame goes without NR
+      }
+    }
+  }
+  return false;
+}
+
+void VkDeviceRouter::StopBridgeOffRoute() {
+  if ((native_route || helper_route) && (entry.context || entry.vk_bridge)) {
+    // The Direct3D 12 route goes before NR runs natively, as Retry now tears a bridge down (Stop before Teardown; its imports retire behind
+    // their fences), so two NR runtimes never coexist: the bridged context's Teardown unloads NR synchronously, and the claim is free after it. The
+    // same holds before NR runs in the helper, so the helper's NR never runs next to this one.
+    StopBridge(entry, (native_route ? "The Vulkan bridge stopped: NR at Present runs natively on the game's device"
+                                    : "The Vulkan bridge stopped: NR at Present runs in Uplift's helper process"));
+    if (entry.context) {
+      entry.context->Teardown();
+      entry.context.reset();
+    }
+    state.claim.Forget(device);
+    if (entry.vk_bridge) {
+      addon::ReshadeVkHost host(device, entry.queue, entry.vk_bridge->VulkanDevice().vkQueueSubmit);
+      entry.vk_bridge->RetireAll(host);
+      entry.retiring_vk.push_back(std::move(entry.vk_bridge));
+    }
+    entry.rejected = false;
+    entry.message.clear();
+    entry.retry_pending = false;
+    entry.diagnostic_retry_in = 0u;
+    nr::Logf(nr::LogLevel::INFO, "Vulkan: the Direct3D 12 route is gone; NR at Present starts {}",
+             (native_route ? "natively on the game's device" : "in Uplift's helper process"));
+  }
+}
+
+void VkDeviceRouter::DecidePresentMotion() {
+  // DLSS's motion vectors for the Present path, copied in the game's frame by the native context. Only while NR runs at Present on
+  // a GPU-ordered bridge (a CPU-ordered one holds this lock across capped CPU waits, which the hooked evaluate must not wait on) or natively, and
+  // the game presents on the effect runtime's queue (else the present event waits a GPU frame), the native context can still copy (the game has not shut
+  // NGX down), the native placement is not a DLSS one, the motion preference is DLSS (MotionVectors Auto or DLSS), and the game has created DLSS on this
+  // device.
+  const nr::SessionState present_state =
+      (native_route ? (entry.vk_dlss ? entry.vk_dlss->NrState() : nr::SessionState::OFF) : (entry.context ? entry.context->NrState() : nr::SessionState::OFF));
+  const bool outer_motion_route = addon::BeforeFgOuterMotionCandidate(before_fg_facts);
+  replace_late_motion = outer_motion_route && (state.settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD
+      || state.settings.motion_vectors == ui::MotionVectorSource::LUMENITE);
+  present_motion_wanted = addon::PresentMotionWanted({
+      .enabled = state.settings.enabled,
+      .nr_state = present_state,
+      .bridge_gpu_ordered = (entry.vk_bridge && entry.vk_bridge->GpuOrdered() && !entry.vk_bridge->Stopped()),
+      .native_present = native_route,
+      .same_queue = (entry.present_queue == entry.queue || outer_motion_route),
+      .native_wants_nr = (entry.vk_dlss && entry.vk_dlss->AtDlssPlacement()),
+      .native_present_group = (entry.vk_dlss && entry.vk_dlss->AtDlssPlacement() && entry.vk_dlss->RunsAt(addon::Stage::PRESENT)),
+      .native_can_copy = (!entry.vk_dlss || entry.vk_dlss->CanCopy()),
+      .problem = (addon::VkNativeBlocksDlss(entry.vk_native_block) || !state.dlss_unavailable_reason.empty()),
+      .dlss_motion = replace_late_motion ? state.settings.before_fg_motion == ui::Settings::FgMotion::DLSS : ui::MotionPickOf(state.settings) == ui::MotionPick::DLSS,
+      .upscaler_created = state.bridge.Registry().UpscalerCreated(device),
+  });
+}
+
+void VkDeviceRouter::EnsureNativeContext() {
+  if (!entry.vk_dlss && !addon::VkNativeBlocksDlss(entry.vk_native_block)
+      && (native_route
+          || (state.dlss_unavailable_reason.empty() && ((state.settings.source == ui::PlacementSource::DLSS && !vk_dlss_stages_off) || present_motion_wanted)))) {
+    const vk::Loader* const loader = vk::Loader::Get();
+    const std::optional<vk::DeviceRecord> record = vk::DeviceHook::Find(vk_device);
+    std::string error = "the device's record or the loader is gone";
+    LUID luid = {};
+    if (loader != nullptr && loader->get_instance_proc_addr != nullptr && record && addon::VulkanAdapterLuid(device, &luid, &error)) {
+      Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+      Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
+      if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+        factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));  // none: the budget reads unlimited headroom (RealHost's rule)
+      }
+      const std::optional<std::filesystem::path> snippet = LocateSnippetPath(state);
+      entry.snippet_path = snippet.value_or(std::filesystem::path());
+      entry.vk_dlss = addon::VkDlssContext::Create(
+          {
+              .snippet = {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory},
+              .binding = {.instance = record->instance,
+                          .physical = record->physical,
+                          .device = vk_device,
+                          .get_instance_proc_addr = (record->ext_buffer_device_address ? &vk::GetExtNgxInstanceProcAddr : loader->get_instance_proc_addr),
+                          .get_device_proc_addr = (record->ext_buffer_device_address ? &vk::GetExtNgxDeviceProcAddr : loader->get_device_proc_addr)},
+              .adapter = adapter,
+              // The frame semaphore is signalled through ReShade's queue, in the present event, where ReShade holds its lock.
+              .signal = [](void* signal_queue, VkSemaphore semaphore, uint64_t value) {
+                return signal_queue != nullptr && static_cast<api::command_queue*>(signal_queue)->signal(api::fence{addon::ReshadeHandleOf(semaphore)}, value);
+              },
+              .queue_family = record->graphics_family,  // native NR at Present's own command buffers
+              .before_present_load = [device = device] { NoteNativePresentLoad(device); },
+          },
+          &error);
+      if (!entry.context) {
+        entry.static_block.clear();
+        NoteStaticBlock(state, entry, snippet);  // the bridge's context has not decided it yet
+      }
+    }
+    if (entry.vk_dlss) {
+      state.bridge.AddVkContexts(1);  // the NGX hooks' Vulkan paths stop being a passthrough
+      entry.vk_dlss->SetDlssUnavailableReason(state.dlss_unavailable_reason);
+      nr::Log(nr::LogLevel::INFO, (native_route                                        ? "Vulkan: native NR is ready on the game's device"
+                                   : state.settings.source == ui::PlacementSource::DLSS ? "Vulkan: NR after DLSS available on this device"
+                                                                                        : "Vulkan: DLSS's motion vectors can reach the Present path on this device"));
+    } else {
+      entry.vk_native_block = addon::VkNativeBlock{addon::VkNativeBlock::Cause::START_FAILED, error};  // the Direct3D 12 route from the next present
+      nr::Log(nr::LogLevel::ERR, addon::VkNativeDlssProblem(entry.vk_native_block));
+    }
+  }
+}
+
+bool VkDeviceRouter::RunNativeContext() {
+  addon::VkDlssContext& native = *entry.vk_dlss;
+  // Tokens of stale command-buffer states, handed over by init_command_list.
+  std::vector<addon::StaleVkList> orphans;
+  {
+    const std::scoped_lock orphans_lock(state.vk_orphans_mutex);
+    for (addon::StaleVkList& orphan : state.vk_orphans) {
+      if (orphan.device == device) {
+        orphans.push_back(std::move(orphan));
+      }
+    }
+    std::erase_if(state.vk_orphans, [device = device](const addon::StaleVkList& orphan) { return orphan.device == device; });
+  }
+  for (const addon::StaleVkList& orphan : orphans) {
+    native.Recycle(orphan.tokens);
+  }
+  native.SetBlockedReason(BlockedReason(state, entry));
+  // NrClaim, with the native context's own identity: it wants NR when its placement is a DLSS one (DLSS seen) or, on the native route, at Present; a
+  // DLSS placement takes NR from the bridge (the device's identity), which drains first. Once it neither wants NR nor holds it, it is forgotten, so the
+  // bridge can take NR back.
+  const bool native_wants = native.WantsNr();
+  bool native_allowed =
+      state.claim.Update(&native, state.settings.enabled && native_wants, native.AtDlssPlacement(), native.NrState() != nr::SessionState::OFF);
+  // The claim keeps it while the helper drains (the device's identity holds it); checked here as well, so NR never loads in
+  // this process while the helper's NR may still run for this device.
+  if (native_allowed && native.NrState() == nr::SessionState::OFF && state.front->NrLoaded(device)) {
+    native_allowed = false;
+    if (!std::exchange(entry.native_guard_noted, true)) {
+      nr::Log(nr::LogLevel::WARN, "Vulkan: native NR waits for the helper's NR to unload first (the claim allowed it early)");
+    }
+  }
+  if (!native_wants && native.NrState() == nr::SessionState::OFF) {
+    state.claim.Forget(&native);
+  }
+  addon::FrameSettings native_settings = addon::BuildFrameSettings(
+      {.settings = &state.settings, .drag = state.overlay.drag, .defaults_view = state.overlay.defaults_view, .settings_generation = state.settings_generation},
+      &state.coalescer, now);
+  addon::FrameFacts native_facts = addon::BuildFrameFacts(
+      state.settings,
+      {.ngx_frame_generation = addon::BeforeFgConfigCount(before_fg_facts), .nr_allowed = native_allowed, .uplift_mv_lumenite = entry.uplift_mv_lumenite});
+  native_facts.present_motion_copy = present_motion_wanted;
+  if (replace_late_motion) {
+    native_facts.motion_at_dlss_stage = native_settings.motion_vectors;
+    native_settings.motion_vectors = state.settings.before_fg_motion == ui::Settings::FgMotion::DLSS;
+  }
+  native_facts.dlss_motion_upside_down = entry.depth_upside_down.value_or(false);  // 1.1.6
+  // The game released its Vulkan DLSS here (asked of the registry once the context saw DLSS).
+  native_facts.dlss_released = addon::DlssReleased(state.bridge.Registry(), device, ngx_hooks::NgxApi::VULKAN, native.DlssSeen());
+  // The route, and the NGX core initialised for the game's device unless the game created DLSS on it (then the core is the game's own).
+  native_facts.vk_native_present = native_route;
+  native_facts.vk_initialize_core = !state.bridge.Registry().UpscalerCreated(device);
+  // Split chain: the native context runs passes at several stages while VulkanNr is Native and its DLSS stages may run; its Present then
+  // needs the native route (a Present that fell back cannot run, and its passes join the DLSS stage).
+  native_facts.split_capable = addon::SplitCapable(true, false, state.settings.vulkan_nr == ui::VulkanNrMode::NATIVE && !vk_dlss_stages_off);
+  NoteEarlyMarker(early_marker, &native_facts);
+  native_facts.effects_on = (entry.runtime != nullptr && entry.runtime->get_effects_state());  // 1.1.6: NR before effects at their begin event
+  if (vk_dlss_stages_off) {
+    // The route is Direct3D 12 or Helper, so the native context runs no DLSS stage whatever is stored (Auto stays at Present here).
+    native_settings.source = ui::PlacementSource::AUTO;
+    native_settings.pre_upscale = false;
+  }
+  if (addon::VkHolderDrainsNow(owner, addon::VkNrHolder::NATIVE)) {
+    native_settings.session.grace = addon::NO_GRACE;  // transitions: not the owner: it drains at once
+  }
+  addon::PrepareBeforeFgNative(entry.before_fg, native_settings, native_facts, addon::BeforeFgActive(before_fg_facts), state.claim.Owner() == device);
+  addon::BeforeFgDecision native_before_fg;
+  if (native_route) {
+    native_before_fg = DecideBeforeFgFor(state, entry, device, swapchain, before_fg_facts, addon::BeforeFgRoute::VK_NATIVE);
+    addon::ApplyBeforeFgNative(entry.before_fg, native_settings, native_facts, native_before_fg, before_fg_facts.outer_matches_primary,
+                              state.claim.Owner() == device, entry.vk_native_present);
+  } else if (route.route != addon::VkNrRoute::DIRECT3D_12) {
+    addon::ClearBeforeFgNativePrelude(entry.before_fg);
+  }
+  const addon::VkPresentFrame present_frame = {
+      .back_buffer = VulkanImageInfo(device, entry.back_buffer),
+      .color_space = static_cast<color::ColorSpace>(swapchain->get_color_space()),
+      .marker_expected = (entry.marker.handle != 0u),
+  };
+  // The effect runtime's queue (none until the runtime is up: the frame is then not signalled).
+  const addon::TriggerPoint native_point = native.BeginInnerFrame(native_route && entry.before_fg.outer_owns_frame, outer_ticked, entry.queue,
+                                                                   native_settings, native_facts, native_allowed, state.claim.Owner() == device, now, present_frame);
+  ClearNativePresentMarker(device, native.NrState());
+  NoteLatchIfTripped(&state, &native);
+  if (const auto [mask_running, mask_idle_note] = MaskState(state, entry, mask_lookup); !mask_running) {
+    // The native mask copy goes here too. The bridged context's branch below, which releases it as well, is never reached while that
+    // context (or its bridge) could not start, nor when native NR alone runs the device.
+    native.ReleaseMask();
+    entry.mask_note = mask_idle_note;
+  }
+  // The NGX hooks watch this device's Vulkan DLSS evaluates only while Source is DLSS (the context learns the game's
+  // DLSS from them) or the context wants or holds NR; after a pick back to Auto or Present, once NR is released, the evaluate is a passthrough again.
+  const bool watching = ((state.settings.source == ui::PlacementSource::DLSS && !vk_dlss_stages_off) || native.WantsNr() || native.NrState() != nr::SessionState::OFF
+                         || present_motion_wanted);
+  if (watching != entry.vk_nr_counted) {
+    state.bridge.NoteVkContextNr(entry.vk_nr_counted, watching);
+    nr::Log(nr::LogLevel::INFO, (watching ? "Vulkan: the game's DLSS evaluates are watched for NR on this device"
+                                          : "Vulkan: NR is off here and no DLSS placement is chosen: the game's DLSS evaluates are a pure passthrough again"));
+  }
+  if (native_route) {
+    // NR at Present runs natively and the Direct3D 12 route does not exist here. The effect events reach the native context (RunNative).
+    entry.vk_native_present = true;
+    FreeRetiredVulkanBridges(entry, device, &vk_after_unlock);
+    HashRuntimeOnce(state, entry);
+    if (state.latch_save_pending) {
+      state.latch_save_pending = false;
+      SaveAndApply(&state);
+    }
+    state.bridge.SetPreSr(state.settings.enabled && state.settings.pre_upscale && state.settings.source != ui::PlacementSource::PRESENT
+                          && state.dlss_unavailable_reason.empty() && !vk_dlss_stages_off);
+    if (native_before_fg.state == addon::BeforeFgState::ARM_OUTER) return true;
+    if (entry.queue != nullptr && native.NrState() != nr::SessionState::OFF) {
+      // As in the bridge's BeginFrame, the present event comes before ReShade records its effects, so this barrier leads the
+      // immediate list. It orders the game's whole frame on this queue before the effects, which a trigger inside them flushes early (before Uplift submits)
+      // without the game's present semaphores. ReShade's API only: nothing raw goes into its immediate list.
+      addon::ReshadeVkHost host(device, entry.queue, native.QueueSubmit());
+      if (host.Valid()) {
+        vk::RecordOpeningBarrier(host);
+      }
+    }
+    RunNative(entry, device, native_point, vk::Usage::PRESENT, native_point == addon::TriggerPoint::EARLY_MARKER ? early_marker.motion : api::resource_view{});
+    return true;
+  }
+  if (native.WantsNr() && !entry.context && !helper_runs) {
+    // NR runs here natively and the Present path has nothing to do: no bridge is made for it (the helper route drives the front below, whose claim
+    // yields to the native context).
+    HashRuntimeOnce(state, entry);
+    if (state.latch_save_pending) {
+      state.latch_save_pending = false;
+      SaveAndApply(&state);
+    }
+    state.bridge.SetPreSr(state.settings.enabled && state.settings.pre_upscale && state.settings.source != ui::PlacementSource::PRESENT
+                          && state.dlss_unavailable_reason.empty() && !vk_dlss_stages_off);
+    return true;
+  }
+  return false;
+}
+
+void VkDeviceRouter::RunHelperRoute() {
+  // NR at Present runs in gitc-uplift-helper64.exe (a clean process: the KytyPS5 emulator reserves the address space NVIDIA's CUDA kernels need in
+  // this one), and no bridge or Direct3D 12 core exists here. The native context, if any, still runs a DLSS placement.
+  entry.helper.route_reason = route.reason;
+  FreeRetiredVulkanBridges(entry, device, &vk_after_unlock);
+  if (entry.vk_dlss) {
+    HashRuntimeOnce(state, entry);
+  }
+  if (state.latch_save_pending) {
+    state.latch_save_pending = false;
+    SaveAndApply(&state);
+  }
+  state.bridge.SetPreSr(state.settings.enabled && state.settings.pre_upscale && state.settings.source != ui::PlacementSource::PRESENT
+                        && state.dlss_unavailable_reason.empty() && !vk_dlss_stages_off);
+  if (!entry.helper.rejected) {
+    PresentThroughHelper(true);
+  }
+}
+
 void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::rect* /*source_rect*/,
                const api::rect* /*dest_rect*/, uint32_t /*dirty_rect_count*/, const api::rect* /*dirty_rects*/) {
   try {
@@ -1890,28 +2585,6 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         .motion_source = state.settings.motion_vectors,
         .before_fg_motion = state.settings.before_fg_motion,
     };
-    const auto decide_before_fg = [&](addon::BeforeFgRoute route) {
-      auto inputs = before_fg_facts;
-      inputs.route = route;
-      inputs.handoff_pending = route == addon::BeforeFgRoute::VK_HELPER
-          ? entry.before_fg.helper_frame.has_value() : entry.before_fg.outer_config.has_value();
-      inputs.hooks_installed = addon::streamline::Installed();
-      if (route == addon::BeforeFgRoute::DX12) {
-        inputs.measured_cadence = entry.context->HasFrameGenerationCadence();
-        if (addon::BeforeFgActive(inputs) && inputs.early_confirmed) {
-          inputs.early_dxgi_matches = entry.before_fg.early_dxgi == reinterpret_cast<IDXGISwapChain*>(swapchain->get_native());
-          if (inputs.early_dxgi_matches) inputs.inside_outer_present = addon::streamline::InsideOuterPresent();
-        }
-      }
-      if (addon::BeforeFgChecksOuterInputs(inputs)) {
-        if (route != addon::BeforeFgRoute::VK_HELPER) {
-          inputs.upscaler_live = state.bridge.Registry().UpscalerLive(
-              device, route == addon::BeforeFgRoute::DX12 ? ngx_hooks::NgxApi::D3D12 : ngx_hooks::NgxApi::VULKAN);
-        }
-        inputs.mask_conflicts = BeforeFgMaskConflicts(entry, state.settings);
-      }
-      return addon::DecideBeforeFg(inputs);
-    };
     // This bookkeeping runs before the context (and, on D3D11 and D3D10, the bridge) exist, so a bridged device
     // waiting for its first enable still has `entry.runtime`, which the Enable hotkey and the overlay need.
     addon::host::BindPresentRuntime(entry, state.runtimes, queue, swapchain);
@@ -1958,533 +2631,21 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       return;
     }
 
-    // The NR runtime both of a device's contexts load (the bridge's and the native Vulkan one), and what keeps it from loading at all.
-    const auto locate_snippet = [&state]() -> std::optional<std::filesystem::path> {
-      const std::string& configured = state.settings.snippet_path;
-      // A hand-edited SnippetPath can be invalid UTF-8; it is treated like an unset one.
-      const std::optional<std::filesystem::path> configured_path = addon::PathFromUtf8(configured);
-      if (!configured_path && !configured.empty() && !state.warned_invalid_snippet_path) {
-        state.warned_invalid_snippet_path = true;
-        nr::Log(nr::LogLevel::WARN,
-                "SnippetPath is not valid UTF-8; searching next to gitc-uplift.addon64 and the game instead");
-      }
-      return addon::LocateSnippet({
-          .configured = configured_path.value_or(std::filesystem::path()),
-          .addon_directory = state.addon_directory,
-          .game_directory = state.game_directory,
-      });
-    };
-    const auto note_static_block = [&state, &entry](const std::optional<std::filesystem::path>& snippet) {
-      const std::string& configured = state.settings.snippet_path;
-      if (const std::optional<std::wstring> host = addon::FindConflictingHost(addon::LoadedModuleFileNames())) {
-        entry.static_block = std::format("{} is loaded and runs NR too; remove it from the add-on folder to use Uplift",
-                                         addon::Utf8FromPath(*host));
-        entry.block_stage = ui::CardStage::CONFLICTS;
-        // NR can never load while the other host stays loaded, so the deferred SHA-256 below must not
-        // hash 166 MB for a runtime that never loads.
-        entry.snippet_path.clear();
-      } else if (!snippet) {
-        entry.static_block =
-            (configured.empty() ? "nvngx_dlssnr.dll not found next to gitc-uplift.addon64 or the game; copy it there or set Runtime path"
-                                : std::format("Runtime path not found: {}", configured));
-        entry.block_stage = ui::CardStage::RUNTIME;
-      }
-    };
-    const auto hash_runtime_once = [&state, &entry] {
-      if (state.settings.enabled && !state.snippet_hashed && !entry.snippet_path.empty()) {
-        state.snippet_hashed = true;
-        nr::Logf(nr::LogLevel::INFO, "NR runtime file {} (SHA-256 {})", addon::Utf8FromPath(entry.snippet_path),
-                 addon::Sha256Hex(entry.snippet_path));
-      }
-    };
-    // Why NR stays off on this device whatever the placement: a static block, or another NR producer.
-    const auto blocked_reason = [&state, &entry]() -> std::string {
-      // 1.1.4: nvngx_dlssnr.dll mapped from the game's own folder before Uplift loaded it: NVIDIA's DLSS does that on RTX 50 cards, and NR cannot run on that
-      // copy (1.1.3 tried: the game crashed). Said plainly, whatever ForeignNr says.
-      entry.runtime_in_game_folder = false;
-      if (entry.static_block.empty() && !entry.snippet_path.empty() && !state.game_directory.empty()) {
-        const std::filesystem::path mapped = nr::RuntimeMappedElsewherePath(entry.snippet_path);
-        std::error_code same_error;
-        if (!mapped.empty() && std::filesystem::equivalent(mapped.parent_path(), state.game_directory, same_error) && !same_error) {
-          entry.runtime_in_game_folder = true;
-          return "NVIDIA's DLSS loaded nvngx_dlssnr.dll from the game's folder before Uplift could (RTX 50 cards do this), and NR cannot run on that copy";
-        }
-      }
-      std::optional<std::string> foreign;
-      if (state.settings.foreign_nr == ui::ForeignNrMode::YIELD) {
-        const std::filesystem::path mapped = (entry.snippet_path.empty() ? std::filesystem::path() : nr::RuntimeMappedElsewherePath(entry.snippet_path));
-        foreign = addon::ForeignNrProducer({
-            .live_foreign_nr = state.bridge.Registry().LiveCount(ngx_hooks::FeatureKind::NEURAL_RENDERING),
-            .runtime_mapped_elsewhere = !mapped.empty(),
-            .runtime_mapped_path = (mapped.empty() ? std::string() : addon::Utf8FromPath(mapped)),
-            .renodx_marker = addon::IsEnvironmentMarkerSet(addon::RENODX_NR_MARKER),
-        });
-      }
-      return (!entry.static_block.empty() ? entry.static_block : (foreign ? std::format("{} (ForeignNr = Yield)", *foreign) : std::string()));
-    };
-
-    // Whether an UPLIFT_MASK is running on this device, and why not (the note). Looked up once per present, by the first path
-    // that needs it. A declared UPLIFT_MASK variable also needs a technique of its effect still enabled.
     std::optional<std::pair<bool, std::string_view>> mask_lookup;
-    const auto mask_state = [&state, &entry, &mask_lookup]() {
-      if (!mask_lookup) {
-        const api::effect_texture_variable variable =
-            (state.settings.mask == ui::MaskMode::AUTO && entry.runtime != nullptr && entry.runtime->get_effects_state())
-                ? entry.runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MASK_TEXTURE)
-                : api::effect_texture_variable{0u};
-        const bool declared = variable.handle != 0u;
-        mask_lookup.emplace(declared && MaskEffectRunning(entry.runtime, variable),
-                            (state.settings.mask != ui::MaskMode::AUTO) ? std::string_view()
-                            : declared                                  ? std::string_view("NR mask: the UPLIFT_MASK effect is off")
-                                                                        : std::string_view("NR mask: no effect writes UPLIFT_MASK"));
-      }
-      return *mask_lookup;
-    };
     bool present_motion_wanted = false;  // whether the native Vulkan context copies DLSS's vectors this present (decided in the Vulkan block below)
     bool vk_dlss_stages_off = false;     // a Vulkan device whose route is Direct3D 12 or Helper runs no DLSS stage (decided below)
     if (vulkan) {
-      // NR after DLSS natively on the game's Vulkan device. Source = Auto stays at Present on Vulkan, and the
-      // DLSS placements are the explicit choices, taken from the Present path (NrClaim) once the game's DLSS is seen. NR at
-      // Present runs natively too, on the native route (addon::ChooseVkNrRoute: VulkanNr, and what makes native NR impossible here), else on the private
-      // Direct3D 12 device (VkBridge) as before.
-      const auto vk_device = reinterpret_cast<VkDevice>(static_cast<uintptr_t>(device->get_native()));
-      entry.vk_native_present = false;
-      if (!entry.vk_native_checked) {
-        entry.vk_native_checked = true;
-        std::string needs = [&]() -> std::string {
-          if (!state.hooks.Started()) return "NGX hooks";
-          if (!state.reshade_vulkan_events) return "ReShade 6.8";
-          if (const std::string error = vk::DeviceHook::NativeHooksError(); !error.empty()) return std::format("Uplift's Vulkan hooks ({})", error);
-          const std::optional<vk::DeviceRecord> record = vk::DeviceHook::Find(vk_device);
-          if (!record) return "a device Uplift saw being created";
-          if (!record->ngx_ready) return std::format("a device with NGX's extensions (this one lacks {})", record->ngx_missing);
-          if (record->instance == VK_NULL_HANDLE) return "the game's Vulkan instance, which Uplift did not see";
-          if (!record->storage_extended_supported) return "a driver whose storage images include RG16F (shaderStorageImageExtendedFormats)";
-          return {};
-        }();
-        if (!needs.empty()) {
-          entry.vk_native_block = addon::VkNativeBlock{addon::VkNativeBlock::Cause::NEEDS, std::move(needs)};
-        }
-      }
-      // A creation failure on the game's device keeps NR at Present on the Direct3D 12 route for the rest of the session (logged once, with NGX's
-      // result; no retry ping-pong between the routes). A context without Uplift's own command buffers cannot run NR at Present at all.
-      if (entry.vk_dlss && !entry.vk_native_block) {
-        if (std::optional<addon::VkNativeBlock> block = entry.vk_dlss->PresentBlock(); block && block->cause == addon::VkNativeBlock::Cause::CREATE_FAILURE) {
-          nr::Logf(nr::LogLevel::WARN, VULKAN_NATIVE_CREATE_FAILED_WARN_LINE, block->detail);
-          entry.vk_native_block = std::move(block);
-        }
-      }
-      // Native NR at Present stopped on this device (second-queue timeouts, the game's NGX shutdown): the chain goes on for the session.
-      if (entry.vk_dlss && !entry.vk_native_stopped && entry.vk_dlss->PresentStopped()) {
-        entry.vk_native_stopped = std::format(VULKAN_NATIVE_STOPPED_LINE, *entry.vk_dlss->PresentStopped());
-        nr::Logf(nr::LogLevel::WARN, VULKAN_NATIVE_STOPPED_WARN_LINE, *entry.vk_dlss->PresentStopped());
-      }
-      // The device was lost soon after a native Present submission: native NR stays off from now on, and from the next start (VulkanNativeNr = 0).
-      if (entry.vk_dlss && entry.vk_dlss->PresentLatchTripped() && !entry.vk_native_latch_noted) {
-        entry.vk_native_latch_noted = true;
-        state.settings.vulkan_native_nr = false;
-        state.vk_native_off = std::string(VULKAN_NATIVE_OFF_REASON);
-        state.latch_save_pending = true;  // saved on this present thread, below
-        nr::Logf(nr::LogLevel::WARN, uplift::text::VK_PRESENT_DEVICE_LOST_LINE, addon::VkDlssContext::DLSS_LATCH_WINDOW.count());
-      }
-      // No route starts on a device its native context saw lost (the native runtime was left mapped there): NR stays off on it, as the loss's
-      // own message says. Only the latch's save, and the native marker's clear, still happen. The same for any native NR that
-      // was dropped (a switch or a shutdown whose GPU work did not finish): its runtime may still be mapped, and its context keeps the claim.
-      if (entry.vk_dlss && (entry.vk_dlss->DeviceLost() || entry.vk_dlss->Abandoned())) {
-        ClearNativePresentMarker(device, entry.vk_dlss->NrState());
-        if (state.latch_save_pending) {
-          state.latch_save_pending = false;
-          SaveAndApply(&state);
-        }
-        return;
-      }
-      if (entry.vk_dlss && !entry.vk_native_block) {
-        entry.vk_native_block = entry.vk_dlss->PresentBlock();  // only Present's command buffers here: a creation failure was latched above
-      }
-      // The same for the Direct3D 12 route, whose creation failure (structured, never parsed from the message) sends NR at Present on to the helper.
-      if (entry.context && (!entry.vk_d3d12_block || entry.vk_d3d12_block->cause != addon::VkD3d12Block::Cause::CREATE_FAILURE)) {
-        if (std::string failure = entry.context->CreateFailure(); !failure.empty()) {
-          nr::Logf(nr::LogLevel::WARN, VULKAN_D3D12_CREATE_FAILED_WARN_LINE, failure);
-          entry.vk_d3d12_block = addon::VkD3d12Block{addon::VkD3d12Block::Cause::CREATE_FAILURE, std::move(failure)};
-        }
-      }
-      const addon::VkRouteChoice route = addon::ChooseVkNrRoute({
-          .setting = state.settings.vulkan_nr,
-          .native = entry.vk_native_block,
-          .native_off = (entry.vk_native_stopped ? std::string_view(*entry.vk_native_stopped) : std::string_view(state.vk_native_off)),
-          .d3d12 = entry.vk_d3d12_block,
-      });
-      if (route.route == addon::VkNrRoute::DIRECT3D_12) {
-        addon::PrepareBeforeFgBridge(entry.before_fg, addon::BeforeFgActive(before_fg_facts));
-      }
-      const bool native_route = (route.route == addon::VkNrRoute::NATIVE);
-      const bool helper_route = (route.route == addon::VkNrRoute::HELPER);
-      // Only native Vulkan NR runs inside the game's DLSS. With VulkanNr Direct3D 12 or Helper, or a failure that stops native NR inside the game's DLSS too,
-      // the DLSS stages are greyed (the panel) and the native context gets Present (its config, below), so NR moves to Present at once, through the one owner
-      // hand-over. A failure of native Present alone leaves them native. While the native context runs a DLSS stage the helper is neither driven nor attached.
-      // The stage is this present's (WouldRunDlssStage), so the owner moves in the frame the stage does: one hand-over.
-      const addon::VkStageDecision stages = addon::DecideVkStages({
-          .setting = state.settings.vulkan_nr,
-          .native_dlss_off = VulkanDlssReason(state, entry),
-          .dlss_stage_wanted = (entry.vk_dlss && entry.vk_dlss->WouldRunDlssStage(state.settings.source)),
-          .stopped_at_dlss_stage = (entry.vk_dlss && !entry.vk_dlss->CanCopy() && entry.vk_dlss->AtDlssPlacement()),
-      });
-      entry.vk_stages_off = stages.stages_off;
-      vk_dlss_stages_off = stages.native_present_only;
-      const bool native_at_dlss_stage = stages.native_at_dlss_stage;
-      const bool helper_runs = addon::VkHelperRuns(route.route, native_at_dlss_stage);
-      if (!entry.vk_route || entry.vk_route->route != route.route || entry.vk_route->reason != route.reason) {
-        nr::Log(nr::LogLevel::INFO, addon::VkRouteLine(route));
-      }
-      entry.vk_route = route;
-      // One owner of NR per device (addon::ChooseVkNrOwner) and one hand-over for every change of it: whatever holds NR and is
-      // not the owner drains now, with no grace (VkHolderDrainsNow: the native context through its config, the bridge's context through its, the helper through
-      // its FRAME), its GPU work finished first, and the new owner loads from OFF once the claims are free. The owner keeps its grace (a plain NR off).
-      const addon::VkNrOwner owner = addon::ChooseVkNrOwner({.native_at_dlss_stage = native_at_dlss_stage, .route = route.route});
-      if (const addon::VkOwnerChange change = addon::VkOwnerChangeOf(entry.vk_owner, owner, native_at_dlss_stage != entry.vk_owner_stage,
-                                                                     state.settings.vulkan_nr != entry.vk_owner_setting);
-          change.changed) {
-        nr::Log(nr::LogLevel::INFO, std::format("Vulkan: {}", addon::VkOwnerChangeLine(entry.vk_owner, owner, change.cause, route.reason)));
-      }
-      entry.vk_owner = owner;
-      entry.vk_owner_stage = native_at_dlss_stage;
-      entry.vk_owner_setting = state.settings.vulkan_nr;
-      // The present through the helper front, as gitc-uplift.addon32 hosts it for a 32-bit Vulkan device (the client, the helper's FRAME, NR at the
-      // present point; the effect events reach the front through FindFrameEntry). Two claims: the helper serves one device (`helper_claim`, shared with the
-      // Direct3D 9 devices), and the in-process one keeps the helper's NR from running next to this device's native context at a DLSS placement (which takes
-      // it once the helper has drained). `route_wants_nr` false drains the helper's NR.
-      const auto present_through_helper = [&](bool route_wants_nr) {
-        const bool wants_nr = (state.settings.enabled && route_wants_nr);
-        const bool helper_loaded = state.front->NrLoaded(device);
-        const bool helper_allowed = state.helper_claim.Update(device, wants_nr, false, helper_loaded);
-        const bool in_process_allowed = state.claim.Update(device, wants_nr, false, helper_loaded);
-        // The claims already keep the helper's NR from loading while NR in this process holds the device (the native context's own
-        // claim, the bridged context's teardown before this route). Checked here as well, so a slip there waits instead of loading NR twice.
-        const bool in_process_off = ((!entry.vk_dlss || entry.vk_dlss->NrState() == nr::SessionState::OFF)
-                                     && (!entry.context || entry.context->NrState() == nr::SessionState::OFF));
-        if (helper_allowed && in_process_allowed && !in_process_off && !std::exchange(entry.helper_guard_noted, true)) {
-          nr::Log(nr::LogLevel::WARN, "Vulkan: the helper's NR waits for NR in the game's process to unload first (the claims allowed it early)");
-        }
-        std::string vk_hook_error;  // an unseen device's reason, read under its leaf lock
-        if (!entry.helper.HasClient()) {
-          const std::scoped_lock error_lock(state.vk_hook_error_mutex);
-          vk_hook_error = state.vk_hook_error;
-        }
-        addon::HelperFrame helper_frame = {
-                                               .device = device,
-                                               .swapchain = swapchain,
-                                               .runtime = entry.runtime,
-                                               .queue = entry.queue,
-                                               .present_queue = entry.present_queue,
-                                               .vk_hook_error = vk_hook_error,
-                                               .back_buffer = entry.back_buffer,
-                                               .marker = entry.marker,
-                                               .early_marker = early_marker,
-                                               .settings = &state.settings,
-                                               .overlay = &state.overlay,
-                                               .nr_allowed = (helper_allowed && in_process_allowed && in_process_off
-                                                  ),
-                                               .claimed_elsewhere = (wants_nr && !helper_allowed && state.helper_claim.Owner() != device),
-                                               .drain_now = addon::VkHolderDrainsNow(owner, addon::VkNrHolder::HELPER),
-                                               .now = now,
-                                           };
-        if (route_wants_nr) {
-          const auto decision = decide_before_fg(addon::BeforeFgRoute::VK_HELPER);
-          addon::ApplyBeforeFgHelper(entry.before_fg, helper_frame, decision);
-          if (decision.state == addon::BeforeFgState::ARM_OUTER) return;
-        } else {
-          addon::DrainBeforeFgHelper(entry.before_fg, before_fg_facts.early_confirmed && addon::BeforeFgActive(before_fg_facts));
-        }
-        state.front->Present(entry.helper, helper_frame);
-      };
-      if (!helper_runs && entry.helper.HasClient()) {
-        // The route left the helper. Its NR drains there first (the claims refuse it), so it never runs next to NR in this process on this device; then
-        // the client's shares and fences retire behind the effect queue's fences, the helper is detached, and the new route starts at the next present.
-        // The same when the placement left Present for a DLSS stage, except that the native context's per-frame work goes on through
-        // the drain (its claim waits for the helper's NR to go).
-        // "unloaded" is known, never assumed: a FRAME sent without nr_allowed was answered with the helper's Session OFF (or the
-        // helper is gone). Until then FRAMEs drain it every present, and no route in this process loads NR on this device; a helper that answers but
-        // never gets there is reported once and still waited for (one that stops answering is ended by RemoteNr's own cap).
-        if (state.front->NrLoaded(device) || entry.queue == nullptr) {
-          if (!entry.helper_drain_since) {
-            entry.helper_drain_since = now;
-          } else if (now - *entry.helper_drain_since > HELPER_DRAIN_WARN && !std::exchange(entry.helper_drain_warned, true)) {
-            nr::Logf(nr::LogLevel::WARN, uplift::text::NR_DRAIN_TIMEOUT_LINE, HELPER_DRAIN_WARN.count());
-          }
-          present_through_helper(false);
-          if (!native_at_dlss_stage) return;
-        } else {
-          if (entry.helper_drain_since) {
-            nr::Logf(nr::LogLevel::INFO, "Vulkan: Uplift's helper process released NR {} ms after NR moved away from it",
-                     std::chrono::duration_cast<std::chrono::milliseconds>(now - *entry.helper_drain_since).count());
-          }
-          entry.helper_drain_since.reset();
-          entry.helper_drain_warned = false;
-          addon::ReshadeVkHost host(device, entry.queue, entry.helper.vulkan->VulkanDevice().vkQueueSubmit);
-          entry.helper.vulkan->ReleaseAll(host);
-          entry.retiring_clients.push_back(std::move(entry.helper.vulkan));
-          state.front->Detach(device);
-          state.helper_claim.Forget(device);
-          state.claim.Forget(device);
-          entry.helper = {};
-          if (native_at_dlss_stage) {
-            nr::Log(nr::LogLevel::INFO, "Vulkan: NR runs at a DLSS stage natively; Uplift's helper process waits until the placement is Present again");
-          } else {
-            nr::Logf(nr::LogLevel::INFO, "Vulkan: the helper route is gone; NR at Present starts {}",
-                     (native_route ? "natively on the game's device" : "on a private Direct3D 12 device"));
-            return;  // this frame goes without NR
-          }
-        }
-      }
-      if ((native_route || helper_route) && (entry.context || entry.vk_bridge)) {
-        // The Direct3D 12 route goes before NR runs natively, as Retry now tears a bridge down (Stop before Teardown; its imports retire behind
-        // their fences), so two NR runtimes never coexist: the bridged context's Teardown unloads NR synchronously, and the claim is free after it. The
-        // same holds before NR runs in the helper, so the helper's NR never runs next to this one.
-        StopBridge(entry, (native_route ? "The Vulkan bridge stopped: NR at Present runs natively on the game's device"
-                                        : "The Vulkan bridge stopped: NR at Present runs in Uplift's helper process"));
-        if (entry.context) {
-          entry.context->Teardown();
-          entry.context.reset();
-        }
-        state.claim.Forget(device);
-        if (entry.vk_bridge) {
-          addon::ReshadeVkHost host(device, entry.queue, entry.vk_bridge->VulkanDevice().vkQueueSubmit);
-          entry.vk_bridge->RetireAll(host);
-          entry.retiring_vk.push_back(std::move(entry.vk_bridge));
-        }
-        entry.rejected = false;
-        entry.message.clear();
-        entry.retry_pending = false;
-        entry.diagnostic_retry_in = 0u;
-        nr::Logf(nr::LogLevel::INFO, "Vulkan: the Direct3D 12 route is gone; NR at Present starts {}",
-                 (native_route ? "natively on the game's device" : "in Uplift's helper process"));
-      }
-      // DLSS's motion vectors for the Present path, copied in the game's frame by the native context. Only while NR runs at Present on
-      // a GPU-ordered bridge (a CPU-ordered one holds this lock across capped CPU waits, which the hooked evaluate must not wait on) or natively, and
-      // the game presents on the effect runtime's queue (else the present event waits a GPU frame), the native context can still copy (the game has not shut
-      // NGX down), the native placement is not a DLSS one, the motion preference is DLSS (MotionVectors Auto or DLSS), and the game has created DLSS on this
-      // device.
-      const nr::SessionState present_state =
-          (native_route ? (entry.vk_dlss ? entry.vk_dlss->NrState() : nr::SessionState::OFF) : (entry.context ? entry.context->NrState() : nr::SessionState::OFF));
-      const bool outer_motion_route = addon::BeforeFgOuterMotionCandidate(before_fg_facts);
-      const bool replace_late_motion = outer_motion_route && (state.settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD
-          || state.settings.motion_vectors == ui::MotionVectorSource::LUMENITE);
-      present_motion_wanted = addon::PresentMotionWanted({
-          .enabled = state.settings.enabled,
-          .nr_state = present_state,
-          .bridge_gpu_ordered = (entry.vk_bridge && entry.vk_bridge->GpuOrdered() && !entry.vk_bridge->Stopped()),
-          .native_present = native_route,
-          .same_queue = (entry.present_queue == entry.queue || outer_motion_route),
-          .native_wants_nr = (entry.vk_dlss && entry.vk_dlss->AtDlssPlacement()),
-          .native_present_group = (entry.vk_dlss && entry.vk_dlss->AtDlssPlacement() && entry.vk_dlss->RunsAt(addon::Stage::PRESENT)),
-          .native_can_copy = (!entry.vk_dlss || entry.vk_dlss->CanCopy()),
-          .problem = (addon::VkNativeBlocksDlss(entry.vk_native_block) || !state.dlss_unavailable_reason.empty()),
-          .dlss_motion = replace_late_motion ? state.settings.before_fg_motion == ui::Settings::FgMotion::DLSS : ui::MotionPickOf(state.settings) == ui::MotionPick::DLSS,
-          .upscaler_created = state.bridge.Registry().UpscalerCreated(device),
-      });
-      if (!entry.vk_dlss && !addon::VkNativeBlocksDlss(entry.vk_native_block)
-          && (native_route
-              || (state.dlss_unavailable_reason.empty() && ((state.settings.source == ui::PlacementSource::DLSS && !vk_dlss_stages_off) || present_motion_wanted)))) {
-        const vk::Loader* const loader = vk::Loader::Get();
-        const std::optional<vk::DeviceRecord> record = vk::DeviceHook::Find(vk_device);
-        std::string error = "the device's record or the loader is gone";
-        LUID luid = {};
-        if (loader != nullptr && loader->get_instance_proc_addr != nullptr && record && addon::VulkanAdapterLuid(device, &luid, &error)) {
-          Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
-          Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
-          if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
-            factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));  // none: the budget reads unlimited headroom (RealHost's rule)
-          }
-          const std::optional<std::filesystem::path> snippet = locate_snippet();
-          entry.snippet_path = snippet.value_or(std::filesystem::path());
-          entry.vk_dlss = addon::VkDlssContext::Create(
-              {
-                  .snippet = {.snippet_path = entry.snippet_path, .application_data_path = state.ngx_data_directory},
-                  .binding = {.instance = record->instance,
-                              .physical = record->physical,
-                              .device = vk_device,
-                              .get_instance_proc_addr = (record->ext_buffer_device_address ? &vk::GetExtNgxInstanceProcAddr : loader->get_instance_proc_addr),
-                              .get_device_proc_addr = (record->ext_buffer_device_address ? &vk::GetExtNgxDeviceProcAddr : loader->get_device_proc_addr)},
-                  .adapter = adapter,
-                  // The frame semaphore is signalled through ReShade's queue, in the present event, where ReShade holds its lock.
-                  .signal = [](void* signal_queue, VkSemaphore semaphore, uint64_t value) {
-                    return signal_queue != nullptr && static_cast<api::command_queue*>(signal_queue)->signal(api::fence{addon::ReshadeHandleOf(semaphore)}, value);
-                  },
-                  .queue_family = record->graphics_family,  // native NR at Present's own command buffers
-                  .before_present_load = [device] { NoteNativePresentLoad(device); },
-              },
-              &error);
-          if (!entry.context) {
-            entry.static_block.clear();
-            note_static_block(snippet);  // the bridge's context has not decided it yet
-          }
-        }
-        if (entry.vk_dlss) {
-          state.bridge.AddVkContexts(1);  // the NGX hooks' Vulkan paths stop being a passthrough
-          entry.vk_dlss->SetDlssUnavailableReason(state.dlss_unavailable_reason);
-          nr::Log(nr::LogLevel::INFO, (native_route                                        ? "Vulkan: native NR is ready on the game's device"
-                                       : state.settings.source == ui::PlacementSource::DLSS ? "Vulkan: NR after DLSS available on this device"
-                                                                                            : "Vulkan: DLSS's motion vectors can reach the Present path on this device"));
-        } else {
-          entry.vk_native_block = addon::VkNativeBlock{addon::VkNativeBlock::Cause::START_FAILED, error};  // the Direct3D 12 route from the next present
-          nr::Log(nr::LogLevel::ERR, addon::VkNativeDlssProblem(entry.vk_native_block));
-        }
-      }
-      if (entry.vk_dlss) {
-        addon::VkDlssContext& native = *entry.vk_dlss;
-        // Tokens of stale command-buffer states, handed over by init_command_list.
-        std::vector<addon::StaleVkList> orphans;
-        {
-          const std::scoped_lock orphans_lock(state.vk_orphans_mutex);
-          for (addon::StaleVkList& orphan : state.vk_orphans) {
-            if (orphan.device == device) {
-              orphans.push_back(std::move(orphan));
-            }
-          }
-          std::erase_if(state.vk_orphans, [device](const addon::StaleVkList& orphan) { return orphan.device == device; });
-        }
-        for (const addon::StaleVkList& orphan : orphans) {
-          native.Recycle(orphan.tokens);
-        }
-        native.SetBlockedReason(blocked_reason());
-        // NrClaim, with the native context's own identity: it wants NR when its placement is a DLSS one (DLSS seen) or, on the native route, at Present; a
-        // DLSS placement takes NR from the bridge (the device's identity), which drains first. Once it neither wants NR nor holds it, it is forgotten, so the
-        // bridge can take NR back.
-        const bool native_wants = native.WantsNr();
-        bool native_allowed =
-            state.claim.Update(&native, state.settings.enabled && native_wants, native.AtDlssPlacement(), native.NrState() != nr::SessionState::OFF);
-        // The claim keeps it while the helper drains (the device's identity holds it); checked here as well, so NR never loads in
-        // this process while the helper's NR may still run for this device.
-        if (native_allowed && native.NrState() == nr::SessionState::OFF && state.front->NrLoaded(device)) {
-          native_allowed = false;
-          if (!std::exchange(entry.native_guard_noted, true)) {
-            nr::Log(nr::LogLevel::WARN, "Vulkan: native NR waits for the helper's NR to unload first (the claim allowed it early)");
-          }
-        }
-        if (!native_wants && native.NrState() == nr::SessionState::OFF) {
-          state.claim.Forget(&native);
-        }
-        addon::FrameSettings native_settings = addon::BuildFrameSettings(
-            {.settings = &state.settings, .drag = state.overlay.drag, .defaults_view = state.overlay.defaults_view, .settings_generation = state.settings_generation},
-            &state.coalescer, now);
-        addon::FrameFacts native_facts = addon::BuildFrameFacts(
-            state.settings,
-            {.ngx_frame_generation = addon::BeforeFgConfigCount(before_fg_facts), .nr_allowed = native_allowed, .uplift_mv_lumenite = entry.uplift_mv_lumenite});
-        native_facts.present_motion_copy = present_motion_wanted;
-        if (replace_late_motion) {
-          native_facts.motion_at_dlss_stage = native_settings.motion_vectors;
-          native_settings.motion_vectors = state.settings.before_fg_motion == ui::Settings::FgMotion::DLSS;
-        }
-        native_facts.dlss_motion_upside_down = entry.depth_upside_down.value_or(false);  // 1.1.6
-        // The game released its Vulkan DLSS here (asked of the registry once the context saw DLSS).
-        native_facts.dlss_released = addon::DlssReleased(state.bridge.Registry(), device, ngx_hooks::NgxApi::VULKAN, native.DlssSeen());
-        // The route, and the NGX core initialised for the game's device unless the game created DLSS on it (then the core is the game's own).
-        native_facts.vk_native_present = native_route;
-        native_facts.vk_initialize_core = !state.bridge.Registry().UpscalerCreated(device);
-        // Split chain: the native context runs passes at several stages while VulkanNr is Native and its DLSS stages may run; its Present then
-        // needs the native route (a Present that fell back cannot run, and its passes join the DLSS stage).
-        native_facts.split_capable = addon::SplitCapable(true, false, state.settings.vulkan_nr == ui::VulkanNrMode::NATIVE && !vk_dlss_stages_off);
-        NoteEarlyMarker(early_marker, &native_facts);
-        native_facts.effects_on = (entry.runtime != nullptr && entry.runtime->get_effects_state());  // 1.1.6: NR before effects at their begin event
-        if (vk_dlss_stages_off) {
-          // The route is Direct3D 12 or Helper, so the native context runs no DLSS stage whatever is stored (Auto stays at Present here).
-          native_settings.source = ui::PlacementSource::AUTO;
-          native_settings.pre_upscale = false;
-        }
-        if (addon::VkHolderDrainsNow(owner, addon::VkNrHolder::NATIVE)) {
-          native_settings.session.grace = addon::NO_GRACE;  // transitions: not the owner: it drains at once
-        }
-        addon::PrepareBeforeFgNative(entry.before_fg, native_settings, native_facts, addon::BeforeFgActive(before_fg_facts), state.claim.Owner() == device);
-        addon::BeforeFgDecision native_before_fg;
-        if (native_route) {
-          native_before_fg = decide_before_fg(addon::BeforeFgRoute::VK_NATIVE);
-          addon::ApplyBeforeFgNative(entry.before_fg, native_settings, native_facts, native_before_fg, before_fg_facts.outer_matches_primary,
-                                    state.claim.Owner() == device, entry.vk_native_present);
-        } else if (route.route != addon::VkNrRoute::DIRECT3D_12) {
-          addon::ClearBeforeFgNativePrelude(entry.before_fg);
-        }
-        const addon::VkPresentFrame present_frame = {
-            .back_buffer = VulkanImageInfo(device, entry.back_buffer),
-            .color_space = static_cast<color::ColorSpace>(swapchain->get_color_space()),
-            .marker_expected = (entry.marker.handle != 0u),
-        };
-        // The effect runtime's queue (none until the runtime is up: the frame is then not signalled).
-        const addon::TriggerPoint native_point = native.BeginInnerFrame(native_route && entry.before_fg.outer_owns_frame, outer_ticked, entry.queue,
-                                                                         native_settings, native_facts, native_allowed, state.claim.Owner() == device, now, present_frame);
-        ClearNativePresentMarker(device, native.NrState());
-        NoteLatchIfTripped(&state, &native);
-        if (const auto [mask_running, mask_idle_note] = mask_state(); !mask_running) {
-          // The native mask copy goes here too. The bridged context's branch below, which releases it as well, is never reached while that
-          // context (or its bridge) could not start, nor when native NR alone runs the device.
-          native.ReleaseMask();
-          entry.mask_note = mask_idle_note;
-        }
-        // The NGX hooks watch this device's Vulkan DLSS evaluates only while Source is DLSS (the context learns the game's
-        // DLSS from them) or the context wants or holds NR; after a pick back to Auto or Present, once NR is released, the evaluate is a passthrough again.
-        const bool watching = ((state.settings.source == ui::PlacementSource::DLSS && !vk_dlss_stages_off) || native.WantsNr() || native.NrState() != nr::SessionState::OFF
-                               || present_motion_wanted);
-        if (watching != entry.vk_nr_counted) {
-          state.bridge.NoteVkContextNr(entry.vk_nr_counted, watching);
-          nr::Log(nr::LogLevel::INFO, (watching ? "Vulkan: the game's DLSS evaluates are watched for NR on this device"
-                                                : "Vulkan: NR is off here and no DLSS placement is chosen: the game's DLSS evaluates are a pure passthrough again"));
-        }
-        if (native_route) {
-          // NR at Present runs natively and the Direct3D 12 route does not exist here. The effect events reach the native context (RunNative).
-          entry.vk_native_present = true;
-          FreeRetiredVulkanBridges(entry, device, &vk_after_unlock);
-          hash_runtime_once();
-          if (state.latch_save_pending) {
-            state.latch_save_pending = false;
-            SaveAndApply(&state);
-          }
-          state.bridge.SetPreSr(state.settings.enabled && state.settings.pre_upscale && state.settings.source != ui::PlacementSource::PRESENT
-                                && state.dlss_unavailable_reason.empty() && !vk_dlss_stages_off);
-          if (native_before_fg.state == addon::BeforeFgState::ARM_OUTER) return;
-          if (entry.queue != nullptr && native.NrState() != nr::SessionState::OFF) {
-            // As in the bridge's BeginFrame, the present event comes before ReShade records its effects, so this barrier leads the
-            // immediate list. It orders the game's whole frame on this queue before the effects, which a trigger inside them flushes early (before Uplift submits)
-            // without the game's present semaphores. ReShade's API only: nothing raw goes into its immediate list.
-            addon::ReshadeVkHost host(device, entry.queue, native.QueueSubmit());
-            if (host.Valid()) {
-              vk::RecordOpeningBarrier(host);
-            }
-          }
-          RunNative(entry, device, native_point, vk::Usage::PRESENT, native_point == addon::TriggerPoint::EARLY_MARKER ? early_marker.motion : api::resource_view{});
-          return;
-        }
-        if (native.WantsNr() && !entry.context && !helper_runs) {
-          // NR runs here natively and the Present path has nothing to do: no bridge is made for it (the helper route drives the front below, whose claim
-          // yields to the native context).
-          hash_runtime_once();
-          if (state.latch_save_pending) {
-            state.latch_save_pending = false;
-            SaveAndApply(&state);
-          }
-          state.bridge.SetPreSr(state.settings.enabled && state.settings.pre_upscale && state.settings.source != ui::PlacementSource::PRESENT
-                                && state.dlss_unavailable_reason.empty() && !vk_dlss_stages_off);
-          return;
-        }
-      }
-      if (native_route) return;  // the native context could not start this present; the Direct3D 12 route takes over at the next one
-      if (helper_runs) {
-        // NR at Present runs in gitc-uplift-helper64.exe (a clean process: the KytyPS5 emulator reserves the address space NVIDIA's CUDA kernels need in
-        // this one), and no bridge or Direct3D 12 core exists here. The native context, if any, still runs a DLSS placement.
-        entry.helper.route_reason = route.reason;
-        FreeRetiredVulkanBridges(entry, device, &vk_after_unlock);
-        if (entry.vk_dlss) {
-          hash_runtime_once();
-        }
-        if (state.latch_save_pending) {
-          state.latch_save_pending = false;
-          SaveAndApply(&state);
-        }
-        state.bridge.SetPreSr(state.settings.enabled && state.settings.pre_upscale && state.settings.source != ui::PlacementSource::PRESENT
-                              && state.dlss_unavailable_reason.empty() && !vk_dlss_stages_off);
-        if (!entry.helper.rejected) {
-          present_through_helper(true);
-        }
-        return;
-      }
+      if (VkDeviceRouter(state, entry,
+                         {.device = device,
+                          .swapchain = swapchain,
+                          .now = now,
+                          .outer_ticked = outer_ticked,
+                          .before_fg_facts = before_fg_facts,
+                          .early_marker = early_marker,
+                          .vk_after_unlock = vk_after_unlock,
+                          .mask_lookup = mask_lookup,
+                          .present_motion_wanted = present_motion_wanted,
+                          .vk_dlss_stages_off = vk_dlss_stages_off}).Present()) return;
     }
     if (Bridged(entry)) {
       FreeRetiredVulkanBridges(entry, device, &vk_after_unlock);
@@ -2563,6 +2724,9 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       entry.static_block.clear();  // a rebuild must not keep a stale reason
       ID3D12Device* native_device = nullptr;
       if (vulkan) {
+        // The bridge is the Direct3D 12 route's private device. On another route (the helper's, while the native context sits at a DLSS
+        // stage without NR) a bridge made here would be torn down by the next present's StopBridgeOffRoute.
+        if (!addon::VkPresentMakesBridge(entry.vk_route ? entry.vk_route->route : addon::VkNrRoute::DIRECT3D_12)) return;
         // On Vulkan, the private device is made at the first present with NR on, then kept, as on D3D11. The vendor, the LUID and the
         // device's functions (with what the vkCreateDevice hook recorded) decide it.
         if (!state.settings.enabled) return;
@@ -2652,7 +2816,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
           return;
         }
       }
-      const std::optional<std::filesystem::path> snippet = locate_snippet();
+      const std::optional<std::filesystem::path> snippet = LocateSnippetPath(state);
       entry.snippet_path = snippet.value_or(std::filesystem::path());
       std::string error;
       entry.context = addon::DeviceContext::Create(
@@ -2681,7 +2845,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       }
       entry.message.clear();
       entry.context->SetDlssUnavailableReason(state.dlss_unavailable_reason);
-      note_static_block(snippet);
+      NoteStaticBlock(state, entry, snippet);
       if (entry.d3d11) {
         // The mark the hooked Direct3D 11 calls find this device by, whichever pointer the game hands NGX (ReShade's proxy forwards it).
         addon::MarkD3D11Device(reinterpret_cast<ID3D11Device*>(device->get_native()), device);
@@ -2696,9 +2860,9 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     }
 
     const ui::Settings& settings = state.settings;
-    hash_runtime_once();
+    HashRuntimeOnce(state, entry);
     if (device->get_api() == api::device_api::d3d12) state.bridge.LogD3D12Diagnostics(now);
-    entry.context->SetBlockedReason(blocked_reason());
+    entry.context->SetBlockedReason(BlockedReason(state, entry));
     if (entry.d3d11) {
       // A foreign Direct3D 12 DLSS device can appear at any time; the game's own device removed decides the latch window; the hooks
       // watch this device's evaluates while NR is on or not yet released.
@@ -2738,7 +2902,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         state.claim.Update(device, settings.enabled, before.dlss_seen, before.session.state != nr::SessionState::OFF);
     // Without a running UPLIFT_MASK there is no mask to bind; the copy is released (and the native context's too, in the Vulkan block
     // above, which a device whose bridge never started reaches alone).
-    const auto [mask_running, mask_idle_note] = mask_state();
+    const auto [mask_running, mask_idle_note] = MaskState(state, entry, mask_lookup);
     if (!mask_running) {
       entry.context->PrepareMaskCopy(nullptr);
       ReleaseBridgeMask(entry, device);
@@ -2759,7 +2923,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     // The bridged context's Details motion line says what is true on Vulkan, where DLSS's vectors come as copies.
     frame_facts.vulkan = entry.vulkan;
     if (Bridged(entry) && !entry.vk_bridge) {
-      const auto decision = decide_before_fg(addon::BeforeFgRoute::UNSUPPORTED_BRIDGE);
+      const auto decision = DecideBeforeFgFor(state, entry, device, swapchain, before_fg_facts, addon::BeforeFgRoute::UNSUPPORTED_BRIDGE);
       addon::ApplyBeforeFgUnsupported(entry.before_fg, frame_facts, decision);
     } else {
       addon::SelectBeforeFg(frame_facts, addon::BeforeFgActive(before_fg_facts));
@@ -2783,7 +2947,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       frame_settings.session.grace = addon::NO_GRACE;  // transitions: the bridge is not NR's owner on this device: it drains at once
     }
     if (entry.vk_bridge) {
-      const auto decision = decide_before_fg(addon::BeforeFgRoute::VK_BRIDGE);
+      const auto decision = DecideBeforeFgFor(state, entry, device, swapchain, before_fg_facts, addon::BeforeFgRoute::VK_BRIDGE);
       addon::ApplyBeforeFgBridge(entry.before_fg, frame_settings, frame_facts, decision);
       if (decision.state == addon::BeforeFgState::ARM_OUTER) {
         entry.context->NoteDisplayedPresent(now, frame_facts.ngx_frame_generation);
@@ -2834,7 +2998,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       target.format = frame.format;
     }
     if (!Bridged(entry)) {
-      const auto decision = decide_before_fg(addon::BeforeFgRoute::DX12);
+      const auto decision = DecideBeforeFgFor(state, entry, device, swapchain, before_fg_facts, addon::BeforeFgRoute::DX12);
       addon::ApplyBeforeFgDx12(entry.before_fg, frame_settings, frame_facts, decision, before_fg_facts.outer_matches_primary);
       if (decision.state == addon::BeforeFgState::ARM_OUTER) entry.context->NoteDisplayedPresent(now, frame_facts.ngx_frame_generation);
     }
@@ -2878,7 +3042,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     }
     // Tracking runs only while a DLSS placement can use it, so a game without DLSS (or before
     // its first evaluate) pays one relaxed load per tracking event. The first list reset after DLSS appears
-    // is tracked; an evaluate on a list reset earlier skips once with "list state unknown". It is
+    // is tracked; an evaluate on a list reset earlier skips once with nr::SkipReason::LIST_STATE_UNKNOWN. It is
     // also gated on the latch (or any other reason DLSS placements stopped being available mid-session).
     // Tracking runs whatever Source says now, so a live Source switch applies at once; a
     // Source = Present game still needs it once MotionVectors wants DLSS's motion vectors there too.
@@ -3334,13 +3498,13 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
           facts.dlss_motion_fixed = ui::VULKAN_SECOND_QUEUE_MOTION;
         }  // a stopped native context: dlss_unavailable above
       }
-      facts.api = "Direct3D 12";
+      facts.api = addon::host::ApiName(api::device_api::d3d12);
       if (entry.d3d11) {
-        facts.api = "Direct3D 11";
+        facts.api = addon::host::ApiName(api::device_api::d3d11);
       } else if (entry.d3d10) {
-        facts.api = "Direct3D 10";
+        facts.api = addon::host::ApiName(api::device_api::d3d10);
       } else if (entry.opengl) {
-        facts.api = "OpenGL";
+        facts.api = addon::host::ApiName(api::device_api::opengl);
       } else if (entry.vulkan) {
         facts.api = (native_view ? "Vulkan (native NR)" : "Vulkan (Direct3D 12)");  // the route
       }
@@ -3464,13 +3628,6 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       ui::FinishSetup(&view, &state.overlay, runtime->get_device(), facts, now);
     }
     const ui::VulkanNrMode vulkan_nr_before = state.settings.vulkan_nr;
-    // Before FG greyed, with why, where frame generation cannot exist: not a Direct3D 12 or Vulkan device, no Streamline hooks, or a game that
-    // has not loaded Streamline (the choice returns by itself once it does).
-    view.before_fg_unavailable = std::string(ui::BeforeFgUnavailable({
-        .api_supported = (overlay_device_api == api::device_api::d3d12 || overlay_device_api == api::device_api::vulkan),
-        .hooks_installed = addon::streamline::Installed(),
-        .streamline_loaded = addon::streamline::StreamlineLoaded(),
-    }));
     if (found != state.devices.end() && setup_finished && found->second.vulkan) {
       const auto& entry = found->second;
       if (entry.before_fg.outer_owns_frame && entry.before_fg.helper_frame) {
@@ -3493,11 +3650,20 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       const auto& entry = found->second;
       view.output_size = entry.swapchain_size;
       view.output_space = entry.output_space;
-      if (entry.before_fg.outer_owns_frame || addon::streamline::Mode() == addon::streamline::FgMode::ON) view.frame_generation_active = true;
+      view.frame_generation_active = addon::streamline::FrameGenerationShown(addon::streamline::Mode(), view.frame_generation_active,
+                                                                             entry.before_fg.outer_owns_frame);
       if (view.frame_generation_active && entry.before_fg.activity.real && (entry.before_fg.outer_owns_frame || (!HelperView(entry) && (!Bridged(entry) || NativePresent(entry))))) {
         view.activity = entry.before_fg.activity;
       }
     }
+    // Before FG greyed, with why, where frame generation cannot run: not a Direct3D 12 or Vulkan device, no Streamline hooks, a game that
+    // has not loaded Streamline, or frame generation not running, as the diagram's FG box shows it (the choice returns by itself once it runs).
+    view.before_fg_unavailable = std::string(ui::BeforeFgUnavailable({
+        .api_supported = (overlay_device_api == api::device_api::d3d12 || overlay_device_api == api::device_api::vulkan),
+        .hooks_installed = addon::streamline::Installed(),
+        .streamline_loaded = addon::streamline::StreamlineLoaded(),
+        .frame_generation_running = view.frame_generation_active,
+    }));
     if (found != state.devices.end()) view.AddBeforeFgNote(found->second.before_fg.note);
     const bool vk = overlay_device_api == api::device_api::vulkan;
     view.AddStartupLocks(state.settings, vk, overlay_device_api == api::device_api::d3d9);
@@ -3737,9 +3903,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     addon::RegisterTrackingEvents();  // once, and never unregistered while the game runs
     g_state->tracking_registered = true;
   }
-  reshade::register_overlay("GITC Uplift", OnDrawOverlay);
+  reshade::register_overlay(addon::host::OVERLAY_TITLE, OnDrawOverlay);
 
-  nr::Logf(nr::LogLevel::INFO, "Uplift {} registered (ReShade API {}, Dear ImGui {}, ReShade {})", UPLIFT_VERSION,
+  nr::Logf(nr::LogLevel::INFO, "Uplift {} registered (build {}, ReShade API {}, Dear ImGui {}, ReShade {})", UPLIFT_VERSION, UPLIFT_BUILD_ID,
            RESHADE_API_VERSION, IMGUI_VERSION_NUM,
            (reshade_version ? addon::FormatModuleVersion(*reshade_version) : std::string("of unknown version")));
   if (hooks_started) {

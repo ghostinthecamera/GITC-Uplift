@@ -2,6 +2,14 @@
 
 namespace uplift::text {
 
+// The card's reason when the file Uplift would load is already mapped outside the game's folder (Snippet::Load refuses it): another host of the
+// same file, or Uplift's own module left mapped after ReShade reloaded the add-on. The mapped path follows in parentheses.
+inline constexpr char RUNTIME_MAPPED_ELSEWHERE_LINE[] =
+    "nvngx_dlssnr.dll is already mapped in this game by another component, or stayed mapped after Uplift unloaded it";
+
+// The NR producer text while the game's own NR evaluates (ForeignNr = Yield).
+inline constexpr char FOREIGN_NR_EVALUATING_LINE[] = "another tool is running NR through NVIDIA NGX in this game";
+
 inline constexpr char NVIDIA_GPU_REQUIRED_LINE[] = "Uplift needs an NVIDIA GPU; this game renders on another adapter";
 
 inline constexpr char GAME_QUEUE_NOT_WAITING_LINE[] = "not yet at its wait after {} ms";

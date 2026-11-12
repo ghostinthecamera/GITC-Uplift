@@ -27,6 +27,8 @@ std::optional<D3D10_TEXTURE2D_DESC> TextureDesc(ID3D10Resource* resource) {
   return description;
 }
 
+// Only the CPU unit target defines UPLIFT_KEYED_RELAY_CPU_TEST and supplies Create; add-on builds use this factory.
+#if !defined(UPLIFT_KEYED_RELAY_CPU_TEST)
 std::unique_ptr<KeyedRelay> KeyedRelay::Create(ID3D10Device* game, ComPtr<ID3D11Device>* relay_created, std::string* error) {
   const auto fail = [error](std::string text) {
     *error = std::move(text);
@@ -70,6 +72,7 @@ std::unique_ptr<KeyedRelay> KeyedRelay::Create(ID3D10Device* game, ComPtr<ID3D11
   relay->relay_->GetImmediateContext(&relay->relay_context_);
   return relay;
 }
+#endif
 
 KeyedRelay::~KeyedRelay() {
   // A partly made relay (Create failed) has no context yet. D3D11 destroys what was released only at a Flush, and the relay has no
@@ -84,12 +87,15 @@ std::string KeyedRelay::Sentence(std::string_view what) {
 }
 
 void KeyedRelay::Fail(std::string_view what) {
-  Stop(std::string(what));  // the owner logs it when it passes the latch on (D3D10Bridge's SyncLatches, D3D11Client::Stop)
+  Stop(std::string(what));  // the owner logs it when it passes the latch on (D3D10Bridge's latch handler, D3D11Client::Stop)
 }
 
 void KeyedRelay::Stop(std::string reason) {
   if (latch_.empty()) {
     latch_ = std::move(reason);
+    if (on_latch_) {
+      on_latch_();
+    }
   }
 }
 

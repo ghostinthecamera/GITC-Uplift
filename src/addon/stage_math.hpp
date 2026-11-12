@@ -50,24 +50,24 @@ inline constexpr std::string_view FRAME_GENERATION_REASON = nr::SkipReasonText(n
 }
 
 // The route splits (`split_capable`: FrameFacts::split_capable) and some pass 2..N below the pass count is stored at another stage than Same.
-[[nodiscard]] inline bool SplitStored(const FrameSettings& config, bool split_capable) {
+[[nodiscard]] inline bool SplitStored(const FrameSettings& settings, bool split_capable) {
   if (!split_capable) return false;
-  const uint32_t later = std::min(config.session.pass_count, ui::MAX_PASSES) - std::min(config.session.pass_count, 1u);
-  return std::any_of(config.pass_stages.begin(), config.pass_stages.begin() + later, [](ui::PassStage stage) { return stage != ui::PassStage::SAME; });
+  const uint32_t later = std::min(settings.session.pass_count, ui::MAX_PASSES) - std::min(settings.session.pass_count, 1u);
+  return std::any_of(settings.pass_stages.begin(), settings.pass_stages.begin() + later, [](ui::PassStage stage) { return stage != ui::PassStage::SAME; });
 }
 
 // Why a later group's `slice` the Session will not run skips, as Session::Evaluate says it: the Defaults view hides a pass without a reason; a budget
 // cut is the Session's budget reason.
-[[nodiscard]] inline nr::SkipReason SliceSkipReason(const FrameSettings& config, const nr::StageSlice& slice) {
-  const bool hidden_by_view = (config.pass_view_limit != 0u && slice.first >= config.pass_view_limit);
+[[nodiscard]] inline nr::SkipReason SliceSkipReason(const FrameSettings& settings, const nr::StageSlice& slice) {
+  const bool hidden_by_view = (settings.pass_view_limit != 0u && slice.first >= settings.pass_view_limit);
   return (hidden_by_view ? nr::SkipReason::NONE : nr::SkipReason::BUDGET);
 }
 
 // "Keep faces here" for a later group at `stage`. Before upscaling is always pass 1's group, which Keep faces itself protects.
-[[nodiscard]] inline bool LaterStageKeepsFaces(const FrameSettings& config, Stage stage) {
+[[nodiscard]] inline bool LaterStageKeepsFaces(const FrameSettings& settings, Stage stage) {
   switch (stage) {
-    case Stage::AFTER_DLSS:       return config.stage_keep_faces[LATER_AFTER_DLSS_SLOT];
-    case Stage::PRESENT:          return config.stage_keep_faces[LATER_PRESENT_SLOT];
+    case Stage::AFTER_DLSS:       return settings.stage_keep_faces[LATER_AFTER_DLSS_SLOT];
+    case Stage::PRESENT:          return settings.stage_keep_faces[LATER_PRESENT_SLOT];
     case Stage::BEFORE_UPSCALING: break;
   }
   return false;
@@ -139,13 +139,13 @@ struct LayoutTarget {
 // For an output region of `output` at `stage`; `pass1`: Pass1Group's. Match game takes DLSS's create-time render size from `snapshot`, stable under
 // dynamic resolution, except before upscaling (NR already works at the render size), until DLSS is seen, and while the game's DLSS is off
 // (`dlss_off`: the last create-time size is stale, the game renders at the output size again); Full in those cases.
-[[nodiscard]] inline LayoutTarget StageLayoutTarget(const FrameSettings& config, nr::Size output, Stage stage, bool pass1,
+[[nodiscard]] inline LayoutTarget StageLayoutTarget(const FrameSettings& settings, nr::Size output, Stage stage, bool pass1,
                                                     const std::optional<ngx_hooks::CreateSnapshot>& snapshot, bool dlss_off) {
-  ui::ResolutionMode mode = config.resolution;
-  float custom_scale = config.resolution_scale;
-  bool slider_held = config.resolution_slider_held;
+  ui::ResolutionMode mode = settings.resolution;
+  float custom_scale = settings.resolution_scale;
+  bool slider_held = settings.resolution_slider_held;
   if (!pass1) {
-    const FrameSettings::StageResolution& own = config.stage_resolution[(stage == Stage::AFTER_DLSS ? LATER_AFTER_DLSS_SLOT : LATER_PRESENT_SLOT)];
+    const FrameSettings::StageResolution& own = settings.stage_resolution[(stage == Stage::AFTER_DLSS ? LATER_AFTER_DLSS_SLOT : LATER_PRESENT_SLOT)];
     mode = own.mode;
     custom_scale = own.scale;
     slider_held = own.slider_held;
@@ -200,9 +200,9 @@ template <typename SliceRuns>
 
 // FrameSettings::look for stage group `group`'s recording: the frame time when known, Result shaping on the `shaped` group only, and Keep faces where it
 // protects the group (pass 1's whenever Keep faces is on, a later group only with its stage's "Keep faces here").
-[[nodiscard]] inline sources::LookConfig GroupLookConfig(const FrameSettings& config, const ChainPlan& chain, uint32_t group, uint32_t shaped,
+[[nodiscard]] inline sources::LookConfig GroupLookConfig(const FrameSettings& settings, const ChainPlan& chain, uint32_t group, uint32_t shaped,
                                                          std::optional<float> frame_seconds) {
-  sources::LookConfig look = config.look;
+  sources::LookConfig look = settings.look;
   if (frame_seconds) {
     look.frame_seconds = *frame_seconds;
   }
@@ -210,7 +210,7 @@ template <typename SliceRuns>
     look.look.enabled = false;
   }
   if (group > 0u && group < chain.group_count) {
-    look.keep_faces.enabled = (look.keep_faces.enabled && LaterStageKeepsFaces(config, chain.groups[group].stage));
+    look.keep_faces.enabled = (look.keep_faces.enabled && LaterStageKeepsFaces(settings, chain.groups[group].stage));
   }
   return look;
 }
@@ -285,27 +285,27 @@ inline void LogChainChange(const ChainPlan& next, const ChainPlan& current) {
   }
 }
 
-// The settings the Session takes at every present, in this order, from `config` and the chain's later groups (each its own stage's "Keep faces here");
+// The settings the Session takes at every present, in this order, from `settings` and the chain's later groups (each its own stage's "Keep faces here");
 // Keep faces hears its off edge even on a frame NR then skips. `settings_generation` is the last FrameSettings::settings_generation seen: a new one restarts
 // the retry backoff. A template over the Session so the unit test can record the calls; the contexts pass their nr::Session.
 template <typename SessionSink>
-void ApplySessionOptions(SessionSink& session, const FrameSettings& config, const ChainPlan& chain, uint64_t& settings_generation) {
-  const ui::SessionOptions& options = config.session;
+void ApplySessionOptions(SessionSink& session, const FrameSettings& settings, const ChainPlan& chain, uint64_t& settings_generation) {
+  const ui::SessionOptions& options = settings.session;
   session.SetGrace(options.grace);
   session.SetAutoResume(options.auto_resume);
   session.SetMarginOverride(options.margin_override_bytes);
   session.SetVramCheck(options.vram_check);
   session.SetCreateOptions(options.presets, options.performance);
   session.SetPassCount(options.pass_count);
-  session.NoteFacesWanted(config.look.keep_faces.enabled);
+  session.NoteFacesWanted(settings.look.keep_faces.enabled);
   for (uint32_t group = 1u; group < chain.group_count; ++group) {
     const Stage stage = chain.groups[group].stage;
-    session.NoteFacesWanted(static_cast<uint8_t>(stage), config.look.keep_faces.enabled && LaterStageKeepsFaces(config, stage));
+    session.NoteFacesWanted(static_cast<uint8_t>(stage), settings.look.keep_faces.enabled && LaterStageKeepsFaces(settings, stage));
   }
   session.SetAutoRetry(options.auto_retry);
-  session.SetPassViewLimit(config.pass_view_limit);
-  if (config.settings_generation != settings_generation) {
-    settings_generation = config.settings_generation;
+  session.SetPassViewLimit(settings.pass_view_limit);
+  if (settings.settings_generation != settings_generation) {
+    settings_generation = settings.settings_generation;
     session.ResetRetries();
   }
 }

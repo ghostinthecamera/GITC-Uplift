@@ -19,6 +19,7 @@
 #include "addon/frame_trigger.hpp"
 #include "addon/placement.hpp"
 #include "addon/recording_status.hpp"
+#include "addon/stage_book.hpp"
 #include "addon/stage_math.hpp"
 #include "color/encoding.hpp"
 #include "ngx_hooks/dlss_capture.hpp"
@@ -259,9 +260,11 @@ class DeviceContext {
   void ResubmitTokens(uint64_t first_token, ID3D12CommandQueue* queue, uint32_t thread_id,
                       std::chrono::steady_clock::time_point now);
   void DropTokens(std::span<const uint64_t> tokens);
-  // StampThread runs at reset, evaluate or present, never execute_command_list: a Signal there could precede the native ExecuteCommandLists for the batch.
-  // Thread-safe.
-  void StampThread(uint32_t thread_id);
+  // StampThread runs at reset, evaluate or present, and at execute_command_list only for a list reset after the thread's last token submission:
+  // any other execute_command_list could precede the native ExecuteCommandLists of the batch its tokens were submitted in.
+  // `later_call`: the stamp was made at an execute_command_list event for a list that proves a later ExecuteCommandLists call than the tokens'; the
+  // tokens it stamps are counted apart for the diagnostic log. Thread-safe.
+  void StampThread(uint32_t thread_id, bool later_call = false);
   // The game destroyed a queue other than the present queue (Timeline::ForgetQueue).
   void ForgetQueue(ID3D12CommandQueue* queue) { timeline_->ForgetQueue(queue); }
   // Device or present-queue destruction: synchronous unload, the only blocking call (capped at Session's TEARDOWN_WAIT).
@@ -367,16 +370,8 @@ class DeviceContext {
   std::unique_ptr<sources::AfterDlssSource> after_dlss_;  // shares present_source_'s NrPipeline
   std::unique_ptr<sources::PreSrSource> pre_sr_;          // after after_dlss_; shares present_source_'s NrPipeline
   // Split chain: what each stage (Stage order) keeps of its own: its settled work size, and its latest recording's result (Status's groups).
-  struct StageState {
-    sources::WorkSizeSettle settle;
-    nr::Size work;
-    nr::Size canvas;
-    bool nr_applied = false;
-    uint32_t passes_run = 0u;
-    nr::SkipReason skip_reason = nr::SkipReason::NONE;
-    sources::MotionSource motion_source = sources::MotionSource::NONE;
-  };
-  std::array<StageState, STAGE_COUNT> stages_;
+  using StageState = StageEntry<>;
+  StageBook<> stages_;
   sources::WorkLayout present_layout_;
   nr::Size work_size_;  // pass 1's group's, as SettleLayout last settled it
   nr::Size canvas_size_;
@@ -431,6 +426,8 @@ class DeviceContext {
   // (S.T.A.L.K.E.R. Anomaly's, before the HUD): BeginFrame then keeps that frame's result for the card instead of clearing it.
   bool ran_since_present_ = false;
   std::atomic<bool> device_lost_{false};  // also read by StampThread on game threads
+  std::atomic<uint64_t> later_call_stamps_{0u};  // tokens StampThread stamped for a later ExecuteCommandLists call
+  std::atomic<uint64_t> dropped_tokens_{0u};     // tokens DropTokens completed: recorded on a list, never seen submitted
   bool torn_down_ = false;
   bool dlss_seen_ = false;
   // The game switched its DLSS off here (FrameFacts::dlss_released held long enough, DLSS seen, the DLSS placements available, not held):
@@ -444,7 +441,7 @@ class DeviceContext {
   bool logged_after_dlss_ = false;  // "NR trigger: after DLSS" was logged in this activation
   // A submit-only thread's tokens age out only after Timeline's own
   // AGED_SUBMISSION_TIME, so the descriptor ring can stay fully busy for a while by design on that
-  // engine shape. Tracks how long "descriptors busy" has been the After-DLSS result, back to back, so
+  // engine shape. Tracks how long nr::SkipReason::DESCRIPTORS_BUSY has been the After-DLSS result, back to back, so
   // one WARN per context tells the difference from a genuinely undersized ring.
   std::optional<std::chrono::steady_clock::time_point> descriptors_busy_since_;
   bool warned_descriptors_busy_ = false;

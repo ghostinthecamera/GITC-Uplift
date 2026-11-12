@@ -17,6 +17,9 @@
 #include <string_view>
 #include <system_error>
 
+#include "nr/process_modules.hpp"
+#include "text/nr_messages.hpp"
+
 namespace uplift::addon {
 
 std::optional<std::filesystem::path> LocateSnippet(const SnippetSearch& search) {
@@ -82,24 +85,9 @@ std::optional<std::wstring> FindConflictingHost(const std::vector<std::wstring>&
 }
 
 std::vector<std::wstring> LoadedModuleFileNames() {
-  const HANDLE process = GetCurrentProcess();
-  std::vector<HMODULE> modules(512u);
-  while (true) {
-    DWORD needed_bytes = 0u;
-    if (K32EnumProcessModules(process, modules.data(), static_cast<DWORD>(modules.size() * sizeof(HMODULE)), &needed_bytes) == FALSE) {
-      return {};
-    }
-    const size_t count = needed_bytes / sizeof(HMODULE);
-    const bool complete = (count <= modules.size());
-    modules.resize(count);
-    if (complete) break;
-  }
   std::vector<std::wstring> names;
-  std::wstring path(32768u, L'\0');
-  for (const HMODULE module : modules) {
-    const DWORD length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
-    if (length == 0u) continue;
-    names.push_back(std::filesystem::path(path.substr(0u, length)).filename().wstring());
+  for (const nr::ProcessModule& entry : nr::EnumerateProcessModules()) {
+    names.push_back(std::filesystem::path(entry.path).filename().wstring());
   }
   return names;
 }
@@ -149,16 +137,7 @@ bool IsEnvironmentMarkerSet(const wchar_t* name) {
 }
 
 std::optional<std::string> ForeignNrProducer(const ForeignNrSignals& signals) {
-  if (signals.live_foreign_nr > 0u) {
-    return std::format("another tool created {} NR feature(s) through NVIDIA NGX in this game", signals.live_foreign_nr);
-  }
-  if (signals.runtime_mapped_elsewhere) {
-    std::string reason = "nvngx_dlssnr.dll is already mapped in this game by another component, or stayed mapped after Uplift unloaded it";
-    if (!signals.runtime_mapped_path.empty()) {
-      reason += std::format(" ({})", signals.runtime_mapped_path);
-    }
-    return reason;
-  }
+  if (signals.foreign_nr_evaluating) return std::string(text::FOREIGN_NR_EVALUATING_LINE);
   if (signals.renodx_marker) return std::string("RenoDX DLSS5 is running NR in this game");
   return std::nullopt;
 }

@@ -39,6 +39,8 @@ std::string ShareFailureText(const char* what, DXGI_FORMAT format, HRESULT resul
 
 }  // namespace
 
+// Only the CPU unit target defines UPLIFT_D3D11_CLIENT_CPU_TEST and supplies Create; add-on builds use this factory.
+#if !defined(UPLIFT_D3D11_CLIENT_CPU_TEST)
 std::unique_ptr<D3D11Client> D3D11Client::Create(ID3D11Device* device, bool allow_fences, std::string* error, std::string_view label) {
   const auto fail = [error](std::string text) {
     *error = std::move(text);
@@ -70,6 +72,7 @@ std::unique_ptr<D3D11Client> D3D11Client::Create(ID3D11Device* device, bool allo
   }
   return client;
 }
+#endif
 
 D3D11Client::~D3D11Client() {
   ReleaseAll();
@@ -169,7 +172,7 @@ ipc::Target D3D11Client::Describe(const std::optional<D3D11_TEXTURE2D_DESC>& des
     ReleaseShared();  // NR is off, or this image cannot go: the shared surfaces go with it
   }
   if (problem.empty() && color_failure_ && color_failure_->Matches(size, format)) {
-    problem = ShareFailureText("The back buffer", format, color_failure_->result);
+    problem = ShareFailureText("The back buffer", format, color_failure_->cause);
   }
   if (problem.empty() && running && !fenced_ && (!kmt_texture_ || kmt_size_ != size || kmt_format_ != format)) {
     // KMT: this side makes the shared texture; the helper opens it by its global handle.
@@ -196,7 +199,7 @@ ipc::Target D3D11Client::Describe(const std::optional<D3D11_TEXTURE2D_DESC>& des
     }
     if (FAILED(result)) {
       ReleaseShared();
-      color_failure_ = ShareFailure{.size = size, .format = format, .result = result};
+      color_failure_ = ShareFailure{.size = size, .format = format, .cause = result};
       problem = ShareFailureText("The back buffer", format, result);
     } else {
       kmt_size_ = size;
@@ -266,7 +269,7 @@ bool D3D11Client::Apply(const ipc::Reply& reply, NrLink& link) {
       if (Open(color, &color_, &result)) {
         color_failure_.reset();
       } else {
-        color_failure_ = ShareFailure{.size = described_size_, .format = described_format_, .result = result};
+        color_failure_ = ShareFailure{.size = described_size_, .format = described_format_, .cause = result};
         nr::Log(nr::LogLevel::WARN, ShareFailureText("The back buffer", described_format_, result));
       }
     }
@@ -275,13 +278,13 @@ bool D3D11Client::Apply(const ipc::Reply& reply, NrLink& link) {
         mask_failure_.reset();
       } else {
         // The texture is the one the last SHARE_MASK asked for (this reply landed late), not the back buffer's size and format.
-        mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .result = result};
+        mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .cause = result};
         nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MASK_TEXTURE, mask_ask_.format, result));
       }
     }
     if (motion != nullptr && latch_.empty()) {
       if (!Open(motion, &motion_, &result)) {
-        motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
+        motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = result};
         nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MOTION_TEXTURE, DXGI_FORMAT_R16G16_FLOAT, result));
       }
     }
@@ -410,7 +413,7 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
           motion_failure_.reset();
         } else {
           // Logged once: not retried for this size.
-          motion_failure_ = ShareFailure{.size = motion_size, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
+          motion_failure_ = ShareFailure{.size = motion_size, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = result};
           nr::Logf(nr::LogLevel::WARN, "UPLIFT_MV could not be shared with Uplift's helper (HRESULT {:#010x}); NR runs without LaunchPad's motion",
                    static_cast<uint32_t>(result));
         }
@@ -539,7 +542,7 @@ MaskCopy D3D11Client::CopyMask(ID3D11Resource* mask, NrLink& link) {
     }
     if (!opened) {
       // Logged once: not retried for this size and format.
-      mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .result = result};
+      mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .cause = result};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, HRESULT {:#010x})",
                static_cast<int>(format->view_format), static_cast<uint32_t>(result));
       return {};

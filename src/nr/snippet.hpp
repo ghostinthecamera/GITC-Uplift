@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <vulkan/vulkan.h>
 
@@ -19,12 +20,33 @@ inline constexpr wchar_t UPLIFT_NR_RUNTIME_MARKER[] = L"UPLIFT_NR_RUNTIME_LOADED
 // True for a runtime module Uplift mapped: the loaded Snippet's, or one a device loss abandoned
 // (Abandon keeps it mapped). Thread-safe; the NGX hooks call it from game threads.
 [[nodiscard]] bool IsUpliftRuntimeModule(HMODULE module);
-// True when `snippet_path`'s file name, or nvngx_dlssnr.dll, is mapped by a
-// module that is not Uplift's own runtime (another NR host, or an Uplift instance that ReShade
-// unloaded after a device loss). Such a runtime is already initialised; Load never initialises it again.
-[[nodiscard]] bool IsRuntimeMappedElsewhere(const std::filesystem::path& snippet_path);
-// 1.1.1: the full path of that other mapping (empty when there is none), so the log says who loaded it.
-[[nodiscard]] std::filesystem::path RuntimeMappedElsewherePath(const std::filesystem::path& snippet_path);
+
+// The full paths of every module in this process whose file name is `snippet_path`'s or nvngx_dlssnr.dll (any case),
+// except those `is_own` calls Uplift's own runtime (the loaded Snippet's, or one a device loss abandoned). What is left
+// belongs to another NR host, or is the copy of the file Uplift would load. Unlike GetModuleHandleW by name, which
+// returns one module, this lists every module that has the name. `is_own` is a seam for unit tests.
+[[nodiscard]] std::vector<std::filesystem::path> MappedRuntimeCopies(const std::filesystem::path& snippet_path,
+                                                                    bool (*is_own)(HMODULE) = &IsUpliftRuntimeModule);
+
+// How many times Snippet::Load has run in this process, whatever it returned. A cached MappedRuntimeDecision is stale once this moves.
+[[nodiscard]] uint64_t SnippetLoadCount();
+
+enum class MappedRuntimeRule : uint8_t {
+  NONE,       // no foreign copy is mapped
+  LOAD_OWN,   // a foreign copy is mapped from other files: Uplift's own copy loads as a separate module
+  SAME_FILE,  // a foreign copy is the snippet's own file (or cannot be told apart from it): LoadLibraryW would return that initialised module
+};
+
+struct MappedRuntimeDecision {
+  MappedRuntimeRule rule = MappedRuntimeRule::NONE;
+  std::filesystem::path same_file;            // the first copy that is the snippet's file; empty unless SAME_FILE
+  std::vector<std::filesystem::path> others;  // the copies that are other files
+};
+
+// Pure. A copy is the same file when std::filesystem::equivalent says so, or fails to say anything: a path that cannot be
+// compared is refused like the same file, because loading it could hand back a module that is already initialised.
+[[nodiscard]] MappedRuntimeDecision DecideMappedRuntime(const std::filesystem::path& snippet_path,
+                                                        const std::vector<std::filesystem::path>& copies);
 
 struct SnippetConfig {
   std::filesystem::path snippet_path;           // the user's nvngx_dlssnr.dll
@@ -80,8 +102,12 @@ class Snippet {
   // device), or force-loads the core and runs its VULKAN_Init_Ext2 once per VkDevice, then runs the snippet's own
   // NVSDK_NGX_VULKAN_Init_Ext2 with the loader's exports (the research probe's exact call). A snippet is bound to one API and one device.
   [[nodiscard]] NVSDK_NGX_Result BindVulkan(const VulkanBinding& binding);
-  // The vkDestroyDevice detour: forget a device whose core Uplift initialised (a new VkDevice at the same address is a new device).
+  // The vkDestroyDevice detour, before the device goes: shut down the core's initialisation on a device Uplift initialised it on (the core's
+  // two-argument Shutdown1), and forget the device (a new VkDevice at the same address is a new device). Nothing for any other device.
   static void ForgetVulkanDevice(VkDevice device);
+  // NR's context on `device` is torn down, NR unloaded, the device still held: shut down the core's initialisation on it if Uplift initialised it
+  // (the core's two-argument Shutdown1), so nothing of the core's outlives the device. Nothing for a device Uplift did not initialise it on.
+  static void ShutdownD3D12Core(ID3D12Device* device);
   // Snippet Shutdown1, identity restore, FreeLibrary. A core that Uplift
   // initialised stays loaded and initialised for the device's lifetime.
   void Unload();

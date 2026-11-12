@@ -8,9 +8,12 @@
 
 #include "addon/reshade_api.hpp"
 #include "ui/localization.hpp"
+#include "ui/text_wrap.hpp"
 
 namespace uplift::ui::gui {
 using namespace ImGui;
+// Tooltips wrap at this many font heights (about 65 characters of English), or narrower where the screen is.
+inline constexpr float TOOLTIP_WIDTH_EM = 36.f;
 inline thread_local Language language = Language::ENGLISH;
 
 class LanguageScope {
@@ -55,9 +58,19 @@ inline void BulletText(const char* format, ...) {
   va_list args; va_start(args, format); const auto text = Formatted(format, args); va_end(args);
   ImGui::BulletText("%s", text.c_str());
 }
+// Every tooltip goes through here: broken into lines measured with ImGui::CalcTextSize, then shown by ImGui::SetTooltip, so the
+// last tooltip set in a frame still replaces any earlier one. Not ImFont's own word wrap: ReShade 6.8 serves add-ons built against
+// ImGui 1.90 a blank ImFont whose CalcWordWrapPositionA returns nullptr.
 inline void SetTooltip(const char* format, ...) {
   va_list args; va_start(args, format); const auto text = Formatted(format, args); va_end(args);
-  ImGui::SetTooltip("%s", text.c_str());
+  const ImGuiStyle& style = GetStyle();
+  const float screen_room = GetIO().DisplaySize.x - 2.f * (style.WindowPadding.x + style.DisplaySafeAreaPadding.x);
+  const float width = std::max(GetFontSize(), std::min(GetFontSize() * TOOLTIP_WIDTH_EM, screen_room));
+  const auto measure = [](const char* begin, const char* end) { return ImGui::CalcTextSize(begin, end).x; };
+  const auto wrapped = WrapLines(text, width, [&measure](const char* begin, const char* end, float wrap) {
+    return NextBreakByWidth(begin, end, wrap, measure);
+  });
+  ImGui::SetTooltip("%s", wrapped.c_str());
 }
 inline ImVec2 CalcTextSize(const char* text, const char* end = nullptr, bool hide = false, float wrap = -1.f) {
   const auto shown = Display(end ? std::string_view(text, end) : std::string_view(text));

@@ -247,7 +247,7 @@ class VkColorPipeline {
   bool RecordFacesCombine(VkCommandBuffer buffer, uint32_t slot, const VkFacesPass& pass);
   bool RecordFacesDespike(VkCommandBuffer buffer, uint32_t slot, const VkFacesPass& pass);  // `changed` - `reference` into `detail`
   bool RecordFacesShow(VkCommandBuffer buffer, uint32_t slot, VkImageView target, VkImageView mask, nr::Size size);
-  // The variant for a DLSS Output view format; nullopt: "unsupported format".
+  // The variant for a DLSS Output view format; nullopt: nr::SkipReason::UNSUPPORTED_FORMAT.
   [[nodiscard]] static std::optional<uint32_t> OutputVariantOf(VkFormat format);
 
  private:

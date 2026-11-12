@@ -247,7 +247,7 @@ ipc::Target D3D12Client::Describe(D3D12Host& host, const D3D12_RESOURCE_DESC& ba
     RetireShared(host, {&color_, &mask_, &motion_});  // NR is off, or this image cannot go: the shared surfaces go with it
   }
   if (problem.empty() && color_failure_ && color_failure_->Matches(size, format)) {
-    problem = ShareFailureText("The back buffer", format, color_failure_->result);
+    problem = ShareFailureText("The back buffer", format, color_failure_->cause);
   }
   if (problem != problem_) {
     if (!problem.empty()) {
@@ -308,7 +308,7 @@ void D3D12Client::Apply(const ipc::Reply& reply, NrLink& link, D3D12Host& host) 
     if (Open(host, color, &color_, &result)) {
       color_failure_.reset();
     } else {
-      color_failure_ = ShareFailure{.size = color_ask_.size, .format = color_ask_.format, .result = result};
+      color_failure_ = ShareFailure{.size = color_ask_.size, .format = color_ask_.format, .cause = result};
       nr::Log(nr::LogLevel::WARN, ShareFailureText("The back buffer", color_ask_.format, result));
     }
   }
@@ -317,13 +317,13 @@ void D3D12Client::Apply(const ipc::Reply& reply, NrLink& link, D3D12Host& host) 
       mask_failure_.reset();
     } else {
       // The texture is the one the last SHARE_MASK asked for (this reply landed late), not the back buffer's size and format.
-      mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .result = result};
+      mask_failure_ = ShareFailure{.size = mask_ask_.size, .format = mask_ask_.format, .cause = result};
       nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MASK_TEXTURE, mask_ask_.format, result));
     }
   }
   if (motion != nullptr && latch_.empty()) {
     if (!Open(host, motion, &motion_, &result)) {
-      motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
+      motion_failure_ = ShareFailure{.size = motion_ask_size_, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = result};
       nr::Log(nr::LogLevel::WARN, ShareFailureText(uplift::text::UPLIFT_MOTION_TEXTURE, DXGI_FORMAT_R16G16_FLOAT, result));
     }
   }
@@ -401,7 +401,7 @@ bool D3D12Client::RunFenced(D3D12Host& host, ID3D12Resource* back_buffer, D3D12U
           motion_failure_.reset();
         } else {
           // Logged once: not retried for this size.
-          motion_failure_ = ShareFailure{.size = motion_size, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
+          motion_failure_ = ShareFailure{.size = motion_size, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = result};
           nr::Logf(nr::LogLevel::WARN, "UPLIFT_MV could not be shared with Uplift's helper (HRESULT {:#010x}); NR runs without LaunchPad's motion",
                    static_cast<uint32_t>(result));
         }
@@ -544,7 +544,7 @@ MaskCopy D3D12Client::CopyMask(D3D12Host& host, ID3D12Resource* mask, NrLink& li
     }
     if (!opened) {
       // Logged once: not retried for this size and format.
-      mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .result = result};
+      mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .cause = result};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, HRESULT {:#010x})", static_cast<int>(format->view_format),
                static_cast<uint32_t>(result));
       return {};

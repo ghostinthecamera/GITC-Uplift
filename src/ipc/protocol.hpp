@@ -15,8 +15,8 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read; 7: Status::exposure_line (+256 bytes).
 // 8: Frame::uplift_mv_lumenite (+8 bytes); 9: Status::network_diagnostic (+256 bytes); 10: Status::legacy_runtime (+8 with alignment).
 // 11: network diagnostics for all ten passes (+3840 bytes).
-// 12-13: game-facing Present and per-pass network/style records; 14: the early-marker motion extent.
-inline constexpr uint32_t PROTOCOL_VERSION = 14u;
+// 12-13: game-facing Present and per-pass network/style records; 14: the early-marker motion extent; 15: Status::keep_faces_supported.
+inline constexpr uint32_t PROTOCOL_VERSION = 15u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t NETWORK_DIAGNOSTIC_BYTES = 4096u;
 inline constexpr size_t PATH_BYTES = 1024u;
@@ -179,6 +179,7 @@ struct Status {
   uint32_t frame_width = 0u;  // ContextStatus::frame: what the resolution mode scales
   uint32_t frame_height = 0u;
   uint32_t legacy_runtime = 0u;
+  uint32_t keep_faces_supported = 1u;  // ContextStatus::keep_faces_supported
   char session_message[TEXT_BYTES] = {};
   char blocked[TEXT_BYTES] = {};
   char output_problem[TEXT_BYTES] = {};
@@ -242,7 +243,7 @@ struct ControlBlock {
   LogRing log;
 };
 
-inline constexpr size_t CONTROL_BLOCK_BYTES = 60272u;  // includes the early-marker motion extent
+inline constexpr size_t CONTROL_BLOCK_BYTES = 60280u;  // includes the early-marker motion extent and Status::keep_faces_supported
 static_assert(sizeof(ControlBlock) == CONTROL_BLOCK_BYTES, "the add-on and the helper disagree on the control block");
 static_assert(offsetof(ControlBlock, request) % 8u == 0u && offsetof(ControlBlock, reply) % 8u == 0u);
 // Both processes use the Interlocked*64 functions on it, which need 8 alignment on x86 too.

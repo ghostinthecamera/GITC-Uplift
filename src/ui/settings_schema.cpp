@@ -12,7 +12,7 @@ namespace uplift::ui {
 namespace {
 
 constexpr std::array<std::string_view, 3> MODELS = {"Style A", "Style B", "Style C"};
-constexpr std::array<std::string_view, 3> NR_NETWORKS = {"Runtime default", "A: Legacy", "B: Small FP8"};
+constexpr std::array<std::string_view, 3> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8"};
 constexpr std::array<std::string_view, 3> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8"};
 constexpr std::array<std::string_view, 3> SOURCES = {"Auto", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 5> MOTION_VECTORS = {"Auto", "DLSS", "Launchpad", "None", "Lumenite"};  // stored-index order (Setup shows Lumenite after Launchpad)
@@ -45,15 +45,28 @@ constexpr std::array<std::string_view, 4> PRIMARIES = {"Auto", "BT.709", "BT.202
 constexpr std::array<std::string_view, 2> NEURAL_TRANSFERS = {"Bounded ratio", "Consistent"};
 constexpr std::array<std::string_view, 3> PEDESTAL_MODES = {"Off", "Auto", "Always"};
 
+// The printf formats of the FLOAT sliders that do not show two decimals.
+constexpr const char* GRACE_SLIDER_FORMAT = "%.1f";
+constexpr const char* RESOLUTION_SCALE_SLIDER_FORMAT = "%.0f %%";
+constexpr const char* AUTO_EXPOSURE_BLEND_SLIDER_FORMAT = "%.0f %%";
+constexpr const char* STABILIZE_MS_SLIDER_FORMAT = "%.0f ms";
+// AutoExposureBlend is stored 0..1 and shown as 0-100 %.
+constexpr double AUTO_EXPOSURE_BLEND_DISPLAY_SCALE = 100.0;
+
 using setting_flags::APPLY_ON_RELEASE;
 using setting_flags::BOOKKEEPING;
 using setting_flags::GREYED;
+using setting_flags::KEEP_FACES_HERE;
+using setting_flags::KEEP_FACES_OWN;
+using setting_flags::KEEP_FACES_ROW;
+using setting_flags::KEEP_FACES_TUNING;
 using setting_flags::NEXT_DLSS_CREATE;
 using setting_flags::NEXT_START;
 using setting_flags::NETWORK_PRESET;
 using setting_flags::PASS_STAGE;
 using setting_flags::PASS_SWITCH;
 using setting_flags::RESTARTS_HISTORY;
+using setting_flags::SLIDER_ALWAYS_CLAMP;
 using setting_flags::SLIDER_RANGE_ONLY;
 
 template <class Enum>
@@ -68,6 +81,52 @@ Enum FromIndex(double value) {
 
 double Flag(bool value) {
   return (value ? 1.0 : 0.0);
+}
+
+// The rows' `hidden` conditions: each is true while the choice that makes its row matter has not been made.
+
+bool StabilizeOff(const Settings& s) {
+  return s.look.stabilize == look::StabilizeMode::OFF;
+}
+
+// The Adaptation rows matter wherever the meter can be used: Metered, and Auto, which meters when the game's exposure is missing, broken or blended.
+bool ExposureAdaptationHidden(const Settings& s) {
+  return (s.input_exposure != color::InputExposure::AUTO && s.input_exposure != color::InputExposure::METERED);
+}
+
+bool AutoExposureModeHidden(const Settings& s) {
+  return s.input_exposure != color::InputExposure::AUTO;
+}
+
+bool AutoExposureBlendHidden(const Settings& s) {
+  return (s.input_exposure != color::InputExposure::AUTO || s.auto_exposure_mode != color::AutoExposureMode::BLEND);
+}
+
+bool ResolutionScaleNotCustom(const Settings& s) {
+  return s.resolution_mode != ResolutionMode::CUSTOM;
+}
+
+bool ResolutionScaleAfterDlssNotCustom(const Settings& s) {
+  return s.resolution_mode_after_dlss != ResolutionMode::CUSTOM;
+}
+
+bool ResolutionScalePresentNotCustom(const Settings& s) {
+  return s.resolution_mode_present != ResolutionMode::CUSTOM;
+}
+
+bool KeepFacesOff(const Settings& s) {
+  return !s.keep_faces;
+}
+
+// The fill's radius and tolerance are also the Keep faces mask's tuning.
+bool KeepFacesOrFillOff(const Settings& s) {
+  return (!s.keep_faces || !s.face_tuning.fill_skin);
+}
+
+// The Before frame generation motion choice is shown only while that placement is on and the motion is Launchpad's or Lumenite's.
+bool BeforeFGMotionUnused(const Settings& s) {
+  return (s.fg_present != Settings::FgPresent::BEFORE
+          || (s.motion_vectors != MotionVectorSource::LAUNCHPAD && s.motion_vectors != MotionVectorSource::LUMENITE));
 }
 
 constexpr std::string_view PRESET_TOOLTIP =
@@ -110,9 +169,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::PLACEMENT,
         .label = "Resolution",
-        .tooltip = "The size NR works at. Lower sizes cost less GPU time and video memory, and NR's change is upsampled. "
-                   "Match game follows the game's DLSS render size. NR never works below " UPLIFT_NR_FLOOR_TEXT ". A change applies "
-                   "after half a second and restarts NR's history.",
+        .tooltip = "The size NR works at. Smaller sizes cost less GPU time and video memory. Match game uses DLSS render size. "
+                   "Minimum " UPLIFT_NR_FLOOR_TEXT ".",
         .choices = RESOLUTION_MODES,
         .flags = RESTARTS_HISTORY,
         .get = [](const Settings& s) { return Index(s.resolution_mode); },
@@ -123,8 +181,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::FLOAT,
         .section = SettingSection::LOOK,
         .label = "Intensity",
-        .tooltip = "How strongly NR changes the image, from 0 (off) to 1 (full). NR goes no further than 1: for a stronger result, raise "
-                   "Edit strength in Result shaping.",
+        .tooltip = "How strongly NR changes the image, from 0 (off) to 1 (full). NR itself caps this at 1. Use edit strength in shape.",
         .min = 0.0,
         .max = 10.0,
         .ui_max = 1.0,
@@ -194,9 +251,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::LOOK,
         .label = "Keep faces",
-        .tooltip = "Keeps NR's lighting and shading on characters, but stops NR reshaping their faces. NR runs one more time per frame for "
-                   "this (a little more GPU time and video memory), whatever the pass count. With passes at several stages it protects pass 1's "
-                   "stage; a later stage has its own Keep faces here.",
+        .tooltip = "Keeps NR's lighting on characters but stops it reshaping their faces. Costs one more NR run per frame.",
+        .flags = KEEP_FACES_ROW,
         .get = [](const Settings& s) { return Flag(s.keep_faces); },
         .set = [](Settings& s, double v) { s.keep_faces = (v != 0.0); },
     },
@@ -209,9 +265,10 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
                    "A change restarts the extra run's history.",
         .min = 0.0,
         .max = 1.0,
-        .flags = RESTARTS_HISTORY,
+        .flags = RESTARTS_HISTORY | KEEP_FACES_OWN,
         .get = [](const Settings& s) { return static_cast<double>(s.face_protection); },
         .set = [](Settings& s, double v) { s.face_protection = static_cast<float>(v); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "LightingScale",
@@ -222,17 +279,17 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
                    "the broadest lighting, smaller keeps more of NR's change on faces.",
         .min = 0.5,
         .max = 10.0,
+        .flags = KEEP_FACES_OWN,
         .get = [](const Settings& s) { return static_cast<double>(s.lighting_scale); },
         .set = [](Settings& s, double v) { s.lighting_scale = static_cast<float>(v); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "Mask",
         .kind = SettingKind::CHOICE,
         .section = SettingSection::MASK,
         .label = "NR mask",
-        .tooltip = "Auto: an effect that writes a texture named UPLIFT_MASK limits NR by its red channel: 0 keeps the "
-                   "game's image, 1 is full NR, 0.5 half of NR's change. It is the previous frame's mask. Uplift ships "
-                   "fx/UpliftMask.fx as an example.",
+        .tooltip = "Use the uplift mask shader to mask NR output.",
         .choices = MASK_MODES,
         .get = [](const Settings& s) { return Index(s.mask); },
         .set = [](Settings& s, double v) { s.mask = FromIndex<MaskMode>(v); },
@@ -242,8 +299,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::UINT,
         .section = SettingSection::PLACEMENT,
         .label = "Native mask blend mode",
-        .tooltip = "Experimental NR 310.9.16 control, modes 0-3; default 1. Mode 0 uses a different mask combination and can produce little visible change. "
-                   "This is separate from Uplift's NR mask. NR 310.8 ignores it. Full mask-combination behavior on the Ada compatibility runtime remains under validation.",
+        .tooltip = "Experimental NR 310.9.16 mask mode, 0 to 3 (default 1). May show little change.",
         .min = 0.0,
         .max = 3.0,
         .flags = RESTARTS_HISTORY,
@@ -255,9 +311,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::MASK,
         .label = "UI correction",
-        .tooltip = "NR's UI correction needs the HUD-less image, which Uplift does not capture: after DLSS it is not "
-                   "needed (the HUD is drawn after NR); on the presented image use the NR mask. On forwards the "
-                   "runtime's switch only.",
+        .tooltip = "On only passes the switch to NR - may not work",
         .choices = UI_CORRECTION_MODES,
         .get = [](const Settings& s) { return Index(s.ui_correction); },
         .set = [](Settings& s, double v) { s.ui_correction = FromIndex<UiCorrection>(v); },
@@ -267,8 +321,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::RESULT,
         .label = "Shape result",
-        .tooltip = "Reshapes NR's result live, without restarting its history. Off leaves NR's output exactly as it is. With passes at "
-                   "several stages it shapes only what the last stage changes; earlier stages' changes pass through as they are.",
+        .tooltip = "More detailed tweaking of shadows, highlights etc",
         .get = [](const Settings& s) { return Flag(s.look.enabled); },
         .set = [](Settings& s, double v) { s.look.enabled = (v != 0.0); },
     },
@@ -444,8 +497,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::LIMITS,
         .label = "Stabilise",
-        .tooltip = "Smooths NR's broad change over time. Static suits still views; Motion follows the motion vectors "
-                   "and, without them, drops history where the image changes. Both add a little lag to lighting changes.",
+        .tooltip = "Smooths NR's broad change over time. Static suits still views; Motion follows the motion vectors. Both add a little "
+                   "lag to lighting changes.",
         .choices = STABILIZE_MODES,
         .get = [](const Settings& s) { return Index(s.look.stabilize); },
         .set = [](Settings& s, double v) { s.look.stabilize = FromIndex<look::StabilizeMode>(v); },
@@ -460,6 +513,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 2000.0,
         .get = [](const Settings& s) { return static_cast<double>(s.look.stabilize_ms); },
         .set = [](Settings& s, double v) { s.look.stabilize_ms = static_cast<float>(v); },
+        .hidden = StabilizeOff,
+        .slider_format = STABILIZE_MS_SLIDER_FORMAT,
     },
     {
         .key = "StabilizeDetail",
@@ -469,6 +524,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "Also smooths NR's small-scale change.",
         .get = [](const Settings& s) { return Flag(s.look.stabilize_detail); },
         .set = [](Settings& s, double v) { s.look.stabilize_detail = (v != 0.0); },
+        .hidden = StabilizeOff,
     },
     {
         .key = "Source",
@@ -486,8 +542,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::PLACEMENT,
         .label = "Before upscaling (pre-SR)",
-        .tooltip = "NR enhances the game's render-resolution image, and the game's DLSS upscales the result. With Ray Reconstruction, NR works "
-                   "on its input, before it denoises and upscales it. A render below " UPLIFT_NR_FLOOR_TEXT " is padded, so NR never runs below that size.",
+        .tooltip = "NR works on the game's render-resolution image, and the game's DLSS upscales the result. With Ray Reconstruction, NR "
+                   "works on its input. Never below " UPLIFT_NR_FLOOR_TEXT ".",
         .get = [](const Settings& s) { return Flag(s.pre_upscale); },
         .set = [](Settings& s, double v) { s.pre_upscale = (v != 0.0); },
     },
@@ -499,9 +555,11 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "The work size for Resolution = Custom, in percent of the output. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
-        .flags = SLIDER_RANGE_ONLY,  // a share of the output: 100 % at most
+        .flags = SLIDER_RANGE_ONLY | SLIDER_ALWAYS_CLAMP,  // a share of the output: 100 % at most
         .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale); },
         .set = [](Settings& s, double v) { s.resolution_scale = static_cast<float>(v); },
+        .hidden = ResolutionScaleNotCustom,
+        .slider_format = RESOLUTION_SCALE_SLIDER_FORMAT,
     },
     {
         .key = "Upsampling",
@@ -535,9 +593,11 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "The work size for Resolution at After DLSS = Custom, in percent of the output. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
-        .flags = SLIDER_RANGE_ONLY,  // a share of the output: 100 % at most
+        .flags = SLIDER_RANGE_ONLY | SLIDER_ALWAYS_CLAMP,  // a share of the output: 100 % at most
         .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale_after_dlss); },
         .set = [](Settings& s, double v) { s.resolution_scale_after_dlss = static_cast<float>(v); },
+        .hidden = ResolutionScaleAfterDlssNotCustom,
+        .slider_format = RESOLUTION_SCALE_SLIDER_FORMAT,
     },
     {
         .key = "ResolutionPresent",
@@ -559,9 +619,11 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "The work size for Resolution at Present = Custom, in percent of the output. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
-        .flags = SLIDER_RANGE_ONLY,  // a share of the output: 100 % at most
+        .flags = SLIDER_RANGE_ONLY | SLIDER_ALWAYS_CLAMP,  // a share of the output: 100 % at most
         .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale_present); },
         .set = [](Settings& s, double v) { s.resolution_scale_present = static_cast<float>(v); },
+        .hidden = ResolutionScalePresentNotCustom,
+        .slider_format = RESOLUTION_SCALE_SLIDER_FORMAT,
     },
     {
         // Split chain: a later stage group's own Keep faces, default off. Pass 1's group follows Keep faces itself.
@@ -570,8 +632,10 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Keep faces here",
         .tooltip = "Also protects faces in the passes at After DLSS. Costs one more NR run per frame.",
+        .flags = KEEP_FACES_HERE,
         .get = [](const Settings& s) { return Flag(s.keep_faces_after_dlss); },
         .set = [](Settings& s, double v) { s.keep_faces_after_dlss = (v != 0.0); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "KeepFacesPresent",
@@ -579,19 +643,17 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Keep faces here",
         .tooltip = "Also protects faces in the passes at Present. Costs one more NR run per frame.",
+        .flags = KEEP_FACES_HERE,
         .get = [](const Settings& s) { return Flag(s.keep_faces_present); },
         .set = [](Settings& s, double v) { s.keep_faces_present = (v != 0.0); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "MotionVectors",
         .kind = SettingKind::CHOICE,
         .section = SettingSection::PLACEMENT,
         .label = "Motion vectors",
-        .tooltip = "Inside the game's frame (NR stage After DLSS or Before upscaling), Auto and DLSS use the game's own DLSS motion "
-                   "vectors, and None uses none. On the presented frame (NR stage Present), Auto and DLSS use copies of them where "
-                   "Uplift can make them; otherwise NR runs there without them. Launchpad uses iMMERSE Launchpad's motion on the "
-                   "presented image, through Uplift.fx's Uplift technique placed below Launchpad. Lumenite does the same with LumeniteFX's "
-                   "Kernel: turn Kernel on and put Uplift below it. Auto takes DLSS's, then Launchpad's, then Lumenite's.",
+        .tooltip = "Where NR gets its motion.",
         .choices = MOTION_VECTORS,
         .get = [](const Settings& s) { return Index(s.motion_vectors); },
         .set = [](Settings& s, double v) { s.motion_vectors = FromIndex<MotionVectorSource>(v); },
@@ -705,7 +767,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::ADVANCED,
         .label = "Present with frame generation",
-        .tooltip = "With frame generation active, Before Framegen processes the finished real frame before Streamline generates frames. On Present processes each frame ReShade presents, including generated frames when ReShade runs after frame generation.",
+        .tooltip = "With FG on - Before Framegen processes each real frame before frames are generated. On Present also processes "
+                   "generated frames when ReShade runs after frame generation - EXPENSIVE.",
         .enable_warning = "NR will run on every presented frame, including the frames created by frame generation.\n\n"
                           "This can dramatically reduce FPS and wipe out much of frame generation's performance benefit. At 3x or 4x "
                           "frame generation, each Present pass may run three or four times per game-rendered frame. Higher resolutions "
@@ -725,14 +788,15 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .choices = BEFORE_FG_MOTION,
         .get = [](const Settings& s) { return Index(s.before_fg_motion); },
         .set = [](Settings& s, double v) { s.before_fg_motion = FromIndex<Settings::FgMotion>(v); },
+        .hidden = BeforeFGMotionUnused,
     },
     {
         .key = "AllowCrossQueuePasses",
         .kind = SettingKind::BOOL,
         .section = SettingSection::ADVANCED,
         .label = "Allow cross-queue passes (DX12, experimental)",
-        .tooltip = "Allows a DX12 split between a DLSS stage and Present when they use different GPU queues. May reduce FPS or cause "
-                   "image problems. With frame generation, Present with frame generation must also be enabled.",
+        .tooltip = "DX12: allows passes split between a DLSS stage and Present on different GPU queues. May cost FPS or cause image "
+                   "problems.",
         .enable_warning = "Allows a pass at After DLSS or Before upscaling and a later pass at Present to run on different GPU queues "
                           "in a 64-bit Direct3D 12 game.\n\n"
                           "This can reduce FPS and increase latency as the passes compete for the same GPU. The cost depends on the game, "
@@ -792,10 +856,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::FIXES_COLOR,
         .label = "Input exposure",
-        .tooltip = "Where NR's input brightness comes from on scene-linear images. Auto: the game's DLSS exposure, or a blend "
-                   "of it with Uplift's meter, while it looks right, else the meter (Details says which). Game: DLSS's "
-                   "exposure (none on the presented image). Metered: Uplift's own meter. Manual: Diffuse white alone. sRGB, "
-                   "scRGB and HDR10 images are never metered.",
+        .tooltip = "Where NR's input brightness comes from on scene-linear images.",
         .choices = INPUT_EXPOSURES,
         .get = [](const Settings& s) { return Index(s.input_exposure); },
         .set = [](Settings& s, double v) { s.input_exposure = FromIndex<color::InputExposure>(v); },
@@ -806,11 +867,12 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::FIXES_COLOR,
         .label = "Auto exposure",
-        .tooltip = "How Auto uses the game's exposure. Blend: a mix of the game's exposure and Uplift's meter, set by the "
-                   "slider below. Switch: the game's own exposure. A broken game exposure always falls back to the meter.",
+        .tooltip = "How Auto uses the game's exposure. Blend: mixes it with Uplift's meter, by the slider below. Switch: the game's alone. "
+                   "A broken game exposure falls back to the meter.",
         .choices = AUTO_EXPOSURE_MODES,
         .get = [](const Settings& s) { return Index(s.auto_exposure_mode); },
         .set = [](Settings& s, double v) { s.auto_exposure_mode = FromIndex<color::AutoExposureMode>(v); },
+        .hidden = AutoExposureModeHidden,
     },
     {
         // Shown only for Auto's Blend. Stored 0..1, shown as a percentage.
@@ -825,6 +887,9 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .flags = SLIDER_RANGE_ONLY,  // a blend: 100 % is the meter alone
         .get = [](const Settings& s) { return static_cast<double>(s.auto_exposure_blend); },
         .set = [](Settings& s, double v) { s.auto_exposure_blend = static_cast<float>(v); },
+        .hidden = AutoExposureBlendHidden,
+        .slider_format = AUTO_EXPOSURE_BLEND_SLIDER_FORMAT,
+        .display_scale = AUTO_EXPOSURE_BLEND_DISPLAY_SCALE,
     },
     {
         .key = "ExposureAdapt",
@@ -835,6 +900,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .choices = ADAPT_MODES,
         .get = [](const Settings& s) { return Index(s.exposure_adapt); },
         .set = [](Settings& s, double v) { s.exposure_adapt = FromIndex<ExposureAdapt>(v); },
+        .hidden = ExposureAdaptationHidden,
     },
     {
         .key = "AdaptBrighterStops",
@@ -846,6 +912,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 20.0,
         .get = [](const Settings& s) { return static_cast<double>(s.adapt_brighter_stops); },
         .set = [](Settings& s, double v) { s.adapt_brighter_stops = static_cast<float>(v); },
+        .hidden = ExposureAdaptationHidden,
     },
     {
         .key = "AdaptDarkerStops",
@@ -857,6 +924,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 20.0,
         .get = [](const Settings& s) { return static_cast<double>(s.adapt_darker_stops); },
         .set = [](Settings& s, double v) { s.adapt_darker_stops = static_cast<float>(v); },
+        .hidden = ExposureAdaptationHidden,
     },
     {
         .key = "LinearUnitNits",
@@ -996,9 +1064,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::PLACEMENT,
         .label = "Network preset",
-        .tooltip = "NR 310.9.16: preset A (1) selects Legacy; preset B (2) selects Small FP8. Runtime default uses B. C-G have no weights in this DLL. "
-                   "Changing the network recreates NR and resets history. Details shows the runtime-confirmed name and recorded evaluations. "
-                   "NR 310.8 always uses Legacy. This is separate from Style A/B/C in Look.",
+        .tooltip = "Which NR network runs.",
         .choices = NR_NETWORKS,
         .flags = RESTARTS_HISTORY | NETWORK_PRESET,
         .get = [](const Settings& s) { return static_cast<double>(s.preset); },
@@ -1026,6 +1092,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 60.0,
         .get = [](const Settings& s) { return static_cast<double>(s.grace_seconds); },
         .set = [](Settings& s, double v) { s.grace_seconds = static_cast<float>(v); },
+        .slider_format = GRACE_SLIDER_FORMAT,
     },
     {
         .key = "BudgetMarginMB",
@@ -1044,9 +1111,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::ADVANCED,
         .label = "Video memory check",
-        .tooltip = "Careful leaves the game its budget and pauses NR when the game needs the memory back. Relaxed lets NR go about 1 GB past the "
-                   "game's budget. Off never checks, like other DLSS-NR add-ons. Relaxed and Off can stutter in games that really use all their "
-                   "video memory.",
+        .tooltip = "Careful pauses NR when the game needs its video memory back. Relaxed lets NR use about 1 GB more. Off never checks.",
         .choices = VRAM_CHECKS,
         .get = [](const Settings& s) { return Index(s.vram_check); },
         .set = [](Settings& s, double v) { s.vram_check = FromIndex<nr::VramCheck>(v); },
@@ -1075,6 +1140,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::ADVANCED,
         .label = "Show the face mask",
         .tooltip = "Tints what Keep faces protects in magenta, to check what it finds while you tune it. Turn it off to see the result.",
+        .flags = KEEP_FACES_ROW,
         .get = [](const Settings& s) { return Flag(s.show_face_mask); },
         .set = [](Settings& s, double v) { s.show_face_mask = (v != 0.0); },
     },
@@ -1084,24 +1150,28 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::FLOAT,
         .section = SettingSection::ADVANCED,
         .label = "Mask threshold (% of brightness)",
-        .tooltip = "How much NR's change on a pixel, against the pixel's own brightness, still counts as noise. Raise it if the face mask speckles "
-                   "the background or bright glints; lower it if faces are only faintly tinted.",
+        .tooltip = "How large NR's change must be, against the pixel's brightness, to count as more than noise. Raise it if the mask "
+                   "speckles the background; lower it if faces are only faintly tinted.",
         .min = 0.0,
         .max = 10.0,
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.threshold); },
         .set = [](Settings& s, double v) { s.face_tuning.threshold = static_cast<float>(v); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "FaceMaskFull",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::ADVANCED,
         .label = "Full protection at (% of brightness)",
-        .tooltip = "The change, against the pixel's own brightness, from which a pixel counts fully as face. Lower it if faces are tinted only in "
-                   "patches; raise it if hair or clothes are tinted too. Always counts as above Mask threshold.",
+        .tooltip = "The change, against the pixel's brightness, at which a pixel counts fully as face. Lower it if faces are tinted in "
+                   "patches; raise it if hair or clothes are tinted too.",
         .min = 1.0,
         .max = 30.0,
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.full); },
         .set = [](Settings& s, double v) { s.face_tuning.full = static_cast<float>(v); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "FaceMaskStrength",
@@ -1111,8 +1181,10 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "Raise it if the mask has holes inside faces; lower it if it spreads past them.",
         .min = 0.5,
         .max = 4.0,
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.strength); },
         .set = [](Settings& s, double v) { s.face_tuning.strength = static_cast<float>(v); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "FaceMaskSoftness",
@@ -1122,8 +1194,10 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "Raise it if the mask looks blotchy or flickers; lower it if it spreads past faces.",
         .min = 0.1,
         .max = 2.0,
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.softness); },
         .set = [](Settings& s, double v) { s.face_tuning.softness = static_cast<float>(v); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "FaceEdgeFalloff",
@@ -1133,8 +1207,10 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "Lower it if light glows past a character's outline; raise it if outlines show a dark rim.",
         .min = 0.05,
         .max = 1.0,
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.edge_falloff); },
         .set = [](Settings& s, double v) { s.face_tuning.edge_falloff = static_cast<float>(v); },
+        .hidden = KeepFacesOff,
     },
     {
         // Lighting comes back only where the mask is dense at the Lighting scale.
@@ -1142,12 +1218,14 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::FLOAT,
         .section = SettingSection::ADVANCED,
         .label = "Lighting density",
-        .tooltip = "How densely a region must be face before NR's lighting comes back in full there. Raise it if glints or bright edges leave "
-                   "glowing spots on characters; lower it if the lighting fades near the edges of faces.",
+        .tooltip = "How much of a region must be face before NR's lighting returns in full. Raise it if glints leave glowing spots; lower "
+                   "it if lighting fades at the edges of faces.",
         .min = 0.05,
         .max = 1.0,
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.density); },
         .set = [](Settings& s, double v) { s.face_tuning.density = static_cast<float>(v); },
+        .hidden = KeepFacesOff,
     },
     // Shader constants only.
     {
@@ -1155,10 +1233,12 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::ADVANCED,
         .label = "Fill skin by colour",
-        .tooltip = "Grows the face mask over nearby skin of the same colour that NR's change did not mark, such as skin in shadow, so a second pass "
-                   "cannot reshape it either. Turn it off if clothes or hair of a skin-like colour turn magenta.",
+        .tooltip = "Extends the face mask over nearby skin of the same colour, such as skin in shadow. Turn it off if skin-coloured "
+                   "clothes or hair turn magenta.",
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return Flag(s.face_tuning.fill_skin); },
         .set = [](Settings& s, double v) { s.face_tuning.fill_skin = (v != 0.0); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "FaceFillRadius",
@@ -1169,8 +1249,10 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
                    "nearby surfaces.",
         .min = 0.5,
         .max = 10.0,
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.fill_radius); },
         .set = [](Settings& s, double v) { s.face_tuning.fill_radius = static_cast<float>(v); },
+        .hidden = KeepFacesOrFillOff,
     },
     {
         .key = "FaceFillTolerance",
@@ -1181,8 +1263,10 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
                    "it if clothes or hair turn magenta.",
         .min = 0.005,
         .max = 0.2,
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.fill_tolerance); },
         .set = [](Settings& s, double v) { s.face_tuning.fill_tolerance = static_cast<float>(v); },
+        .hidden = KeepFacesOrFillOff,
     },
     {
         // The unpublished FaceSpeckFilter Boolean has no migration; this size setting is the persisted control.
@@ -1190,12 +1274,14 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
         .label = "Remove specks (px)",
-        .tooltip = "Lets bright specks up to about this size (glints, sparkles) keep NR's normal result instead of the protected one. Larger sizes also stop "
-                   "protecting tiny face details of that size, such as a catchlight or a far-away eye. 0 turns it off.",
+        .tooltip = "Bright specks up to this size, such as glints, keep NR's normal result. Larger sizes can also unprotect tiny face "
+                   "details like catchlights. 0 turns it off.",
         .min = 0.0,
         .max = 3.0,
+        .flags = KEEP_FACES_TUNING,
         .get = [](const Settings& s) { return static_cast<double>(s.face_tuning.speck_size); },
         .set = [](Settings& s, double v) { s.face_tuning.speck_size = static_cast<uint32_t>(v); },
+        .hidden = KeepFacesOff,
     },
     {
         .key = "LogLevel",
@@ -1245,12 +1331,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::ADVANCED,
         .label = "Vulkan NR at Present",
-        .tooltip = "64-bit Vulkan games. Native runs NR on the game's own Vulkan device; where it cannot, NR uses a private Direct3D 12 device, and "
-                   "where that cannot either, Uplift's helper process; Details says why. Direct3D 12 starts at the private device. Helper always runs "
-                   "NR in Uplift's helper process. Only Native runs NR inside the game's DLSS: Direct3D 12 and Helper run it at Present, so picking one "
-                   "moves After DLSS or Before upscaling to Present. Uplift adds NGX's extensions to the game's device only when this is Native at the "
-                   "game's start. "
-                   "After native NR's first use the driver keeps about 0.6 GB with the game's device until the game exits.",
+        .tooltip = "Where NR runs in 64-bit Vulkan games. Native: on the game's device, else a private Direct3D 12 device, else Uplift's "
+                   "helper. Direct3D 12 and Helper run NR at Present only.",
         .choices = VULKAN_NR_MODES,
         .get = [](const Settings& s) { return Index(s.vulkan_nr); },
         .set = [](Settings& s, double v) { s.vulkan_nr = FromIndex<VulkanNrMode>(v); },
@@ -1280,8 +1362,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::HIDDEN,
         .label = "Adjust Vulkan devices when the game creates them (restart the game)",
-        .tooltip = "1 adds the sharing extensions NR needs to the game's Vulkan device at creation; 0 leaves the device as the game asked "
-                   "and NR runs CPU-ordered. Uplift sets 0 itself when the last start with 1 never reached its first frame.",
+        .tooltip = "1 adds the sharing extensions NR needs to the game's Vulkan device; 0 leaves the device as is and NR runs CPU-ordered.",
         .flags = NEXT_START,
         .get = [](const Settings& s) { return Flag(s.adjust_vulkan_devices); },
         .set = [](Settings& s, double v) { s.adjust_vulkan_devices = (v != 0.0); },
@@ -1292,9 +1373,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::HIDDEN,
         .label = "Add NGX's extensions to Vulkan devices when the game creates them (restart the game)",
-        .tooltip = "64-bit Vulkan games, with AdjustVulkanDevices = 1. 1 also adds the extensions and bufferDeviceAddress NGX needs to run NR natively "
-                   "on the game's device; 0 leaves them out, and NR at Present uses the Direct3D 12 route. Uplift sets 0 itself when the last start "
-                   "with them never reached its first frame.",
+        .tooltip = "Needs AdjustVulkanDevices = 1. 1 adds what NGX needs to run NR natively on the game's Vulkan device; 0 uses the "
+                   "Direct3D 12 route. Uplift sets 0 itself after a failed start.",
         .flags = NEXT_START,
         .get = [](const Settings& s) { return Flag(s.adjust_vulkan_devices_for_ngx); },
         .set = [](Settings& s, double v) { s.adjust_vulkan_devices_for_ngx = (v != 0.0); },
@@ -1305,9 +1385,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::HIDDEN,
         .label = "Allow native Vulkan NR at Present (restart the game)",
-        .tooltip = "64-bit Vulkan games. 1 lets NR at Present run natively on the game's Vulkan device when Vulkan NR at Present allows it; 0 starts the "
-                   "route at the next one. Uplift sets 0 itself when the last start with native NR ended before it had run for a few seconds, or the "
-                   "game's device was lost while it ran.",
+        .tooltip = "1 lets NR at Present run natively on the game's Vulkan device; 0 starts at the next route. Uplift sets 0 itself when "
+                   "native NR failed early or lost the device.",
         .flags = NEXT_START,
         .get = [](const Settings& s) { return Flag(s.vulkan_native_nr); },
         .set = [](Settings& s, double v) { s.vulkan_native_nr = (v != 0.0); },
@@ -1318,9 +1397,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::UINT,
         .section = SettingSection::HIDDEN,
         .label = "Diagnostic: remove Uplift's private device after this many frames",
-        .tooltip = "Diagnostic only. N > 0 removes Uplift's own private Direct3D 12 device (ID3D12Device5::RemoveDevice; never the game's device, so "
-                   "Direct3D 12 games are untouched) once NR has run N frames on it, and presses Retry now itself about a second after each stop "
-                   "that may still be retried. 0 (the default) is off.",
+        .tooltip = "Diagnostic only. N > 0 removes Uplift's private Direct3D 12 device (never the game's) after N frames of NR, then "
+                   "retries by itself. 0, the default, is off.",
         .min = 0.0,
         .max = 1000000.0,
         .get = [](const Settings& s) { return static_cast<double>(s.diagnostic_remove_device); },
@@ -1451,8 +1529,8 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .kind = SettingKind::FLOAT,
           .section = SettingSection::PASSES,
           .label = "Intensity",
-          .tooltip = "How strongly this pass changes the image, from 0 (off) to 1 (full). NR goes no further than 1: for a stronger "
-                     "result, raise Edit strength in Result shaping.",
+          .tooltip = "How strongly this pass changes the image, from 0 (off) to 1 (full). NR itself caps this at 1. Use edit strength in "
+                     "shape.",
           .min = 0.0,
           .max = 10.0,
           .ui_max = 1.0,
@@ -1565,8 +1643,7 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .kind = SettingKind::CHOICE,
           .section = SettingSection::PASSES,
           .label = "Network preset",
-          .tooltip = "Same as pass 1 inherits the Setup network. A selects Legacy; B selects Small FP8. Independent of look sharing. "
-                     "Changing the network recreates NR and resets history. Details reports each pass's runtime-confirmed network. NR 310.8 only provides Legacy.",
+          .tooltip = "Which NR network this pass runs. Same as pass 1 uses the Setup network.",
           .choices = PASS_NETWORKS,
           .flags = PASS_SWITCH | NETWORK_PRESET | RESTARTS_HISTORY,
           .get = &PassGet<Index, &PassSettings::preset>,
@@ -1693,15 +1770,8 @@ std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settin
   return {};
 }
 
-bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings) {
-  const bool automatic = (settings.input_exposure == color::InputExposure::AUTO);
-  // The Adaptation rows matter wherever the meter can be used: Metered, and Auto, which meters when the game's exposure is missing, broken or blended.
-  if (descriptor.key == "ExposureAdapt" || descriptor.key == "AdaptBrighterStops" || descriptor.key == "AdaptDarkerStops") {
-    return (!automatic && settings.input_exposure != color::InputExposure::METERED);
-  }
-  if (descriptor.key == "AutoExposureMode") return !automatic;
-  if (descriptor.key == "AutoExposureBlend") return (!automatic || settings.auto_exposure_mode != color::AutoExposureMode::BLEND);
-  return false;
+bool RowHidden(const SettingDescriptor& descriptor, const Settings& settings) {
+  return descriptor.hidden != nullptr && descriptor.hidden(settings);
 }
 
 bool DiffuseWhiteInExposureGroup(const Settings& settings) {

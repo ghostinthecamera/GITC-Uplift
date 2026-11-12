@@ -462,6 +462,7 @@ std::string_view BeforeFgUnavailable(const BeforeFgFacts& facts) {
   if (!facts.api_supported) return BEFORE_FG_API_REASON;
   if (!facts.hooks_installed) return text::BeforeFgNoteInfo(text::BeforeFgNote::HOOKS_UNAVAILABLE).line;
   if (!facts.streamline_loaded) return BEFORE_FG_NO_STREAMLINE_REASON;
+  if (!facts.frame_generation_running) return BEFORE_FG_FG_OFF_REASON;
   return {};
 }
 
@@ -520,8 +521,7 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
   }
   if (!facts.blocked.empty()) {
     if (facts.runtime_in_game_folder) {
-      return card(CardStage::RUNTIME, "Move nvngx_dlssnr.dll", facts.blocked,
-                  {std::format("Move it into the GITC-Uplift folder next to {}, then restart the game.", facts.addon_file)}, CardButton::NONE);
+      return card(CardStage::RUNTIME, std::string(RUNTIME_COPY_TITLE), facts.blocked, {std::format(RUNTIME_COPY_ACTION, facts.addon_file)}, CardButton::NONE);
     }
     if (facts.blocked_stage == CardStage::RUNTIME) {
       return card(CardStage::RUNTIME, "The NR runtime was not found", facts.blocked,

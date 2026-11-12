@@ -284,6 +284,9 @@ class HelperFront {
   std::string settings_text_;          // ui::SaveSettings of the host's settings, for the helper
 };
 
+// The overlay's Keep faces reason on the helper path: empty when no status is known yet, or when Keep faces can run.
+[[nodiscard]] std::string_view HelperKeepFacesUnavailable(const ipc::Status* status);
+
 // Registers `callback` raw for ReShade's create_device event (id 96, add-on API 11+; the pinned v6.0.0 headers stop at 92): a ReShade
 // without the event ignores the id (addon_manager.cpp:556-560), and CreateDevice is never called. Both hosts do it in AddonInit.
 void RegisterCreateDeviceEvent(bool (*callback)(reshade::api::device_api device_api, uint32_t& api_version));

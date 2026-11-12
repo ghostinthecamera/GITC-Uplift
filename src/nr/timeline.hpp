@@ -128,6 +128,9 @@ class Timeline {
   // the same address keeps counting up from it.
   void ForgetQueue(ID3D12CommandQueue* queue);
   [[nodiscard]] size_t OutstandingTokens() const;
+  // Cumulative counts of the tokens StampThread and StampAged stamped (a failed Signal stamps none), for the diagnostic log.
+  [[nodiscard]] uint64_t ThreadStamps() const { return thread_stamps_.load(std::memory_order_relaxed); }
+  [[nodiscard]] uint64_t AgedStamps() const { return aged_stamps_.load(std::memory_order_relaxed); }
   // DLSS-stage NR tokens identify queues for StageQueueOtherThan and StageWorkDone; callers gate other queues through completion checks without GPU waits.
   // Marking an already-submitted token records its queue immediately; Resubmit also marks the fresh token on its queue.
   void MarkStageToken(uint64_t token);
@@ -165,8 +168,8 @@ class Timeline {
   [[nodiscard]] uint64_t LastToken() const;
   // True when every token with an id up to `through` is complete.
   [[nodiscard]] bool TokensComplete(uint64_t through) const;
-  // With the token lock held: one Signal per queue for the SUBMITTED tokens `matches` accepts.
-  void StampLocked(const std::function<bool(const Token&)>& matches);
+  // With the token lock held: one Signal per queue for the SUBMITTED tokens `matches` accepts. Returns how many tokens it stamped.
+  uint64_t StampLocked(const std::function<bool(const Token&)>& matches);
 
   CompletedFn completed_;
   SignalFn signal_;
@@ -182,6 +185,8 @@ class Timeline {
   std::map<uint64_t, Token> tokens_;  // outstanding tokens by id
   uint64_t last_token_ = 0u;
   std::atomic<uint32_t> unstamped_{0u};  // SUBMITTED tokens: lets StampThread return without the lock
+  std::atomic<uint64_t> thread_stamps_{0u};  // tokens StampThread stamped, cumulative
+  std::atomic<uint64_t> aged_stamps_{0u};    // tokens StampAged stamped, cumulative
   std::unique_ptr<QueueFences> fences_;
   std::map<ID3D12CommandQueue*, uint64_t> queue_values_;  // the last value signalled on each queue's fence
   // The latest present-queue switch's frame and barrier token, both guarded by

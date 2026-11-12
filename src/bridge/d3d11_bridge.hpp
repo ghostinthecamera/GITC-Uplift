@@ -30,6 +30,9 @@ namespace uplift::bridge {
 inline constexpr D3D12_RESOURCE_STATES SHADER_READ =
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
+// The game API's name in the Direct3D 11 bridge's texts ("The Direct3D 11 bridge stopped: ...").
+inline constexpr std::string_view D3D11_BRIDGE_LABEL = "Direct3D 11";
+
 // A whole-resource transition barrier.
 void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
                 D3D12_RESOURCE_STATES after);
@@ -144,7 +147,7 @@ class D3D11Bridge final : public PrivateDeviceBridge {
   // outside its own lock.
   // `label` names the game's API in the bridge's log and status texts ("Direct3D 10" for the D3D10 relay).
   static std::unique_ptr<D3D11Bridge> Create(ID3D11Device* device, Microsoft::WRL::ComPtr<ID3D12Device>* created,
-                                             std::string* error, std::string_view label = "Direct3D 11");
+                                             std::string* error, std::string_view label = D3D11_BRIDGE_LABEL);
   // Waits up to 2 s for the private queue, then releases everything, the created device last. Under ReShade, destroy
   // it only outside the add-on's lock. It never signals a fence: Stop does, before DeviceContext::Teardown.
   ~D3D11Bridge();
@@ -191,6 +194,9 @@ class D3D11Bridge final : public PrivateDeviceBridge {
   // fences from the CPU, up to the highest value any wait on them was queued for, so neither the game's queue nor the
   // private one can stay blocked. On a watchdog trip, and before DeviceContext::Teardown when the game's device goes.
   void Stop(std::string reason) override;
+  // The owner that must pass the latch on (D3D10Bridge into its relay) sets it once, and clears it before it is destroyed. The first Stop calls it after the
+  // latch is set and the fences are signalled; the 64-bit D3D11 path sets none.
+  void OnLatch(std::function<void()> handler) { on_latch_ = std::move(handler); }
   // Diagnostic only, for DiagnosticRemoveDevice's mid-frame removal (never on a normal frame): flushes the game's immediate context and waits on the CPU, up to
   // `cap_ms`, until the game's queue passed its last signal to the private queue (the copies in ahead of it are done, so the game's queue is at its wait).
   // True when it did.
@@ -317,7 +323,8 @@ class D3D11Bridge final : public PrivateDeviceBridge {
   uint64_t dlss_shares_made_ = 0u;  // DlssSharesMade
   std::string problem_;                // the back buffer's problem, logged once per change
   std::string latch_;                  // set once: the bridge stopped for the session
-  std::string label_ = "Direct3D 11";  // Create's label
+  std::function<void()> on_latch_;     // called once, when the latch is first set, by the owner that must pass it on
+  std::string label_{D3D11_BRIDGE_LABEL};  // Create's label
 };
 
 }  // namespace uplift::bridge

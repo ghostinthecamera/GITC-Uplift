@@ -754,7 +754,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   }
   const PresentMotionPick pick = PickPresentMotion(copy_frames, frame);
   if (pick.slot) {
-    // This frame's copy, else (flicker fix) the newest at most PRESENT_MOTION_MAX_AGE frames older: still DLSS's vectors, so no provider switch.
+    // This frame's copy, else the newest at most PRESENT_MOTION_MAX_AGE frames older: still DLSS's vectors, so no provider switch.
     const size_t copy = *pick.slot;
     inputs.motion = {.resource = motion_copies_.textures[copy].Get()};  // full subrect, scale (1, 1)
     motion_copies_.last_use[copy] = slot_marks_[slot];

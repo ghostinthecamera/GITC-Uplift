@@ -9,6 +9,7 @@
 #include <optional>
 #include <vector>
 
+#include "addon/submit_epoch.hpp"
 #include "addon/vk_dlss_context.hpp"
 #include "sources/after_dlss_source.hpp"
 #include "state/compute_shadow.hpp"
@@ -24,6 +25,9 @@ struct __declspec(uuid("3f2a9c64-8b0e-4f1d-9e57-c1a2b3d4e5f6")) ListState {
   std::vector<uint64_t> tokens;  // completion tokens recorded on this list and not yet submitted
   uint64_t first_token = 0u;     // the first Uplift token since the last Reset; 0 = none
   bool executed = false;         // submitted at least once since the last Reset
+  // SubmitEpochs::AtReset at the list's last Reset (or creation); 0 never counts as a later call. Handed over like `tokens`, `first_token` and
+  // `executed`: the game never resets a list while it executes it.
+  uint64_t reset_epoch = NO_SUBMIT_EPOCH;
 };
 
 // init_command_list: creates the list's state and stamps the native list with its address.

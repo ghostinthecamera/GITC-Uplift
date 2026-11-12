@@ -20,6 +20,7 @@
 #include "sources/auto_exposure.hpp"
 #include "sources/look_plan.hpp"
 #include "sources/motion_source.hpp"
+#include "sources/present_motion_counts.hpp"
 #include "sources/present_motion_ring.hpp"
 
 namespace uplift::sources {
@@ -318,21 +319,9 @@ class NrPipeline final : private nr::PassResolver {
     ExposureReport exposure_report;
     MotionSource present_motion = MotionSource::NONE;  // the last present's provider
   };
-  struct PresentMotionCounters {
-    uint64_t evaluates = 0u;
-    uint64_t presents = 0u;
-    uint64_t copies = 0u;
-    uint64_t skipped_input = 0u;
-    uint64_t skipped_ring = 0u;
-    uint64_t skipped_slot = 0u;
-    uint64_t own = 0u;
-    uint64_t older = 0u;
-    uint64_t missed = 0u;
+  struct PresentMotionCounters : PresentMotionCounts {
     uint64_t age_max = 0u;
-    uint64_t lag_max = 0u;
     uint64_t resets = 0u;
-    float offset_x = 0.f;
-    float offset_y = 0.f;
     std::chrono::steady_clock::time_point since;
   };
 

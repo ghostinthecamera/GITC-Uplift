@@ -60,4 +60,10 @@ FgMode Mode();
   return mode != FgMode::OFF && (mode == FgMode::ON || mode == FgMode::AUTO || detected);
 }
 
+// Whether the overlay shows the game's frame generation as running: the stage diagram's FG box and the Before FG choice read this one
+// fact. `detected`: the device's frame generation detector or a running Before FG pass; `owns_frame`: Before FG's outer Present owns the frame.
+[[nodiscard]] constexpr bool FrameGenerationShown(FgMode mode, bool detected, bool owns_frame) {
+  return owns_frame || FrameGenerationActive(mode, detected);
+}
+
 }  // namespace uplift::addon::streamline

@@ -100,8 +100,9 @@ class VkNrPipeline final : private nr::PassResolver {
   // work image of `layout` (empty: the region's own size, Full), the Session's passes, the change path and the look, decode (in place), closing barrier.
   // The caller has checked the placement (the main handle, a tracked list), ticked the Session and issued its completion token before this call (the
   // token's event is set at the end of the hooked evaluate, whatever the result). `recorded` says whether anything went onto `buffer`. Nothing is recorded
-  // for: Intensity 0 ("intensity 0": exact pass-through), an output format without a variant ("unsupported format"), a variant whose pipelines cannot be
-  // built ("pipeline failed"), a region or a canvas below the NR floor (640x360) ("frame too small").
+  // for: Intensity 0 (nr::SkipReason::INTENSITY_ZERO: exact pass-through), an output format without a variant (nr::SkipReason::UNSUPPORTED_FORMAT),
+  // a variant whose pipelines cannot be built (nr::SkipReason::PIPELINE_FAILED), a region or a canvas below the NR floor (640x360)
+  // (nr::SkipReason::FRAME_TOO_SMALL).
   // Split chain: each recording below runs `part` of the chain (its Session slice, on its stage group's set); the default is the whole chain on
   // set 0, the single chain of before the split.
   PipelineResult RecordAfterDlss(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
@@ -112,9 +113,9 @@ class VkNrPipeline final : private nr::PassResolver {
   // canvas (`layout.canvas`; the image itself when it meets the floor), the game's motion vectors are copied into a canvas motion image, NR runs at the
   // canvas, and the decode composes NR's change into PrivateColor() at the region, upsampled from the work image (a render region that moves while
   // the work size settles keeps NR running). DLSS reads that as its Color for this evaluate (the NGX detour swaps it in). Nothing is recorded for:
-  // Intensity 0, a Color format the sampled encode cannot read ("unsupported format"), a pipeline that cannot be built ("pipeline failed"), motion vectors
-  // outside their image. The caller issued the token before this call; its event is set after DLSS has read the private colour. `nr_applied` says the
-  // private colour holds NR's result, left in SHADER_READ_ONLY_OPTIMAL for DLSS.
+  // Intensity 0, a Color format the sampled encode cannot read (nr::SkipReason::UNSUPPORTED_FORMAT), a pipeline that cannot be built
+  // (nr::SkipReason::PIPELINE_FAILED), motion vectors outside their image. The caller issued the token before this call; its event is set after DLSS
+  // has read the private colour. `nr_applied` says the private colour holds NR's result, left in SHADER_READ_ONLY_OPTIMAL for DLSS.
   PipelineResult RecordPreSr(VkCommandBuffer buffer, const VkDlssTarget& color, const nr::FrameInputs& inputs, const nr::Controls& controls,
                              const WorkLayout& layout, const ChainPart& part = {});
   // Native NR at Present, inside Uplift's own command buffer `buffer` (never a game's, never ReShade's immediate one), which the caller submits to
@@ -160,7 +161,7 @@ class VkNrPipeline final : private nr::PassResolver {
   // here loads NR. False (nothing recorded) when the slot or the constants ring is still in use, or an image cannot be made. The caller issued its
   // completion token before this call.
   // 1.1.6: `flip_y` when DLSS's images are upside down against the back buffer (ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN).
-  // Present-motion flicker fix: says why no copy was made (the per-second counters).
+  // Says why no copy was made (the per-second counters).
   PresentMotionWrite RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x, float scale_y,
                                          uint64_t frame, bool flip_y = false, float offset_x = 0.f, float offset_y = 0.f);
   // The copy for `frame` (PickPresentMotion: its own, else the newest at most PRESENT_MOTION_MAX_AGE frames older, whose age goes to `age`), or an empty one;
@@ -289,7 +290,7 @@ class VkNrPipeline final : private nr::PassResolver {
     uint64_t frame = 0u;
     nr::Mark last_use;
   };
-  static constexpr size_t PRESENT_MOTION_SLOTS = ::uplift::sources::PRESENT_MOTION_SLOTS;  // flicker fix: room for 8; 4 in use until the ring grows
+  static constexpr size_t PRESENT_MOTION_SLOTS = ::uplift::sources::PRESENT_MOTION_SLOTS;  // room for 8; 4 in use until the ring grows
   [[nodiscard]] std::array<uint64_t, PRESENT_MOTION_SLOTS> PresentMotionFrames() const;
   static constexpr size_t MAX_OPENED = 24u;              // the images one recording moves UNDEFINED -> GENERAL at its start (Before upscaling: 20)
   static constexpr uint64_t EXPOSURE_STATE_BYTES = 32u;  // the meter's 2x1 RGBA32F state

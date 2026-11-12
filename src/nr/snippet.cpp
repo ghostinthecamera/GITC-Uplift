@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <format>
@@ -23,6 +24,7 @@
 #include "nr/driver_store.hpp"
 #include "nr/log.hpp"
 #include "nr/pe_imports.hpp"
+#include "nr/process_modules.hpp"
 
 namespace uplift::nr {
 namespace {
@@ -55,9 +57,26 @@ using VulkanCreateFeatureFn = NVSDK_NGX_Result(NVSDK_CONV*)(VkCommandBuffer, NVS
 using VulkanEvaluateFeatureFn = NVSDK_NGX_Result(NVSDK_CONV*)(VkCommandBuffer, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
                                                               PFN_NVSDK_NGX_ProgressCallback);
 using VulkanShutdownFn = NVSDK_NGX_Result(NVSDK_CONV*)(VkDevice);
+// The NGX core's own NVSDK_NGX_VULKAN_Shutdown1 is not the snippet's one-argument export of that name: it takes the VkDevice and a pointer it
+// writes the device's remaining initialisation count through (ngx_hooks/hook_installer.cpp, VkShutdown1Fn; a one-argument call writes through
+// whatever RDX holds, the _nvngx.dll+0x44e54 crash).
+using CoreVulkanShutdownFn = NVSDK_NGX_Result(NVSDK_CONV*)(VkDevice, uint32_t*);
+// The core's NVSDK_NGX_D3D12_Shutdown1 has the same shape: the ID3D12Device and the count pointer (hook_installer.cpp, D3D12Shutdown1Fn).
+using CoreD3D12ShutdownFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12Device*, uint32_t*);
+// The loaded NGX core's module names, in the order a Vulkan binding adopts one.
+constexpr std::array<const wchar_t*, 2> CORE_MODULE_NAMES = {L"_nvngx.dll", L"nvngx.dll"};
+// The core's Shutdown1 for a Vulkan device Uplift initialised it on: its result and the initialisations left on that device.
+constexpr char CORE_VULKAN_SHUTDOWN_LINE[] = "NGX core VULKAN_Shutdown1 for a device Uplift initialised it on returned {:#010x} ({} left)";
+// The core's Shutdown1 for a Direct3D 12 device Uplift initialised it on: its result and the initialisations left on that device.
+constexpr char CORE_D3D12_SHUTDOWN_LINE[] = "NGX core D3D12_Shutdown1 for a device Uplift initialised it on returned {:#010x} ({} left)";
+// The core Uplift initialised a Direct3D 12 device on is no longer loaded when NR's context on it goes.
+constexpr std::string_view CORE_D3D12_GONE_LINE = "NGX core already unloaded when NR left its Direct3D 12 device; no Shutdown1";
+// The core Uplift initialised a Vulkan device on is no longer loaded when the device goes.
+constexpr std::string_view CORE_VULKAN_GONE_LINE = "NGX core already unloaded when its Vulkan device went; no Shutdown1";
 
 // Private data on a device whose NGX core Uplift initialised (force-loaded, or adopted for the D3D11
-// bridge), so the core is never initialised twice for one device.
+// bridge): the HMODULE of the core that initialised it, so the core is never initialised twice for one device and ShutdownD3D12Core shuts that
+// initialisation down with the same core.
 constexpr GUID UPLIFT_CORE_INIT_GUID = {0xfb71ea06, 0xb99c, 0x4d65, {0x9e, 0x59, 0x26, 0x19, 0x63, 0x62, 0x8b, 0x74}};
 
 // The 310.8 image keeps its NGX log callback in this .data slot. The layout is
@@ -69,6 +88,12 @@ constexpr uintptr_t SNIPPET_310_9_16_LOG_CALLBACK_RVA = 0x490a20u;
 constexpr DWORD SNIPPET_310_9_16_IMAGE_SIZE = 0xfe2f000u;
 // The FP16 compatibility build appends .nrcubin and preserves the original log slot and host logging code.
 constexpr DWORD SNIPPET_310_9_16_FP16_IMAGE_SIZE = 0x10779000u;
+
+// The runtime's file name, which a copy in another folder keeps.
+constexpr wchar_t RUNTIME_FILE_NAME[] = L"nvngx_dlssnr.dll";
+
+// Another copy of the runtime is mapped from another file: Uplift loads its own beside it. Its file name, the game's copy, Uplift's copy.
+constexpr char OWN_COPY_LINE[] = "the game's copy of {} is mapped from {}; Uplift loads its own from {}";
 
 struct ModuleReleaser {
   void operator()(HMODULE module) const { FreeLibrary(module); }
@@ -110,11 +135,18 @@ struct OwnRuntimeModules {
 };
 OwnRuntimeModules own_runtime_modules;
 
-// The Vulkan devices the NGX core was initialised for by Uplift, so a core is never initialised twice for one VkDevice.
-// A device that the vkDestroyDevice detour saw destroyed is forgotten: a new VkDevice at its address is a new device.
+// Snippet::Load calls, counted for SnippetLoadCount.
+std::atomic<uint64_t> snippet_load_count{0u};
+
+// The Vulkan devices the NGX core was initialised for by Uplift, and the core module that initialised each, so a core is never initialised twice
+// for one VkDevice and its initialisation is shut down when the device goes (the vkDestroyDevice detour): a new VkDevice at its address is a new device.
+struct VulkanCoreDevice {
+  VkDevice device = VK_NULL_HANDLE;
+  HMODULE core = nullptr;
+};
 struct VulkanCoreDevices {
   std::mutex mutex;
-  std::vector<VkDevice> devices;
+  std::vector<VulkanCoreDevice> devices;
 };
 VulkanCoreDevices vulkan_core_devices;
 
@@ -251,28 +283,49 @@ bool IsUpliftRuntimeModule(HMODULE module) {
          || std::ranges::find(own_runtime_modules.abandoned, module) != own_runtime_modules.abandoned.end();
 }
 
-std::filesystem::path RuntimeMappedElsewherePath(const std::filesystem::path& snippet_path) {
-  for (const std::filesystem::path& name : {snippet_path.filename(), std::filesystem::path(L"nvngx_dlssnr.dll")}) {
-    if (name.empty()) continue;
-    const HMODULE mapped = GetModuleHandleW(name.c_str());
-    if (mapped == nullptr || IsUpliftRuntimeModule(mapped)) continue;
-    std::wstring path(4096u, L'\0');
-    const DWORD length = GetModuleFileNameW(mapped, path.data(), static_cast<DWORD>(path.size()));
-    path.resize(length);
-    return (path.empty() ? name : std::filesystem::path(path));
+std::vector<std::filesystem::path> MappedRuntimeCopies(const std::filesystem::path& snippet_path, bool (*is_own)(HMODULE)) {
+  std::vector<std::filesystem::path> names = {snippet_path.filename(), std::filesystem::path(RUNTIME_FILE_NAME)};
+  std::erase_if(names, [](const std::filesystem::path& name) { return name.empty(); });
+  std::vector<std::filesystem::path> copies;
+  for (const ProcessModule& entry : EnumerateProcessModules()) {
+    if (is_own(entry.module)) continue;
+    const std::filesystem::path path(entry.path);
+    const std::wstring file_name = path.filename().wstring();
+    const bool named = std::ranges::any_of(names, [&](const std::filesystem::path& name) {
+      return CompareStringOrdinal(file_name.c_str(), -1, name.c_str(), -1, TRUE) == CSTR_EQUAL;
+    });
+    if (named) copies.push_back(path);
   }
-  return {};
+  return copies;
 }
 
-bool IsRuntimeMappedElsewhere(const std::filesystem::path& snippet_path) {
-  return !RuntimeMappedElsewherePath(snippet_path).empty();
+MappedRuntimeDecision DecideMappedRuntime(const std::filesystem::path& snippet_path, const std::vector<std::filesystem::path>& copies) {
+  MappedRuntimeDecision decision;
+  for (const std::filesystem::path& copy : copies) {
+    std::error_code error;
+    const bool same = std::filesystem::equivalent(snippet_path, copy, error);
+    if (error || same) {
+      if (decision.same_file.empty()) decision.same_file = copy;
+    } else {
+      decision.others.push_back(copy);
+    }
+  }
+  decision.rule = (!decision.same_file.empty() ? MappedRuntimeRule::SAME_FILE
+                   : !decision.others.empty()  ? MappedRuntimeRule::LOAD_OWN
+                                               : MappedRuntimeRule::NONE);
+  return decision;
 }
 
 Snippet::~Snippet() {
   Unload();
 }
 
+uint64_t SnippetLoadCount() {
+  return snippet_load_count.load();
+}
+
 NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
+  snippet_load_count.fetch_add(1u);
   if (abandoned_) {
     Log(LogLevel::ERR, "this Snippet was abandoned after a device loss and cannot be reused");
     return NVSDK_NGX_Result_FAIL_FeatureAlreadyExists;
@@ -289,12 +342,16 @@ NVSDK_NGX_Result Snippet::Load(const SnippetConfig& config) {
     Logf(LogLevel::ERR, "snippet {} not found ({})", ToUtf8(config.snippet_path), error.message());
     return NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
   }
-  if (const std::filesystem::path mapped = RuntimeMappedElsewherePath(snippet_path); !mapped.empty()) {
+  const MappedRuntimeDecision decision = DecideMappedRuntime(snippet_path, MappedRuntimeCopies(snippet_path));
+  if (decision.rule == MappedRuntimeRule::SAME_FILE) {
     Logf(LogLevel::ERR,
          "{} is already loaded in this game by another component, or stayed mapped after Uplift unloaded it; Uplift will "
          "not initialise it a second time (the loaded copy: {})",
-         ToUtf8(snippet_path.filename()), ToUtf8(mapped));
+         ToUtf8(snippet_path.filename()), ToUtf8(decision.same_file));
     return NVSDK_NGX_Result_FAIL_FeatureAlreadyExists;
+  }
+  if (decision.rule == MappedRuntimeRule::LOAD_OWN) {
+    Logf(LogLevel::INFO, OWN_COPY_LINE, ToUtf8(snippet_path.filename()), ToUtf8(decision.others.front()), ToUtf8(snippet_path));
   }
   ModuleReference module(LoadLibraryW(snippet_path.c_str()));
   if (!module) {
@@ -505,8 +562,52 @@ NVSDK_NGX_Result Snippet::BindVulkan(const VulkanBinding& binding) {
 }
 
 void Snippet::ForgetVulkanDevice(VkDevice device) {
-  const std::scoped_lock lock(vulkan_core_devices.mutex);
-  std::erase(vulkan_core_devices.devices, device);
+  HMODULE core = nullptr;
+  {
+    const std::scoped_lock lock(vulkan_core_devices.mutex);
+    const auto found = std::ranges::find(vulkan_core_devices.devices, device, &VulkanCoreDevice::device);
+    if (found == vulkan_core_devices.devices.end()) return;  // Uplift never initialised the core for this device
+    core = found->core;
+    vulkan_core_devices.devices.erase(found);
+  }
+  // Uplift's initialisation is shut down while the device and every layer on it are still whole, so nothing of the core's outlives the device:
+  // left initialised, the core's DLL detach at process exit called into the device after ReShade had freed it. The module is held for the call,
+  // and skipped if it is already gone.
+  HMODULE held = nullptr;
+  if (core == nullptr
+      || GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(core), &held) == FALSE || held != core) {
+    if (held != nullptr) FreeLibrary(held);
+    Log(LogLevel::WARN, CORE_VULKAN_GONE_LINE);
+    return;
+  }
+  const ModuleReference reference(held);
+  const auto shutdown = reinterpret_cast<CoreVulkanShutdownFn>(ResolveExport(core, "NVSDK_NGX_VULKAN_Shutdown1"));
+  if (shutdown == nullptr) return;
+  uint32_t remaining = 0u;
+  const NVSDK_NGX_Result result = GuardedCall([&] { return shutdown(device, &remaining); });
+  Logf((NVSDK_NGX_SUCCEED(result) ? LogLevel::INFO : LogLevel::WARN), CORE_VULKAN_SHUTDOWN_LINE, static_cast<uint32_t>(result), remaining);
+}
+
+void Snippet::ShutdownD3D12Core(ID3D12Device* device) {
+  if (device == nullptr) return;
+  HMODULE core = nullptr;
+  UINT core_size = sizeof(core);
+  if (FAILED(device->GetPrivateData(UPLIFT_CORE_INIT_GUID, &core_size, &core)) || core_size != sizeof(core)) return;  // Uplift never initialised it
+  device->SetPrivateData(UPLIFT_CORE_INIT_GUID, 0u, nullptr);  // forgotten first: a later context on this device initialises it again
+  // As ForgetVulkanDevice: the core's own two-argument Shutdown1 for this device, the module held for the call and skipped if it is already gone.
+  HMODULE held = nullptr;
+  if (core == nullptr
+      || GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(core), &held) == FALSE || held != core) {
+    if (held != nullptr) FreeLibrary(held);
+    Log(LogLevel::WARN, CORE_D3D12_GONE_LINE);
+    return;
+  }
+  const ModuleReference reference(held);
+  const auto shutdown = reinterpret_cast<CoreD3D12ShutdownFn>(ResolveExport(core, "NVSDK_NGX_D3D12_Shutdown1"));
+  if (shutdown == nullptr) return;
+  uint32_t remaining = 0u;
+  const NVSDK_NGX_Result result = GuardedCall([&] { return shutdown(device, &remaining); });
+  Logf((NVSDK_NGX_SUCCEED(result) ? LogLevel::INFO : LogLevel::WARN), CORE_D3D12_SHUTDOWN_LINE, static_cast<uint32_t>(result), remaining);
 }
 
 void Snippet::Unload() {
@@ -749,8 +850,8 @@ std::optional<uint64_t> Snippet::QueryAllocatedBytes() const {
 
 bool Snippet::AttachCore(ID3D12Device* device) {
   // Once per device: the mark on the device itself keeps a core from being initialised twice for it.
-  const auto initialize_once = [&](CoreInit initialize) {
-    uint32_t marker = 0u;
+  const auto initialize_once = [&](CoreInit initialize, HMODULE core) {
+    HMODULE marker = nullptr;
     UINT marker_size = sizeof(marker);
     if (SUCCEEDED(device->GetPrivateData(UPLIFT_CORE_INIT_GUID, &marker_size, &marker))) return true;
     if (config_.application_data_path.empty()) {
@@ -771,8 +872,7 @@ bool Snippet::AttachCore(ID3D12Device* device) {
       Logf(LogLevel::ERR, "NGX core Init failed with {:#010x}", static_cast<uint32_t>(result));
       return false;
     }
-    constexpr uint32_t INITIALIZED = 1u;
-    device->SetPrivateData(UPLIFT_CORE_INIT_GUID, sizeof(INITIALIZED), &INITIALIZED);
+    device->SetPrivateData(UPLIFT_CORE_INIT_GUID, sizeof(core), &core);
     return true;
   };
 
@@ -792,7 +892,7 @@ bool Snippet::AttachCore(ID3D12Device* device) {
   if (core_module_ != nullptr && config_.initialize_core_for_device) {
     // A D3D11 game's core was initialised for its own D3D11 device only.
     const auto initialize = reinterpret_cast<CoreInit>(ResolveExport(core_module_, "NVSDK_NGX_D3D12_Init"));
-    if (initialize == nullptr || !initialize_once(initialize)) {
+    if (initialize == nullptr || !initialize_once(initialize, core_module_)) {
       Log(LogLevel::ERR, "the game's NGX core could not be initialised for Uplift's private Direct3D 12 device");
       ReleaseCore();
       return false;
@@ -823,10 +923,9 @@ bool Snippet::AttachCore(ID3D12Device* device) {
       Logf(LogLevel::ERR, "NGX core {} lacks D3D12 Init or parameter allocation", ToUtf8(core_file));
       return false;
     }
-    if (!initialize_once(initialize)) return false;
-    // Never FreeLibrary this core or call its Shutdown1: Shutdown1 after the
-    // snippet's teardown crashed in _nvngx.dll+0x44e54 (driver 617.14). It stays
-    // initialised for the device's lifetime, as a game would leave it.
+    if (!initialize_once(initialize, core.get())) return false;
+    // Never FreeLibrary this core: it stays initialised while NR's context runs on the device, and ShutdownD3D12Core shuts that
+    // initialisation down with the core's own two-argument Shutdown1 at the context's teardown.
     core_module_ = core.release();
     allocate_parameters_ = allocate;
     destroy_parameters_ = destroy;
@@ -846,10 +945,10 @@ bool Snippet::AttachCore(ID3D12Device* device) {
 bool Snippet::AttachVulkanCore(const VulkanBinding& binding) {
   // Once per VkDevice: the process-wide set keeps a core from being initialised twice for one device (D3D12 keeps its mark in the device's
   // private data; a VkDevice has none). Snippet is serialised by its caller, so a check-then-insert is safe.
-  const auto initialize_once = [&](VulkanInitExt2 initialize) {
+  const auto initialize_once = [&](VulkanInitExt2 initialize, HMODULE core) {
     {
       const std::scoped_lock lock(vulkan_core_devices.mutex);
-      if (std::ranges::find(vulkan_core_devices.devices, binding.device) != vulkan_core_devices.devices.end()) return true;
+      if (std::ranges::find(vulkan_core_devices.devices, binding.device, &VulkanCoreDevice::device) != vulkan_core_devices.devices.end()) return true;
     }
     if (config_.application_data_path.empty()) {
       Log(LogLevel::ERR, "cannot initialise the NGX core: no application-data path is configured");
@@ -871,11 +970,11 @@ bool Snippet::AttachVulkanCore(const VulkanBinding& binding) {
       return false;
     }
     const std::scoped_lock lock(vulkan_core_devices.mutex);
-    vulkan_core_devices.devices.push_back(binding.device);
+    vulkan_core_devices.devices.push_back({.device = binding.device, .core = core});
     return true;
   };
 
-  for (const wchar_t* name : {L"_nvngx.dll", L"nvngx.dll"}) {
+  for (const wchar_t* name : CORE_MODULE_NAMES) {
     HMODULE loaded = nullptr;
     if (GetModuleHandleExW(0u, name, &loaded) == FALSE) continue;
     ModuleReference core(loaded);
@@ -890,7 +989,7 @@ bool Snippet::AttachVulkanCore(const VulkanBinding& binding) {
 
   if (core_module_ != nullptr && config_.initialize_core_for_device) {
     const auto initialize = reinterpret_cast<VulkanInitExt2>(ResolveExport(core_module_, "NVSDK_NGX_VULKAN_Init_Ext2"));
-    if (initialize == nullptr || !initialize_once(initialize)) {
+    if (initialize == nullptr || !initialize_once(initialize, core_module_)) {
       Log(LogLevel::ERR, "the loaded NGX core could not be initialised for this Vulkan device");
       ReleaseCore();
       return false;
@@ -920,9 +1019,9 @@ bool Snippet::AttachVulkanCore(const VulkanBinding& binding) {
       Logf(LogLevel::ERR, "NGX core {} lacks Vulkan Init or parameter allocation", ToUtf8(core_file));
       return false;
     }
-    if (!initialize_once(initialize)) return false;
-    // Never FreeLibrary this core or call its Shutdown1 (Shutdown1 after the snippet's teardown crashed on D3D12, driver 617.14):
-    // it stays initialised for the device's lifetime, as a game would leave it.
+    if (!initialize_once(initialize, core.get())) return false;
+    // Never FreeLibrary this core: it stays initialised for the device's lifetime, and ForgetVulkanDevice shuts that initialisation down with
+    // the core's own two-argument Shutdown1 when the device goes.
     core_module_ = core.release();
     allocate_parameters_ = allocate;
     destroy_parameters_ = destroy;

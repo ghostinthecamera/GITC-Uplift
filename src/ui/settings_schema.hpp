@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -49,10 +50,23 @@ inline constexpr uint32_t PASS_STAGE = 1u << 7u;
 // A FLOAT whose slider's range is its meaning (a share of the output, a blend): Ctrl+click cannot type past the slider's end.
 inline constexpr uint32_t SLIDER_RANGE_ONLY = 1u << 8u;
 inline constexpr uint32_t NETWORK_PRESET = 1u << 9u;  // creation configuration, independent of look sharing and Compare
+// A FLOAT in the resolution scales' group: the grouped rail slider clamps typed values to the slider's range.
+inline constexpr uint32_t SLIDER_ALWAYS_CLAMP = 1u << 10u;
+// The Keep faces mask's tuning rows (Advanced): hidden while Keep faces is off, and greyed with it where it cannot run.
+inline constexpr uint32_t KEEP_FACES_TUNING = 1u << 11u;
+// A later stage's Keep faces here: hidden while Keep faces is off, and greyed with it where it cannot run.
+inline constexpr uint32_t KEEP_FACES_HERE = 1u << 12u;
+// KeepFaces and ShowFaceMask, the other rows greyed where Keep faces cannot run.
+inline constexpr uint32_t KEEP_FACES_ROW = 1u << 13u;
+// Keep faces' own sliders (Face protection, Lighting scale): hidden while Keep faces is off, and greyed with it where it cannot run.
+inline constexpr uint32_t KEEP_FACES_OWN = 1u << 14u;
 }  // namespace setting_flags
 
 // How far past its slider's end a FLOAT accepts a typed value (Ctrl+click), as a multiple of that end.
 inline constexpr double TYPED_PAST_SLIDER = 10.0;
+
+// The longest a setting's tooltip may be, in bytes: about three lines once the overlay wraps it. Detail beyond that belongs in the Guide.
+inline constexpr size_t TOOLTIP_MAX_CHARS = 200u;
 
 // One persisted setting: the single description load, save, sanitising, resets
 // and the overlay rows all read.
@@ -74,6 +88,9 @@ struct SettingDescriptor {
   std::string_view (*get_text)(const Settings&) = nullptr;  // TEXT only
   void (*set_text)(Settings&, std::string_view) = nullptr;
   uint8_t pass = 0u;  // 2-10: a per-pass row (Settings::passes[pass - 2]); 0: none
+  bool (*hidden)(const Settings&) = nullptr;  // a row the overlay hides while this holds (a choice above it not made yet); nullptr: always shown
+  const char* slider_format = nullptr;        // FLOAT: the slider's printf format; nullptr: the overlay's default
+  double display_scale = 1.0;                 // FLOAT: the shown value is the stored value times this (AutoExposureBlend: 100)
 };
 
 // Every persisted setting once, in save order.
@@ -101,9 +118,8 @@ void RestoreAllDefaults(Settings* settings);
 [[nodiscard]] double DescriptorMax(const SettingDescriptor& descriptor);
 // A FLOAT slider's end: `ui_max` when set, else `max`.
 [[nodiscard]] double SliderMax(const SettingDescriptor& descriptor);
-// The colour fixes' exposure rows the overlay hides while `settings`' Input exposure makes them moot: Adaptation and its rates unless
-// Metered or Auto; Auto exposure unless Auto, and Blend unless Auto's Blend.
-[[nodiscard]] bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings);
+// The overlay hides this row while `settings` hold its `hidden` condition.
+[[nodiscard]] bool RowHidden(const SettingDescriptor& descriptor, const Settings& settings);
 // Manual exposure is Diffuse white alone, so the overlay shows the Diffuse white row in the Exposure group, under Input exposure, while
 // `settings` says Manual, and in the Colour group otherwise.
 [[nodiscard]] bool DiffuseWhiteInExposureGroup(const Settings& settings);

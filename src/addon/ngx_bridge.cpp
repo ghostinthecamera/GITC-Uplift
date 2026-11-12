@@ -179,6 +179,8 @@ void NgxBridge::OnColorSwapRejected(ngx_hooks::NgxApi api, ID3D12GraphicsCommand
 
 void NgxBridge::AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle,
                               const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Result result) {
+  // Every API's evaluate of a feature the game created: the foreign NR producer's liveness (ForeignNr = Yield), whatever watches.
+  if (NVSDK_NGX_SUCCEED(result)) registry_.OnEvaluate(handle);
   // The process's first game DLSS evaluate is summarised once, whatever watches; one relaxed load from then on.
   if (!summary_logged_.load(std::memory_order_relaxed) && NVSDK_NGX_SUCCEED(result) && parameters != nullptr) {
     NoteFirstEvaluate(api, list, handle, *parameters);

@@ -65,6 +65,13 @@ inline constexpr std::string_view FOREIGN_D3D12_DLSS_REASON =
 // Split chain: every "Runs at" choice is greyed with it on a route that runs every pass at one stage.
 inline constexpr std::string_view ONE_STAGE_REASON = "All passes run at one stage here";
 
+// The RUNTIME card for a nvngx_dlssnr.dll that NVIDIA's DLSS mapped from the same file Uplift would load (CardFacts::runtime_in_game_folder). The file may
+// be the game's own, so the card says to copy it, not to move it.
+inline constexpr std::string_view RUNTIME_COPY_TITLE = "Copy nvngx_dlssnr.dll into GITC-Uplift";
+inline constexpr std::string_view RUNTIME_COPY_BODY =
+    "NR cannot run on the copy of nvngx_dlssnr.dll in the game's folder: NVIDIA's DLSS loaded it first (RTX 50 cards and DLSS 5 games do this)";
+inline constexpr std::string_view RUNTIME_COPY_ACTION = "Copy it into the GITC-Uplift folder next to {}, then restart the game.";
+
 // A selectable motion source that delivered nothing on the latest recording.
 enum class MotionGap : uint8_t {
   NONE,
@@ -222,6 +229,7 @@ inline constexpr std::string_view BRIDGED_DLSS_REASON = "NR after DLSS needs a 6
 // Before FG's stage choice (the PresentWithFrameGen row and the stage picker), greyed with why where frame generation cannot exist on the shown device.
 inline constexpr std::string_view BEFORE_FG_API_REASON = "Before FG supports Streamline on Direct3D 12 and Vulkan";
 inline constexpr std::string_view BEFORE_FG_NO_STREAMLINE_REASON = "Before FG needs frame generation through Streamline, which this game has not loaded";
+inline constexpr std::string_view BEFORE_FG_FG_OFF_REASON = "Before FG needs frame generation, which is off in this game's settings";
 // Diffuse white on an sRGB image: display-referred, so no diffuse-white scale applies (color::InputScale is 1) and Manual exposure, which is Diffuse
 // white alone, does nothing. Greys the Diffuse white row and the Manual choice.
 inline constexpr std::string_view DIFFUSE_WHITE_SRGB_REASON = "Diffuse white does not apply to an sRGB image (display-referred)";
@@ -265,6 +273,7 @@ struct BeforeFgFacts {
   bool api_supported = true;      // a Direct3D 12 or Vulkan device, the only ones with a game-facing Streamline Present
   bool hooks_installed = true;    // the Streamline presentation hooks started (addon::streamline::Installed)
   bool streamline_loaded = true;  // the game's Streamline interposer is in the process (addon::streamline::StreamlineLoaded)
+  bool frame_generation_running = true;  // the game's frame generation runs, as the stage diagram's FG box shows it (addon::streamline::FrameGenerationShown)
 };
 // Why the Before FG stage cannot be chosen on the shown device, or empty: the first missing fact's reason.
 [[nodiscard]] std::string_view BeforeFgUnavailable(const BeforeFgFacts& facts);

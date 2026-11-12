@@ -13,6 +13,9 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
+// Bytes per texel of the motion share: DXGI_FORMAT_R16G16_FLOAT, two 16-bit channels.
+constexpr uint32_t MOTION_BYTES_PER_TEXEL = 4u;
+
 }  // namespace
 
 std::unique_ptr<D3D10Client> D3D10Client::Create(ID3D10Device* device, ComPtr<ID3D11Device>* relay_created, std::string* error) {
@@ -62,7 +65,7 @@ ipc::Target D3D10Client::Describe(ID3D10Resource* back_buffer, bool enabled, boo
       if (relay_->CreateKeyed(size, back_buffer_format, format->bytes_per_pixel, &color_, &result)) {
         color_failure_.reset();
       } else {
-        color_failure_ = ShareFailure{.size = size, .format = back_buffer_format, .result = result};
+        color_failure_ = ShareFailure{.size = size, .format = back_buffer_format, .cause = {.result = result}};
       }
     }
   }
@@ -86,7 +89,7 @@ ipc::Target D3D10Client::Describe(ID3D10Resource* back_buffer, bool enabled, boo
   std::string problem;
   if (usable && color_failure_ && color_failure_->Matches(size, back_buffer_format)) {
     problem = std::format("The back buffer could not be shared with the Direct3D 11 relay (DXGI_FORMAT {}, HRESULT {:#010x})",
-                          static_cast<int>(back_buffer_format), static_cast<uint32_t>(color_failure_->result));
+                          static_cast<int>(back_buffer_format), static_cast<uint32_t>(color_failure_->cause.result));
   } else if (relay_->Stopped() && d3d11_->Latch().empty()) {
     problem = bridge::KeyedRelay::Sentence(relay_->Reason());
   }
@@ -114,7 +117,8 @@ bool D3D10Client::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, addon
   run_sent_ = false;
   SyncLatches(link);
   if (Stopped() || !color_.relay || back_buffer == nullptr) return false;
-  // LaunchPad's UPLIFT_MV crosses like the colour, and is retired when a recording comes without one.
+  // LaunchPad's UPLIFT_MV crosses like the colour. Kept through a run of up to MOTION_KEEP_PRESENTS recordings without one, and retired past it; a kept
+  // keyed texture is not handed over or taken, so it holds only its last use. The D3D11 client's own share with the helper is not this client's to retire.
   Keyed* motion_keyed = nullptr;
   const std::optional<D3D10_TEXTURE2D_DESC> motion_description = bridge::TextureDesc(motion);
   if (motion_description && motion_description->Format == DXGI_FORMAT_R16G16_FLOAT && motion_description->SampleDesc.Count == 1u) {
@@ -124,19 +128,20 @@ bool D3D10Client::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, addon
     }
     if (!motion_.relay && !(motion_failure_ && motion_failure_->Matches(size, DXGI_FORMAT_R16G16_FLOAT))) {
       HRESULT result = S_OK;
-      if (relay_->CreateKeyed(size, DXGI_FORMAT_R16G16_FLOAT, 4u, &motion_, &result)) {
+      if (relay_->CreateKeyed(size, DXGI_FORMAT_R16G16_FLOAT, MOTION_BYTES_PER_TEXEL, &motion_, &result)) {
         motion_failure_.reset();
       } else {
         // Logged once: not retried for this size.
-        motion_failure_ = ShareFailure{.size = size, .format = DXGI_FORMAT_R16G16_FLOAT, .result = result};
+        motion_failure_ = ShareFailure{.size = size, .format = DXGI_FORMAT_R16G16_FLOAT, .cause = {.result = result}};
         nr::Logf(nr::LogLevel::WARN,
                  "UPLIFT_MV could not be shared with the Direct3D 11 relay (HRESULT {:#010x}); NR runs without LaunchPad's motion",
                  static_cast<uint32_t>(result));
       }
     }
     motion_keyed = (motion_.relay ? &motion_ : nullptr);
-  } else {
-    relay_->Drop(&motion_);
+    motion_keep_.Arrived();
+  } else if (motion_.relay && motion_keep_.RetireOnMiss()) {
+    relay_->Drop(&motion_);  // the motion stopped: the keyed texture goes
   }
   SyncLatches(link);  // a key that did not come while the keyed motion was made
   // 1. The game's side hands the frame over (key 0 -> 1), then submits: the relay's GPU never waits for a release that was not submitted.
@@ -190,12 +195,12 @@ MaskCopy D3D10Client::CopyMask(ID3D10Resource* mask, NrLink& link) {
   }
   if (!mask_.relay) {
     // Which step failed decides the mask note's wording.
-    if (mask_failure_ && mask_failure_->Matches(size, format->view_format)) return {.relay_failed = !mask_failure_->helper};
+    if (mask_failure_ && mask_failure_->Matches(size, format->view_format)) return {.relay_failed = !mask_failure_->cause.helper};
     HRESULT result = S_OK;
     // In the typed view format: a D3D10 copy stays inside one typeless group, as on D3D11.
     if (!relay_->CreateKeyed(size, format->view_format, format->bytes_per_pixel, &mask_, &result)) {
       // Logged once: not retried for this size and format.
-      mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .result = result};
+      mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .cause = {.result = result}};
       nr::Logf(nr::LogLevel::WARN, "UPLIFT_MASK could not be shared with the Direct3D 11 relay (DXGI_FORMAT {}, HRESULT {:#010x})",
                static_cast<int>(format->view_format), static_cast<uint32_t>(result));
       return {.relay_failed = true};
@@ -220,7 +225,7 @@ MaskCopy D3D10Client::CopyMask(ID3D10Resource* mask, NrLink& link) {
   if (!copied.size && !copied.unsupported && !copied.busy) {
     // The helper could not share it (RGBA32F, for one): not handed over again for this size and format until a re-enable, instead of two
     // full-frame copies a frame for nothing.
-    mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .result = E_FAIL, .helper = true};
+    mask_failure_ = ShareFailure{.size = size, .format = format->view_format, .cause = {.result = E_FAIL, .helper = true}};
     relay_->Drop(&mask_);
   }
   relay_->Flush();

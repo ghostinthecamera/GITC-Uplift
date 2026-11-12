@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "addon/environment.hpp"
+#include "addon/host_common.hpp"
 #include "addon/launchpad_link.hpp"
 #include "addon/live_facts.hpp"
 #if defined(_WIN64)
@@ -111,18 +112,7 @@ uint64_t EventImage(const HelperDevice& device, api::effect_runtime* runtime, ui
   return device.gl ? runtime->get_device()->get_resource_from_view(api::resource_view{rtv}).handle : (rtv & ~uint64_t{1u});
 }
 
-// The API's name in the texts.
-std::string_view ApiName(api::device_api device_api) {
-  switch (device_api) {
-    case api::device_api::d3d9:   return "Direct3D 9";
-    case api::device_api::d3d10:  return "Direct3D 10";
-    case api::device_api::d3d11:  return "Direct3D 11";
-    case api::device_api::d3d12:  return "Direct3D 12";
-    case api::device_api::opengl: return "OpenGL";
-    case api::device_api::vulkan: return "Vulkan";
-  }
-  return "an unknown API";
-}
+using host::ApiName;
 
 // ReShade's create_device event.
 constexpr uint32_t CREATE_DEVICE_EVENT = 96u;
@@ -252,12 +242,12 @@ void HelperFront::RunClient(HelperDevice& device, api::device* game_device, api:
     // Once per attach: the e2e cases (and the checklist) read it as "NR ran here", e.g. again after a Direct3D 9 Reset.
     device.nr_returned_logged = true;
     nr::Logf(nr::LogLevel::INFO, "NR ran on the game's frame ({}, {})",
-             (device.vulkan  ? "Vulkan"
-              : device.gl    ? "OpenGL"
-              : device.d3d12 ? "Direct3D 12"
-              : device.d3d9  ? "Direct3D 9"
-              : device.d3d10 ? "Direct3D 10"
-                             : "Direct3D 11"),
+             ApiName(device.vulkan  ? api::device_api::vulkan
+                     : device.gl    ? api::device_api::opengl
+                     : device.d3d12 ? api::device_api::d3d12
+                     : device.d3d9  ? api::device_api::d3d9
+                     : device.d3d10 ? api::device_api::d3d10
+                                    : api::device_api::d3d11),
              client::BITNESS);
   }
   if (!sent && point == TriggerPoint::MARKER) {
@@ -678,6 +668,11 @@ std::unique_ptr<client::D3D10Client> HelperFront::DestroyDevice(HelperDevice* de
   return std::move(device->d3d10);  // the host destroys it after its lock: the relay is ReShade's proxy
 }
 
+std::string_view HelperKeepFacesUnavailable(const ipc::Status* status) {
+  if (status == nullptr) return {};
+  return ui::KeepFacesUnavailable({.gpu_ready = (status->keep_faces_supported != 0u)});
+}
+
 void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, api::device_api device_api, const ui::Settings& settings,
                           ui::OverlayView* view, ui::OverlayState* state, std::chrono::steady_clock::time_point now) const {
   const bool d3d9 = (device_api == api::device_api::d3d9);
@@ -752,6 +747,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   const bool has_client = device->HasClient();
   const bool status_known = (owner && remote->Running() && remote->Attached());
   const ipc::Status* const status = (status_known ? &remote->LastStatus() : nullptr);
+  view->keep_faces_unavailable = std::string(HelperKeepFacesUnavailable(status));
   if (status != nullptr) {
     view->status_line = std::string(ipc::TextOf(status->status_line));
     for (size_t i = 0; i < view->pass_models.size(); ++i) view->pass_models[i] = {static_cast<nr::RecordedNetwork>(status->models[i].network), status->models[i].style};

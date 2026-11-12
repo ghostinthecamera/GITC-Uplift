@@ -2,6 +2,7 @@
 
 #include <d3d12.h>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -20,11 +21,12 @@ inline constexpr uint32_t NVIDIA_VENDOR_ID = 0x10DEu;
 // RenoDX DLSS5 v7 sets this while its NR runtime is loaded.
 inline constexpr wchar_t RENODX_NR_MARKER[] = L"RENODX_DLSS5_NR_RUNTIME_LOADED";
 
+// The game's NR counts as running while it evaluated within this long, so turning it off in the game's menu gives NR back to Uplift within a second.
+inline constexpr std::chrono::milliseconds FOREIGN_NR_IDLE_MS{1000};
+
 // Evidence that another NR producer runs in this game.
 struct ForeignNrSignals {
-  uint32_t live_foreign_nr = 0u;          // live NGX feature-18 creates that Uplift did not make
-  bool runtime_mapped_elsewhere = false;  // nr::IsRuntimeMappedElsewhere for the located runtime
-  std::string runtime_mapped_path;        // 1.1.1: that other mapping's full path (nr::RuntimeMappedElsewherePath), when known
+  bool foreign_nr_evaluating = false;     // a NGX feature-18 that Uplift did not make evaluated within FOREIGN_NR_IDLE_MS
   bool renodx_marker = false;            // RENODX_NR_MARKER is set
 };
 
@@ -61,7 +63,8 @@ struct SnippetSearch {
 // True when the environment variable exists, whatever its value.
 [[nodiscard]] bool IsEnvironmentMarkerSet(const wchar_t* name);
 // Why another NR producer is running, or nullopt. With ForeignNr = Yield the caller stands down with
-// this text. A runtime another module mapped is refused by nr::Snippet::Load whatever ForeignNr says.
+// this text. A copy of the runtime mapped from another file is no evidence: Uplift loads its own beside it. One mapped from the
+// file Uplift would load is refused by nr::Snippet::Load whatever ForeignNr says.
 [[nodiscard]] std::optional<std::string> ForeignNrProducer(const ForeignNrSignals& signals);
 
 }  // namespace uplift::addon

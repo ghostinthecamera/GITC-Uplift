@@ -45,6 +45,8 @@ std::optional<ShareFormat> ExposureShareFormat(DXGI_FORMAT format) {
 }
 // D3D11 opens a shared D3D12 texture only when it allows render targets, and outside R8, R16 and the display formats only when it is also simultaneous-access.
 constexpr D3D12_RESOURCE_FLAGS SHARE_FLAGS = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+// Bytes per texel of Before upscaling's colour share: DXGI_FORMAT_R16G16B16A16_FLOAT, four 16-bit channels.
+constexpr uint32_t SWAP_BYTES_PER_TEXEL = 8u;
 
 // A share the API refused for its format (or format and flags), as RGBA32F is: the stage cannot run on this image. Anything else
 // (out of memory, a removed device) is not the format's: that evaluate goes without NR, and the stage stays offered.
@@ -129,7 +131,7 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
     if (!IsFormatRefusal(result)) return {.skipped = DlssSkip::SHARE_FAILED};
     return unsupported(result);
   }
-  if (!after && !EnsureShared(&dlss_swap_.shared, &dlss_swap_.failure, image_size, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 8u,
+  if (!after && !EnsureShared(&dlss_swap_.shared, &dlss_swap_.failure, image_size, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, SWAP_BYTES_PER_TEXEL,
                               "Before upscaling's colour")) {
     return {.skipped = DlssSkip::SHARE_FAILED};
   }
@@ -274,7 +276,7 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
     watchdog_.Submitted(out, now);
   }
   if (!frame.failure.empty()) {
-    Stop(std::format("The {} bridge stopped: {}", label_, frame.failure));
+    Stop(std::format(BRIDGE_STOPPED_LINE, label_, frame.failure));
     nr::Log(nr::LogLevel::ERR, latch_);
   }
   return {.wrote = frame.wrote, .executed = steps.executed, .color = ((!after && frame.wrote) ? dlss_swap_.shared.d3d11.Get() : nullptr)};

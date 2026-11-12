@@ -109,6 +109,8 @@ Timeline::Timeline(Timeline&& other) noexcept
       tokens_(std::move(other.tokens_)),
       last_token_(other.last_token_),
       unstamped_(other.unstamped_.load()),
+      thread_stamps_(other.thread_stamps_.load()),
+      aged_stamps_(other.aged_stamps_.load()),
       fences_(std::move(other.fences_)),
       queue_values_(std::move(other.queue_values_)),
       switch_frame_(other.switch_frame_),
@@ -388,7 +390,7 @@ void Timeline::Drop(std::span<const uint64_t> tokens) {
 void Timeline::StampThread(uint32_t thread_id) {
   if (unstamped_.load(std::memory_order_relaxed) == 0u) return;
   const std::unique_lock lock(tokens_mutex_);
-  StampLocked([thread_id](const Token& token) { return token.thread_id == thread_id; });
+  thread_stamps_.fetch_add(StampLocked([thread_id](const Token& token) { return token.thread_id == thread_id; }), std::memory_order_relaxed);
 }
 
 void Timeline::StampAged(std::chrono::steady_clock::time_point now) {
@@ -413,9 +415,10 @@ void Timeline::StampAged(std::chrono::steady_clock::time_point now) {
   if (unstamped_.load(std::memory_order_relaxed) == 0u) return;
   const std::unique_lock lock(tokens_mutex_);
   const uint64_t frame = CurrentFrame();
-  StampLocked([now, frame](const Token& token) {
-    return now - token.submit_time >= AGED_SUBMISSION_TIME && frame >= token.submit_frame + AGED_SUBMISSION_FRAMES;
-  });
+  aged_stamps_.fetch_add(StampLocked([now, frame](const Token& token) {
+                           return now - token.submit_time >= AGED_SUBMISSION_TIME && frame >= token.submit_frame + AGED_SUBMISSION_FRAMES;
+                         }),
+                         std::memory_order_relaxed);
 }
 
 void Timeline::ForgetQueue(ID3D12CommandQueue* queue) {
@@ -495,8 +498,9 @@ bool Timeline::TokensComplete(uint64_t through) const {
   return true;
 }
 
-void Timeline::StampLocked(const std::function<bool(const Token&)>& matches) {
-  if (fences_ == nullptr) return;
+uint64_t Timeline::StampLocked(const std::function<bool(const Token&)>& matches) {
+  uint64_t stamped = 0u;
+  if (fences_ == nullptr) return stamped;
   std::vector<ID3D12CommandQueue*> queues;
   for (const auto& [id, token] : tokens_) {
     if (token.state == Token::State::SUBMITTED && matches(token) && std::ranges::find(queues, token.queue) == queues.end()) {
@@ -511,9 +515,11 @@ void Timeline::StampLocked(const std::function<bool(const Token&)>& matches) {
         token.state = Token::State::STAMPED;
         token.fence_value = value;
         unstamped_.fetch_sub(1u);
+        ++stamped;
       }
     }
   }
+  return stamped;
 }
 
 }  // namespace uplift::nr

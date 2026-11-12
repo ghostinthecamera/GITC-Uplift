@@ -102,7 +102,7 @@ void VkBridge::Retire(vk::GameHost& host, Shared* shared) {
 
 void VkBridge::LatchVulkan(std::string_view failure) {
   if (!latch_.empty()) return;
-  std::string reason = std::format("The Vulkan bridge stopped: {}",
+  std::string reason = std::format(BRIDGE_STOPPED_LINE, VK_BRIDGE_LABEL,
                                    (interop_.DeviceLost() ? std::string_view("the game's Vulkan device was lost") : failure));
   nr::Log(nr::LogLevel::ERR, reason);
   // After a failed Vulkan wait on a lost device the private queue would otherwise wait on `to12` until destroy_device.
@@ -124,7 +124,7 @@ BridgeFrame VkBridge::BeginFrame(vk::GameHost& host, const VkImageInfo& back_buf
     // Both directions count as progress, so a frame shows two steps: the game's work up to the copy-in, then NR's.
     const uint64_t completed = to11_->GetCompletedValue();
     if (const std::optional<std::string_view> stopped = watchdog_.Check(completed, completed + to12_->GetCompletedValue(), now)) {
-      std::string reason = std::format("The Vulkan bridge stopped: {}", *stopped);
+      std::string reason = std::format(BRIDGE_STOPPED_LINE, VK_BRIDGE_LABEL, *stopped);
       nr::Log(nr::LogLevel::ERR, reason);
       Stop(std::move(reason));
     }

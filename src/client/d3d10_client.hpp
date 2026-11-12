@@ -13,6 +13,8 @@
 
 #include "addon/frame_trigger.hpp"
 #include "bridge/keyed_relay.hpp"
+#include "bridge/motion_share_keep.hpp"
+#include "bridge/share_failure.hpp"
 #include "client/d3d11_client.hpp"
 #include "client/nr_link.hpp"
 #include "ipc/protocol.hpp"
@@ -74,16 +76,13 @@ class D3D10Client {
   D3D10Client() = default;
 
   using Keyed = bridge::KeyedRelay::Keyed;
-  // A keyed texture that could not be made: retried only for another size or format, or after a re-enable.
-  struct ShareFailure {
-    nr::Size size;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+  // Why a keyed texture could not be made.
+  struct RelayShareCause {
     HRESULT result = S_OK;
     bool helper = false;  // the mask only: the helper could not share it (D3D11Client::CopyMask), not the relay's own keyed texture
-    [[nodiscard]] bool Matches(nr::Size other_size, DXGI_FORMAT other_format) const {
-      return size == other_size && format == other_format;
-    }
   };
+  // A keyed texture that could not be made: retried only for another size or format, or after a re-enable.
+  using ShareFailure = bridge::ShareFailureOf<RelayShareCause>;
 
   [[nodiscard]] bool Stopped() const { return relay_->Stopped() || !d3d11_->Latch().empty(); }
   // The one latch is the D3D11 client's: a key that did not come in the relay stops it (the helper latches and CPU-signals its fences),
@@ -97,6 +96,7 @@ class D3D10Client {
   Keyed color_;
   Keyed mask_;
   Keyed motion_;
+  bridge::MotionShareKeep motion_keep_;  // the run of recordings without UPLIFT_MV while motion_ is held
   std::optional<ShareFailure> color_failure_;
   std::optional<ShareFailure> mask_failure_;
   std::optional<ShareFailure> motion_failure_;

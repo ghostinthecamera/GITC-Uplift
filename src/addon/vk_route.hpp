@@ -108,6 +108,10 @@ enum class VkMotionVerdict : uint8_t {
 [[nodiscard]] inline bool VkHelperRuns(VkNrRoute route, bool native_at_dlss_stage) {
   return route == VkNrRoute::HELPER && !native_at_dlss_stage;
 }
+// Whether a Vulkan present that reaches the bridged path makes the Direct3D 12 route's VkBridge. Pure.
+[[nodiscard]] inline bool VkPresentMakesBridge(VkNrRoute route) {
+  return route == VkNrRoute::DIRECT3D_12;
+}
 // An explicit DLSS stage belongs to native Vulkan. The bridge or helper can execute its Present work while that preference is stored.
 [[nodiscard]] constexpr ui::PlacementSource VkPresentSource(ui::PlacementSource stored) {
   return stored == ui::PlacementSource::DLSS ? ui::PlacementSource::AUTO : stored;

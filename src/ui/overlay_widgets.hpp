@@ -2,12 +2,32 @@
 
 #include <format>
 #include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 
 #include "ui/overlay_style.hpp"
+#include "ui/slider_row_layout.hpp"
 
 namespace uplift::ui::widgets {
+
+// The rail slider's look, in font heights: a rectangular track inset from the control's frame, filled up to the value, and a
+// narrow rectangular grab at the value.
+constexpr float SLIDER_TRACK_INSET_EM = 0.24f;
+constexpr float SLIDER_GRAB_WIDTH_EM = 0.5f;
+constexpr float SLIDER_GRAB_INSET_EM = 0.05f;
+constexpr float SLIDER_ROUNDING_EM = 0.1f;
+constexpr float SLIDER_TRACK_ALPHA = 0.3f;  // of the muted text colour
+constexpr float SLIDER_FILL_ALPHA = 0.45f;  // of the accent
+// A grouped slider row on one line: the most of the row its caption column may take and the most lines a caption may wrap to there, and
+// the slider's least width (style units). A caption needing more lines, or a slider narrower than that, stacks.
+constexpr float SLIDER_ROW_CAPTION_SHARE = 0.42f;
+constexpr size_t SLIDER_ROW_CAPTION_MAX_LINES = 2u;
+constexpr float SLIDER_ROW_MIN_WIDTH_UNITS = 16.f;
+// Between a slider row's caption column and its slider (style units): wider than the row's other gaps, so a caption never reads as part
+// of the track.
+constexpr float SLIDER_ROW_CAPTION_GAP_UNITS = 2.f;
 
 // ImGui checkboxes and buttons do not wrap their own labels. Wrap the display text but keep the original widget ID.
 inline std::string WrapLabel(std::string_view text, float width) {
@@ -135,32 +155,19 @@ bool RailSlider(const char* label, T& value, T low, T high, const char* format, 
   if (!typing) {
     gui::PopStyleVar();
     const ImVec2 a = gui::GetItemRectMin(), b = gui::GetItemRectMax();
-    const float radius = std::min(gui::GetFontSize() * 0.43f, (b.x - a.x) * 0.25f);
-    const float y = (a.y + b.y) * 0.5f, start = a.x + radius, end = b.x - radius;
+    const float em = gui::GetFontSize();
+    const float half_grab = std::min(em * SLIDER_GRAB_WIDTH_EM, b.x - a.x) * 0.5f, rounding = em * SLIDER_ROUNDING_EM;
+    const float start = a.x + half_grab, end = b.x - half_grab;
     const float t = static_cast<float>(value - low) / static_cast<float>(high - low);
     const float x = start + (end - start) * std::clamp(t, 0.f, 1.f);
+    const float track_top = a.y + em * SLIDER_TRACK_INSET_EM, track_bottom = b.y - em * SLIDER_TRACK_INSET_EM;
     auto* draw = gui::GetWindowDrawList();
-    const ImU32 accent = gui::GetColorU32(ImGuiCol_SliderGrab);
-    const float half = gui::GetFontSize() * 0.15f;
-    draw->AddRectFilled({start, y - half}, {end, y + half}, gui::GetColorU32(ImGuiCol_TextDisabled, 0.5f), half);
-    draw->AddRectFilled({start, y - half}, {x, y + half}, accent, half);
-    draw->AddCircleFilled({x, y}, radius, accent);
-    if (gui::IsItemFocused() && gui::GetIO().NavVisible) draw->AddRect(a, b, gui::GetColorU32(ImGuiCol_Text), radius);
+    draw->AddRectFilled({a.x, track_top}, {b.x, track_bottom}, gui::GetColorU32(ImGuiCol_TextDisabled, SLIDER_TRACK_ALPHA), rounding);
+    draw->AddRectFilled({a.x, track_top}, {x, track_bottom}, gui::GetColorU32(ImGuiCol_SliderGrab, SLIDER_FILL_ALPHA), rounding);
+    draw->AddRectFilled({x - half_grab, a.y + em * SLIDER_GRAB_INSET_EM}, {x + half_grab, b.y - em * SLIDER_GRAB_INSET_EM}, gui::GetColorU32(ImGuiCol_SliderGrab), rounding);
+    if (gui::IsItemFocused() && gui::GetIO().NavVisible) draw->AddRect(a, b, gui::GetColorU32(ImGuiCol_Text), gui::GetStyle().FrameRounding);
   }
   return edited;
-}
-
-inline void PercentTicks(double low, double high) {
-  const ImVec2 pos = gui::GetCursorScreenPos();
-  const float width = gui::GetContentRegionAvail().x;
-  for (int i = 0; i < 4; ++i) {
-    const float t = i / 3.f;
-    const auto label = std::format("{:.0f}%", low + t * (high - low));
-    const float text_width = ImGui::CalcTextSize(label.c_str()).x;
-    const float x = std::clamp(width * t - text_width * 0.5f, 0.f, std::max(0.f, width - text_width));
-    gui::GetWindowDrawList()->AddText({pos.x + x, pos.y}, gui::GetColorU32(ImGuiCol_TextDisabled), label.c_str());
-  }
-  gui::Dummy({0.f, gui::GetTextLineHeight()});
 }
 
 inline bool SectionHeading(const char* title, const char* id, bool show_reset) {
@@ -203,7 +210,7 @@ inline void PanelBorder(ImVec2 start, float width, float bottom) {
 inline bool Disclosure(const char* title, const char* hint = nullptr, const char* reset_id = nullptr, bool* reset = nullptr) {
   const ImVec2 start = gui::GetCursorScreenPos();
   const float right = start.x + gui::GetContentRegionAvail().x;
-  const float pad_x = style::PanelInset() * 0.5f, height = style::Units(8.5f);
+  const float pad_x = style::PanelInset() * 0.5f, height = style::Units(style::DISCLOSURE_HEIGHT_UNITS);
   const std::string label = gui::Label(title);
   const size_t suffix = label.find("###");
   const float text_end = start.x + gui::GetFontSize() + 3.f * pad_x + ImGui::CalcTextSize(label.c_str(), nullptr, true).x;
@@ -256,6 +263,114 @@ inline void SettingCaption(const char* label, const std::string& value, bool has
   gui::TextColored(gui::GetStyleColorVec4(ImGuiCol_SliderGrab), "%s", value.c_str());
 }
 
+// The caption and value columns one panel's slider rows share: as wide as the widest caption and value its rows measured on the previous
+// frame, the way ImGui sizes a table column to its content, so the panel's sliders line up and start right after the captions. Inset
+// opens one around each panel's contents; a row outside any sizes the columns to itself.
+class SliderColumns {
+ public:
+  explicit SliderColumns(ImGuiID id) : id_(id), previous_(current_) {
+    if (const auto found = Widths().find(id); found != Widths().end()) last_ = found->second;
+    current_ = this;
+  }
+  ~SliderColumns() {
+    Widths()[id_] = measured_;
+    current_ = previous_;
+  }
+  SliderColumns(const SliderColumns&) = delete;
+  SliderColumns& operator=(const SliderColumns&) = delete;
+
+  // The open panel's columns, or nullptr.
+  static SliderColumns* Current() { return current_; }
+  // A row's caption (with its gap) and value widths: counted for the next frame, and returned widened to the panel's last frame.
+  ImVec2 Fit(ImVec2 needed) {
+    measured_ = {std::max(measured_.x, needed.x), std::max(measured_.y, needed.y)};
+    return {std::max(last_.x, needed.x), std::max(last_.y, needed.y)};
+  }
+
+ private:
+  static std::unordered_map<ImGuiID, ImVec2>& Widths() {
+    static std::unordered_map<ImGuiID, ImVec2> widths;
+    return widths;
+  }
+  inline static thread_local SliderColumns* current_ = nullptr;
+  ImGuiID id_;
+  SliderColumns* previous_;
+  ImVec2 last_{0.f, 0.f};
+  ImVec2 measured_{0.f, 0.f};
+};
+
+// Where a grouped slider row's parts go when it fits one line (window-local positions), else one_line is false and the row stacks.
+struct SliderRowPlan {
+  bool one_line = false;
+  std::string caption;  // the shown caption, wrapped to its share of the row
+  size_t caption_lines = 1u;
+  float control_y = 0.f;  // the top of the slider and the reset button, centred on a wrapped caption
+  float slider_x = 0.f, slider_width = 0.f, value_right = 0.f, reset_x = 0.f;
+};
+
+// Plans a row starting at the cursor: caption, slider, the value right-aligned, then the reset button's place. `bounds` are the value's
+// text at both ends of the slider, so the value column never moves while it is dragged; the open panel's SliderColumns line its rows up.
+inline SliderRowPlan PlanSliderRow(const char* caption, const std::string& value, std::span<const std::string> bounds) {
+  const float row_x = gui::GetCursorPosX(), row_width = gui::GetContentRegionAvail().x, gap = style::RowGap();
+  const float caption_gap = style::Units(SLIDER_ROW_CAPTION_GAP_UNITS);
+  const std::string shown = gui::Display(caption);
+  ImVec2 needed{ImGui::CalcTextSize(shown.c_str()).x + caption_gap, ImGui::CalcTextSize(value.c_str()).x};
+  for (const std::string& bound : bounds) needed.y = std::max(needed.y, ImGui::CalcTextSize(bound.c_str()).x);
+  if (SliderColumns* const columns = SliderColumns::Current()) needed = columns->Fit(needed);
+  const float reset_width = gui::ResetButtonWidth();
+  const SliderRowWidths widths = SliderRowLayout(row_width, needed.x, SLIDER_ROW_CAPTION_SHARE, needed.y, reset_width, gap);
+  SliderRowPlan plan;
+  plan.caption = WrapLabel(shown, widths.caption - caption_gap);
+  plan.caption_lines = 1u + static_cast<size_t>(std::ranges::count(plan.caption, '\n'));
+  const ImVec2 caption_size = ImGui::CalcTextSize(plan.caption.c_str());
+  plan.slider_width = widths.slider;
+  plan.one_line = plan.caption_lines <= SLIDER_ROW_CAPTION_MAX_LINES && caption_size.x + caption_gap <= widths.caption
+                  && plan.slider_width >= style::Units(SLIDER_ROW_MIN_WIDTH_UNITS);
+  plan.control_y = gui::GetCursorPosY() + std::max(0.f, (caption_size.y - gui::GetFrameHeight()) * 0.5f);
+  plan.slider_x = row_x + widths.caption;
+  plan.reset_x = row_x + row_width - reset_width;
+  plan.value_right = plan.reset_x - gap;
+  return plan;
+}
+
+// A one-line row's caption, and its value right-aligned before the reset button's place. The value is drawn, not an item, so the slider
+// placed after it stays the last item for its tooltip and its active state.
+inline void SliderRowCaption(const SliderRowPlan& plan, const std::string& value) {
+  if (plan.caption_lines == 1u) gui::AlignTextToFramePadding();
+  ImGui::TextUnformatted(plan.caption.c_str());
+  const ImVec2 origin{gui::GetWindowPos().x - gui::GetScrollX(), gui::GetWindowPos().y - gui::GetScrollY()};
+  const ImVec2 at{origin.x + plan.value_right - ImGui::CalcTextSize(value.c_str()).x, origin.y + plan.control_y + gui::GetStyle().FramePadding.y};
+  gui::GetWindowDrawList()->AddText(at, gui::GetColorU32(ImGuiCol_SliderGrab), value.c_str());
+}
+
+// Moves the cursor back onto a one-line row's control line at `x` (window-local), for the reset button and then the slider.
+inline void ToSliderRowControl(const SliderRowPlan& plan, float x) {
+  gui::SameLine();
+  gui::SetCursorPosX(x);
+  gui::SetCursorPosY(plan.control_y);
+}
+
+// Percent marks under a slider: under a one-line row's slider, else across the whole row.
+inline void PercentTicks(double low, double high, const SliderRowPlan& row) {
+  const float offset = row.one_line ? row.slider_x - gui::GetCursorPosX() : 0.f;
+  const ImVec2 pos{gui::GetCursorScreenPos().x + offset, gui::GetCursorScreenPos().y};
+  const float width = row.one_line ? row.slider_width : gui::GetContentRegionAvail().x;
+  for (int i = 0; i < 4; ++i) {
+    const float t = i / 3.f;
+    const auto label = std::format("{:.0f}%", low + t * (high - low));
+    const float text_width = ImGui::CalcTextSize(label.c_str()).x;
+    const float x = std::clamp(width * t - text_width * 0.5f, 0.f, std::max(0.f, width - text_width));
+    gui::GetWindowDrawList()->AddText({pos.x + x, pos.y}, gui::GetColorU32(ImGuiCol_TextDisabled), label.c_str());
+  }
+  gui::Dummy({0.f, gui::GetTextLineHeight()});
+}
+
+// A rule inside a panel, between groups of rows or under a group's heading, and the gap under it that mirrors the gap above.
+inline void GroupRule() {
+  gui::Separator();
+  gui::SetCursorPosY(gui::GetCursorPosY() + style::Units(style::GROUP_RULE_GAP_UNITS));
+}
+
 inline void GroupHeading(const char* title, const char* note = nullptr) {
   gui::AlignTextToFramePadding();
   gui::TextUnformatted(title);
@@ -266,7 +381,7 @@ inline void GroupHeading(const char* title, const char* note = nullptr) {
     else gui::NewLine();
     gui::TextDisabled("%s", note);
   }
-  gui::Separator();
+  GroupRule();
 }
 
 // The preceding item has already advanced by ItemSpacing.y. Replace that gap instead of adding a second margin.
@@ -287,6 +402,7 @@ void Inset(const char* id, ImVec2 padding, Contents contents, ImU32 surface = 0,
   if (surface) gui::TableSetBgColor(ImGuiTableBgTarget_CellBg, surface);
   gui::PushItemWidth(-1.f);
   gui::PushTextWrapPos(0.f);
+  const SliderColumns columns(gui::GetID(id));
   contents();
   gui::PopTextWrapPos();
   gui::PopItemWidth();

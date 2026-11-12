@@ -16,6 +16,8 @@ namespace uplift::bridge {
 using Microsoft::WRL::ComPtr;
 
 constexpr ULONGLONG PENDING_WAIT_MS = 2000u;  // the destructor's wait for the game's D3D11 context, as D3D12Side::Drain's
+// Bytes per texel of the motion share: DXGI_FORMAT_R16G16_FLOAT, two 16-bit channels.
+constexpr uint32_t MOTION_BYTES_PER_TEXEL = 4u;
 
 // The description behind a D3D11 resource; nullopt for anything that is not a 2D texture. Public (the DLSS hand-off reads DLSS's textures).
 std::optional<D3D11_TEXTURE2D_DESC> TextureDesc11(ID3D11Resource* resource) {
@@ -145,7 +147,7 @@ void D3D11Bridge::CheckWatchdog(std::chrono::steady_clock::time_point now) {
   // Both directions count as progress, so a frame shows two steps: the game's work up to the copy-in, then NR's.
   const uint64_t completed = to11_->GetCompletedValue();
   if (const std::optional<std::string_view> stopped = watchdog_.Check(completed, completed + to12_->GetCompletedValue(), now)) {
-    std::string reason = std::format("The {} bridge stopped: {}", label_, *stopped);
+    std::string reason = std::format(BRIDGE_STOPPED_LINE, label_, *stopped);
     nr::Log(nr::LogLevel::ERR, reason);
     Stop(std::move(reason));
   }
@@ -244,7 +246,7 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
   // With `dlss_motion`, this frame's ring slot (copied in the game's evaluate) is DLSS's vectors for the Present path, before Launchpad's.
   RingSlot* ring_slot = nullptr;
   if (dlss_motion) {
-    // This present's own copy, else (flicker fix) the newest at most PRESENT_MOTION_MAX_AGE frames older: still DLSS's vectors, so no switch to Launchpad's.
+    // This present's own copy, else the newest at most PRESENT_MOTION_MAX_AGE frames older: still DLSS's vectors, so no switch to Launchpad's.
     std::array<uint64_t, RING_SLOTS> frames = {};
     for (size_t index = 0u; index < RING_SLOTS; ++index) {
       frames[index] = (ring_[index].shared.d3d12 ? ring_[index].frame : 0u);
@@ -271,7 +273,7 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
       if (!(motion_.failure && motion_.failure->Matches(size, DXGI_FORMAT_R16G16_FLOAT))) {
         HRESULT share_result = S_OK;
         if (CreateShared(size, DXGI_FORMAT_R16G16_FLOAT,
-                         D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS, 4u,
+                         D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS, MOTION_BYTES_PER_TEXEL,
                          L"Uplift shared motion", &motion_.shared, &share_result)) {
           motion_.failure.reset();
         } else {
@@ -394,7 +396,7 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
     watchdog_.Submitted(out, std::chrono::steady_clock::now());  // from submission, after recording
   }
   if (!frame.failure.empty()) {
-    Stop(std::format("The {} bridge stopped: {}", label_, frame.failure));
+    Stop(std::format(BRIDGE_STOPPED_LINE, label_, frame.failure));
     nr::Log(nr::LogLevel::ERR, latch_);
   }
   return frame.wrote;
@@ -441,7 +443,8 @@ void D3D11Bridge::ReleaseMask() {
 }
 
 void D3D11Bridge::Stop(std::string reason) {
-  if (latch_.empty()) {
+  const bool first = latch_.empty();
+  if (first) {
     latch_ = std::move(reason);
   }
   // Each fence up to the highest value a wait on it was queued for; nothing waits beyond those. A refused signal (a
@@ -451,6 +454,9 @@ void D3D11Bridge::Stop(std::string reason) {
   }
   if (to12_->GetCompletedValue() < waited12_) {
     to12_->Signal(waited12_);
+  }
+  if (first && on_latch_) {
+    on_latch_();
   }
 }
 

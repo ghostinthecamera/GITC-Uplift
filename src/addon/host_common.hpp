@@ -35,6 +35,15 @@ namespace uplift::addon::host {
 
 namespace api = reshade::api;
 
+// The name ReShade shows in its Add-ons list (the NAME export of both add-ons).
+inline constexpr char ADDON_NAME[] = "GITC Uplift";
+// The description ReShade shows beside it (the DESCRIPTION export of both add-ons).
+inline constexpr char ADDON_DESCRIPTION[] =
+    "A virtual photography focused version of the DLSS 5 mod: NVIDIA DLSS Neural Rendering (DLSS-NR) with greater "
+    "flexibility, ease of use, stability and hassle-free compatibility across APIs.";
+// The title of the add-on's overlay tab.
+inline constexpr char OVERLAY_TITLE[] = "GITC Uplift";
+
 // Why the vkCreateDevice hook is not installed: logged once from create_device(vulkan), or a startup warning; the argument is the reason.
 inline constexpr char VK_DEVICE_HOOK_FAILED_LINE[] = "Vulkan: the vkCreateDevice hook could not be installed: {}";
 // The startup warning when the Vulkan device pending marker of the last start is still there.
@@ -68,6 +77,8 @@ bool PinReshade(HMODULE reshade_module);
 [[nodiscard]] std::filesystem::path ModulePath(HMODULE handle);
 // The Vulkan loader is loaded in this process.
 [[nodiscard]] bool VulkanLoaderLoaded();
+// The API's name in the texts.
+[[nodiscard]] std::string_view ApiName(api::device_api device_api);
 
 // DllMain: outside ReShade the add-on refuses to load.
 [[nodiscard]] inline bool RefusesLoad(DWORD reason) {

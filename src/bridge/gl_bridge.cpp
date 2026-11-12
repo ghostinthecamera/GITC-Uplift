@@ -15,6 +15,9 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
+// Bytes per texel of the motion share: DXGI_FORMAT_R16G16_FLOAT, two 16-bit channels.
+constexpr uint32_t MOTION_BYTES_PER_TEXEL = 4u;
+
 }  // namespace
 
 std::unique_ptr<GlBridge> GlBridge::Create(gl::Functions functions, LUID luid, ComPtr<ID3D12Device>* created, std::string* error) {
@@ -108,7 +111,7 @@ void GlBridge::Retire(gl::GameHost& host, Shared* shared) {
 
 void GlBridge::LatchGl(std::string_view failure) {
   if (!latch_.empty()) return;
-  std::string reason = std::format("The OpenGL bridge stopped: {}", failure);
+  std::string reason = std::format(BRIDGE_STOPPED_LINE, GL_BRIDGE_LABEL, failure);
   nr::Log(nr::LogLevel::ERR, reason);
   // After a failed wait the private queue would otherwise wait on `to12` until destroy_device.
   Stop(std::move(reason));
@@ -128,7 +131,7 @@ BridgeFrame GlBridge::BeginFrame(gl::GameHost& host, const gl::ImageInfo& back_b
     // Both directions count as progress, so a frame shows two steps: the game's work up to the copy-in, then NR's.
     const uint64_t completed = to11_->GetCompletedValue();
     if (const std::optional<std::string_view> stopped = watchdog_.Check(completed, completed + to12_->GetCompletedValue(), now)) {
-      std::string reason = std::format("The OpenGL bridge stopped: {}", *stopped);
+      std::string reason = std::format(BRIDGE_STOPPED_LINE, GL_BRIDGE_LABEL, *stopped);
       nr::Log(nr::LogLevel::ERR, reason);
       Stop(std::move(reason));
     }
@@ -254,7 +257,7 @@ bool GlBridge::Run(gl::GameHost& host, const gl::ImageInfo& frame, const gl::Ima
       Retire(host, &motion_);
       if (!(motion_failure_ && motion_failure_->Matches(motion.size, DXGI_FORMAT_R16G16_FLOAT))) {
         std::string failure;
-        if (CreateShared(motion.size, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS, 4u,
+        if (CreateShared(motion.size, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS, MOTION_BYTES_PER_TEXEL,
                          L"Uplift shared motion", &motion_, &failure)) {
           motion_failure_.reset();
         } else {

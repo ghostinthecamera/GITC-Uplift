@@ -8,13 +8,16 @@
 
 namespace uplift::bridge {
 
+// The latch text and log line of every private-device bridge: `{}` is the bridge's label (Label()), then the failure.
+inline constexpr char BRIDGE_STOPPED_LINE[] = "The {} bridge stopped: {}";
+
 // What the add-on asks of a game device's private-device bridge (D3D11Bridge, D3D10Bridge, VkBridge, GlBridge) without knowing its API: the
 // private Direct3D 12 device and queue, whether Retry now can replace them, the stop and its latch, and the panel's figures. Recording
 // (BeginFrame, Run), the mask (CopyMask, ReleaseMask) and teardown stay on each bridge: their arguments and rules differ per API (GL's
 // current-context rule and no GL call at destroy, Vulkan's retire-behind-fences and present-queue wait, D3D10's keyed relay, D3D11's DLSS
 // hand-off and motion ring).
-// D3D10Bridge: Stopped() is true once its D3D11 bridge or its relay stopped, while Latch() is the D3D11 bridge's text, which a relay stop
-// reaches at the relay's next latch sync (after the next keyed step, or at BeginFrame): Stopped() can be true while Latch() is still empty.
+// D3D10Bridge: Stopped() is true once its D3D11 bridge or its relay stopped, and Latch() is the D3D11 bridge's text, which a relay stop reaches inside the
+// call that set it (the relay's latch handler).
 // Never destroyed through this type: every owner holds a bridge by its own type.
 class PrivateDeviceBridge {
  public:

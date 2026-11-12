@@ -6,10 +6,12 @@
 #include <wrl/client.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "nr/types.hpp"
 
@@ -81,8 +83,10 @@ class KeyedRelay {
   // A key that did not come or could not be given: latches with `what`. Nothing acquires a key after it. It logs nothing: the owner
   // passes the latch on (D3D10Bridge into its D3D11 bridge, D3D10Client into its D3D11 client), logs it once there, and stops the fences.
   void Fail(std::string_view what);
-  // The owner's own stop latches the relay too; the first reason stays.
+  // The owner's own stop latches the relay too; the first reason stays. The first latch (from Fail or here) calls the handler OnLatch set.
   void Stop(std::string reason);
+  // The owner that must pass the latch on (D3D10Bridge into its D3D11 bridge) sets it once, and clears it before it is destroyed. The 32-bit D3D10Client sets none.
+  void OnLatch(std::function<void()> handler) { on_latch_ = std::move(handler); }
   [[nodiscard]] bool Stopped() const { return !latch_.empty(); }
   [[nodiscard]] std::string_view Reason() const { return latch_; }  // `what` of the Fail, or the owner's reason
   void ClearLatch() { latch_.clear(); }  // the 32-bit D3D10 client's Retry now after the helper stopped
@@ -100,6 +104,7 @@ class KeyedRelay {
   LUID luid_ = {};
   bool dirty_ = false;
   std::string latch_;
+  std::function<void()> on_latch_;  // called once, when the latch is first set, by the owner that must pass it on
 };
 
 // The description behind a D3D10 resource; nullopt for anything that is not a 2D texture. Both owners of a KeyedRelay describe the

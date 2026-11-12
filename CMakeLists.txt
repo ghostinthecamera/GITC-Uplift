@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(uplift VERSION 1.9.0 LANGUAGES C CXX)
+project(uplift VERSION 2.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -112,6 +112,7 @@ endif()
 add_library(uplift_nr STATIC
   src/nr/log.cpp
   src/nr/pe_imports.cpp
+  src/nr/process_modules.cpp
   src/nr/driver_store.cpp
   src/nr/snippet.cpp
   src/nr/feature.cpp
@@ -353,7 +354,7 @@ else()
 # The 32-bit add-on's own code. No NGX include path, no shaders, no D3D12 pipeline.
 add_library(uplift_ui32 STATIC
   src/sources/work_size.cpp
-  src/nr/log.cpp src/color/encoding.cpp src/look/look_math.cpp
+  src/nr/log.cpp src/nr/process_modules.cpp src/color/encoding.cpp src/look/look_math.cpp
   src/ui/localization.cpp src/ui/settings.cpp src/ui/settings_schema.cpp src/ui/controls_coalescer.cpp src/ui/status_text.cpp
   src/addon/frame_trigger.cpp src/addon/swapchain_selector.cpp src/addon/launchpad_link.cpp
   src/addon/nr_claim.cpp src/addon/reshade_version.cpp src/addon/environment.cpp src/addon/removal_latch.cpp)

@@ -81,6 +81,20 @@ void FeatureRegistry::OnRelease(const NVSDK_NGX_Handle* handle) {
   not_adopted_.erase(handle);  // the core may hand the handle out again
 }
 
+void FeatureRegistry::OnEvaluate(const NVSDK_NGX_Handle* handle, std::chrono::steady_clock::time_point when) {
+  const std::shared_lock lock(mutex_);
+  const auto found = features_.find(handle);
+  if (found == features_.end() || KindOf(found->second.feature) != FeatureKind::NEURAL_RENDERING) return;
+  last_nr_evaluate_.store(when.time_since_epoch().count());
+}
+
+std::optional<std::chrono::steady_clock::time_point> FeatureRegistry::LastEvaluated(FeatureKind kind) const {
+  if (kind != FeatureKind::NEURAL_RENDERING) return std::nullopt;
+  const std::chrono::steady_clock::rep ticks = last_nr_evaluate_.load();
+  if (ticks == 0) return std::nullopt;
+  return std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(ticks));
+}
+
 size_t FeatureRegistry::OnCoreShutdown(NgxApi api, const void* device) {
   const std::unique_lock lock(mutex_);
   not_adopted_.clear();  // every handle the shutdown ended may come back

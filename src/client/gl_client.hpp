@@ -11,6 +11,7 @@
 
 #include "addon/frame_trigger.hpp"
 #include "bridge/bridge_sequence.hpp"
+#include "bridge/share_failure.hpp"
 #include "client/nr_link.hpp"
 #include "gl/format.hpp"
 #include "gl/functions.hpp"
@@ -91,13 +92,8 @@ class GlClient {
     // What host.Copy takes for the shared texture.
     [[nodiscard]] gl::ImageInfo Image() const { return {.handle = gl.Handle(), .size = size, .format = format, .samples = 1u}; }
   };
-  // A share that failed: not retried for this size and format until NR is re-enabled.
-  struct ShareFailure {
-    nr::Size size;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    std::string what;  // the failing GL call and its error
-    [[nodiscard]] bool Matches(nr::Size other_size, DXGI_FORMAT other_format) const { return size == other_size && format == other_format; }
-  };
+  // A share that failed: not retried for this size and format until NR is re-enabled. The cause is the failing GL call and its error.
+  using ShareFailure = bridge::ShareFailureOf<std::string>;
   // What the last SHARE_MASK and SHARE_MOTION asked for: a reply that lands late is imported in Apply, and a failure there is recorded for this size and
   // format (the ones CopyMask and Run look up), not the back buffer's.
   struct ShareAsk {

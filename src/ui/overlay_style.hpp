@@ -8,6 +8,21 @@
 
 namespace uplift::ui::style {
 
+// The overlay's layout measures. One unit is 4 px at ReShade's 13 px reference font, so every inset and gap follows the live font size.
+constexpr float REFERENCE_FONT_PX = 13.f;
+constexpr float UNIT_PX = 4.f;
+constexpr float CONTROL_PADDING_UNITS = 1.f;      // a control's inner left and right inset
+constexpr float CONTROL_HEIGHT_UNITS = 4.5f;      // buttons, combos, checkboxes and slider rows
+constexpr float LABEL_GAP_UNITS = 0.5f;           // a caption to its control, and inside a control
+constexpr float ROW_GAP_UNITS = 0.75f;            // between rows
+constexpr float PANEL_INSET_UNITS = 1.5f;         // a panel's padding and the gutter between paired panels
+constexpr float BLOCK_GAP_UNITS = 2.f;            // between blocks inside a section
+constexpr float SECTION_GAP_UNITS = 3.f;          // between sections
+constexpr float SEPARATOR_UNITS = 0.25f;          // a section heading's rule
+constexpr float DISCLOSURE_HEIGHT_UNITS = 5.5f;   // a collapsible section's header
+constexpr float GROUP_RULE_GAP_UNITS = 1.f;       // under a group heading's rule, before the group's first row
+constexpr float PAIRED_GROUPS_MIN_WIDTH_UNITS = 112.f;  // narrower than this, paired panels stack
+
 inline ImVec4 PassAccent(uint32_t first, size_t stage) {
   const auto accent = gui::GetStyleColorVec4(ImGuiCol_CheckMark);
   if (first == 0) return accent;
@@ -34,15 +49,15 @@ inline ImVec4 Tint(ImVec4 accent, float tint) {
 inline ImVec4 SelectedFill(ImVec4 accent) { return Tint(accent, 0.28f); }
 
 // ReShade's reference UI font is 13 px. Resolve every inset and gap from the live font size.
-inline float Units(float count) { return gui::GetFontSize() * (4.f / 13.f) * count; }
-inline float ControlPadding() { return Units(1); }
-inline float ControlHeight() { return Units(6); }
-inline float LabelGap() { return Units(0.75f); }
-inline float RowGap() { return Units(1.25f); }
-inline float PanelInset() { return Units(2); }
-inline float BlockGap() { return Units(3); }
-inline float SectionGap() { return Units(4.5f); }
-inline bool FitPairedGroups() { return gui::GetContentRegionAvail().x >= Units(144); }
+inline float Units(float count) { return gui::GetFontSize() * (UNIT_PX / REFERENCE_FONT_PX) * count; }
+inline float ControlPadding() { return Units(CONTROL_PADDING_UNITS); }
+inline float ControlHeight() { return Units(CONTROL_HEIGHT_UNITS); }
+inline float LabelGap() { return Units(LABEL_GAP_UNITS); }
+inline float RowGap() { return Units(ROW_GAP_UNITS); }
+inline float PanelInset() { return Units(PANEL_INSET_UNITS); }
+inline float BlockGap() { return Units(BLOCK_GAP_UNITS); }
+inline float SectionGap() { return Units(SECTION_GAP_UNITS); }
+inline bool FitPairedGroups() { return gui::GetContentRegionAvail().x >= Units(PAIRED_GROUPS_MIN_WIDTH_UNITS); }
 inline ImVec4 Surface(float tint = 0.065f) {
   return Tint(gui::GetStyleColorVec4(ImGuiCol_Text), tint);
 }
@@ -62,7 +77,7 @@ class OverlayStyle {
     gui::PushStyleVar(ImGuiStyleVar_FramePadding, {ControlPadding(), (ControlHeight() - gui::GetFontSize()) * 0.5f});
     gui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, {LabelGap(), LabelGap()});
     gui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {RowGap(), RowGap()});
-    gui::PushStyleVar(ImGuiStyleVar_SeparatorTextBorderSize, Units(0.25f));
+    gui::PushStyleVar(ImGuiStyleVar_SeparatorTextBorderSize, Units(SEPARATOR_UNITS));
     gui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::max(theme.FrameRounding, LabelGap()));
     gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, std::max(theme.FrameBorderSize, 1.f));
   }

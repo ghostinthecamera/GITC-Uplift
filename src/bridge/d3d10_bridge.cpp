@@ -12,6 +12,11 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
+// Bytes per texel of the motion share: DXGI_FORMAT_R16G16_FLOAT, two 16-bit channels.
+constexpr uint32_t MOTION_BYTES_PER_TEXEL = 4u;
+// The relay's latch reason when the D3D11 bridge stopped first.
+constexpr char BRIDGE_STOPPED_FIRST[] = "the Direct3D 11 bridge stopped";
+
 }  // namespace
 
 std::unique_ptr<D3D10Bridge> D3D10Bridge::Create(ID3D10Device* device, ComPtr<ID3D11Device>* relay_created,
@@ -22,18 +27,28 @@ std::unique_ptr<D3D10Bridge> D3D10Bridge::Create(ID3D10Device* device, ComPtr<ID
   if (!bridge->relay_) return nullptr;  // `error` says why
   bridge->bridge_ = D3D11Bridge::Create(bridge->relay_->Relay(), created, error, "Direct3D 10");
   if (!bridge->bridge_) return nullptr;  // `error` says why
+  // The two latches are one: each side passes its own to the other inside the call that sets it, and the Stopped() checks end the recursion.
+  D3D10Bridge* const self = bridge.get();
+  bridge->relay_->OnLatch([self] {
+    if (!self->bridge_->Stopped()) {
+      std::string reason = KeyedRelay::Sentence(self->relay_->Reason());
+      nr::Log(nr::LogLevel::ERR, reason);
+      self->bridge_->Stop(std::move(reason));  // the D3D11 bridge's latch is the one, its fences signalled
+    }
+  });
+  bridge->bridge_->OnLatch([self] {
+    if (!self->relay_->Stopped()) {
+      self->relay_->Stop(BRIDGE_STOPPED_FIRST);
+    }
+  });
   nr::Log(nr::LogLevel::INFO, "Direct3D 10: frames cross through a Direct3D 11 relay device (keyed mutex)");
   return bridge;
 }
 
-void D3D10Bridge::SyncLatches() {
-  if (relay_->Stopped() && !bridge_->Stopped()) {
-    std::string reason = KeyedRelay::Sentence(relay_->Reason());
-    nr::Log(nr::LogLevel::ERR, reason);
-    bridge_->Stop(std::move(reason));  // the D3D11 bridge's latch is the one, its fences signalled
-  } else if (bridge_->Stopped() && !relay_->Stopped()) {
-    relay_->Stop("the Direct3D 11 bridge stopped");
-  }
+D3D10Bridge::~D3D10Bridge() {
+  // The handlers name both members: they go before either is destroyed. Create may have returned half made.
+  if (relay_) relay_->OnLatch({});
+  if (bridge_) bridge_->OnLatch({});
 }
 
 void D3D10Bridge::FlushRelay() {
@@ -83,7 +98,6 @@ BridgeFrame D3D10Bridge::BeginFrame(ID3D10Resource* back_buffer, bool enabled, b
       }
     }
   }
-  SyncLatches();  // a key that did not come while the keyed colour was made stops the D3D11 bridge before it is used below
   // Reported while NR is off too, so the Session does not load for a back buffer the relay cannot share, nor for
   // one the D3D11 bridge could not share with the private device: it describes a back buffer only while NR runs.
   if (problem.empty() && color_failure_ && color_failure_->Matches(size, back_buffer_format)) {
@@ -128,8 +142,8 @@ BridgeFrame D3D10Bridge::BeginFrame(ID3D10Resource* back_buffer, bool enabled, b
 
 bool D3D10Bridge::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, const Recorder& record) {
   if (!shared_ready_ || Stopped() || !color_.relay || back_buffer == nullptr) return false;
-  // LaunchPad's UPLIFT_MV crosses like the colour, and is retired when a recording comes
-  // without one (LaunchPad off, or NR at the present or after the effects).
+  // LaunchPad's UPLIFT_MV crosses like the colour. Kept through a run of up to MOTION_KEEP_PRESENTS recordings without one, and retired past it
+  // (LaunchPad off, or NR at the present or after the effects); a kept keyed texture is not handed over or taken, so it holds only its last use.
   Keyed* motion_keyed = nullptr;
   const std::optional<D3D10_TEXTURE2D_DESC> motion_description = TextureDesc(motion);
   if (motion_description && motion_description->Format == DXGI_FORMAT_R16G16_FLOAT
@@ -140,7 +154,7 @@ bool D3D10Bridge::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, const
     }
     if (!motion_.relay && !(motion_failure_ && motion_failure_->Matches(size, DXGI_FORMAT_R16G16_FLOAT))) {
       HRESULT result = S_OK;
-      if (relay_->CreateKeyed(size, DXGI_FORMAT_R16G16_FLOAT, 4u, &motion_, &result)) {
+      if (relay_->CreateKeyed(size, DXGI_FORMAT_R16G16_FLOAT, MOTION_BYTES_PER_TEXEL, &motion_, &result)) {
         motion_failure_.reset();
       } else {
         // Logged once: not retried for this size.
@@ -151,14 +165,13 @@ bool D3D10Bridge::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, const
       }
     }
     motion_keyed = (motion_.relay ? &motion_ : nullptr);
-  } else {
-    relay_->Drop(&motion_);
+    motion_keep_.Arrived();
+  } else if (motion_.relay && motion_keep_.RetireOnMiss()) {
+    relay_->Drop(&motion_);  // the motion stopped: the keyed texture goes
   }
-  SyncLatches();  // a key that did not come while the keyed motion was made
   // 1. The game's side hands the frame over (key 0 -> 1), then submits: the relay's GPU never waits for a release that
   //    was not submitted.
   if (!relay_->Hand(color_, back_buffer) || (motion_keyed != nullptr && !relay_->Hand(*motion_keyed, motion))) {
-    SyncLatches();
     return false;
   }
   game_->Flush();
@@ -167,23 +180,18 @@ bool D3D10Bridge::Run(ID3D10Resource* back_buffer, ID3D10Resource* motion, const
   std::optional<KeyedRelay::KeyGuard> color_key;
   std::optional<KeyedRelay::KeyGuard> motion_key;
   if (!relay_->Take(color_, &color_key)) {
-    SyncLatches();
     return false;
   }
   const bool motion_taken = (motion_keyed != nullptr && relay_->Take(*motion_keyed, &motion_key));
-  SyncLatches();
   const bool wrote = (motion_keyed == nullptr || motion_taken)
                      && bridge_->Run(color_.relay.Get(), (motion_taken ? motion_keyed->relay.Get() : nullptr), record);
-  SyncLatches();      // the D3D11 bridge's own latch (a failed recording) is the relay's too: a key released below says nothing more
   color_key.reset();  // each key goes back here on the way out of the D3D11 bridge, and by unwinding if it threw
   motion_key.reset();
-  SyncLatches();
   FlushRelay();
   // 3. The game's side takes NR's result back (key 0). Its GPU waits for the relay's copy out, which waits for NR, whose
   //    D3D12 signal RunBridgedFrame submitted first. A key that could not be given stopped the bridge: no acquire.
   if (!wrote || Stopped()) return false;
   const bool copied_back = relay_->GiveBack(color_, back_buffer);
-  SyncLatches();
   return copied_back;
 }
 
@@ -214,21 +222,17 @@ MaskCopy D3D10Bridge::CopyMask(ID3D10Resource* mask) {
     }
     mask_failure_.reset();
   }
-  SyncLatches();  // a key that did not come while the keyed mask was made
   // The colour's hand-off.
   if (!relay_->Hand(mask_, mask)) {
-    SyncLatches();
     return {};
   }
   game_->Flush();
   std::optional<KeyedRelay::KeyGuard> key;
   if (!relay_->Take(mask_, &key)) {
-    SyncLatches();
     return {};
   }
   const MaskCopy copied = bridge_->CopyMask(mask_.relay.Get());
   key.reset();
-  SyncLatches();
   if (!copied.size && !copied.unsupported) {
     // The D3D11 bridge could not share it with the private device (RGBA32F, for one): not handed over again for this
     // size and format until a re-enable, instead of two full-frame copies a frame for nothing.
@@ -245,8 +249,10 @@ void D3D10Bridge::ReleaseMask() {
 }
 
 void D3D10Bridge::Stop(std::string reason) {
-  relay_->Stop(reason);  // the relay's latch follows the D3D11 bridge's, which is the one that signals the fences
-  bridge_->Stop(std::move(reason));
+  // The D3D11 bridge first: its latch is the one that signals the fences and the one the card shows, and its handler stops the relay. Stopping the relay
+  // first would make the relay's handler stop the D3D11 bridge with the relay's sentence and an ERR line, which an external stop never writes.
+  bridge_->Stop(reason);
+  relay_->Stop(std::move(reason));
 }
 
 uint64_t D3D10Bridge::SharedBytes() const {

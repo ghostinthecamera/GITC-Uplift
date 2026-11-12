@@ -17,7 +17,7 @@ constexpr auto PRESENT_STARVATION = std::chrono::milliseconds(250);
 // DLSS_IDLE_MINIMUM is shared by the native and bridged placement state.
 // A device removed this soon after Uplift recorded on a game list latches the DLSS placements off.
 constexpr auto DLSS_LATCH_WINDOW = std::chrono::seconds(10);
-// How long "descriptors busy" may persist, back to back, before it is
+// How long nr::SkipReason::DESCRIPTORS_BUSY may persist, back to back, before it is
 // worth one WARN -- long enough that a normal submit-only-thread stall (aged out by Timeline's own
 // AGED_SUBMISSION_TIME, at most a few hundred ms) never triggers it.
 constexpr auto DESCRIPTORS_BUSY_WARN_AGE = std::chrono::seconds(1);
@@ -25,6 +25,9 @@ constexpr auto DESCRIPTORS_BUSY_WARN_AGE = std::chrono::seconds(1);
 // frame generation on, the presents come from its own queue (as in Onimusha), so the card says that instead.
 constexpr std::string_view OTHER_QUEUE_REASON = "the game's DLSS runs on another queue";
 constexpr std::string_view FRAME_GEN_QUEUE_REASON = "with frame generation on, the presents come from another queue";
+// The completion-token counts of the five-second diagnostic: which path stamped them, what was recorded and never submitted, what is outstanding.
+constexpr char TOKENS_DIAGNOSTIC_FORMAT[] =
+    "DLSS diagnostic tokens: stamped {} by their thread ({} at a later ExecuteCommandLists call), {} by age; {} recorded but never submitted; {} outstanding (cumulative for this device)";
 
 }  // namespace
 
@@ -237,7 +240,8 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
     stage.skip_reason = reason;
     stage.motion_source = sources::MotionSource::NONE;
     if (group == 0u) {
-      status_.NoteSkip(reason, RecordingStatus::Reset::REASON);
+      // As Vulkan's SkipPresent: NR did not run, so the card says why instead of reading the last recording (BeginFrame keeps a status a Run wrote).
+      status_.NoteSkip(reason, RecordingStatus::Reset::ALL_BUT_MOTION);
     } else {
       present_reset_owed_ = true;  // the Session never saw this frame: the group's next recording restarts its history
     }
@@ -412,7 +416,7 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
   const nr::Rect region = sources::ResolveOutputRegion(frame);
   const sources::WorkLayout layout = SettleLayout({region.width, region.height}, Stage::AFTER_DLSS, now);  // in every state
   // Only ACTIVE has anything to evaluate. LOADING, GRACE, DRAINING and
-  // FAILED would otherwise reach AfterDlssSource::Run and report its misleading "list state unknown".
+  // FAILED would otherwise reach AfterDlssSource::Run and report its misleading nr::SkipReason::LIST_STATE_UNKNOWN.
   if (session_->State() != nr::SessionState::ACTIVE) {
     stages_[static_cast<size_t>(Stage::AFTER_DLSS)].nr_applied = false;
     stages_[static_cast<size_t>(Stage::AFTER_DLSS)].skip_reason = nr::SkipReason::NONE;
@@ -821,12 +825,17 @@ void DeviceContext::ResubmitTokens(uint64_t first_token, ID3D12CommandQueue* que
 }
 
 void DeviceContext::DropTokens(std::span<const uint64_t> tokens) {
+  dropped_tokens_.fetch_add(tokens.size());
   timeline_->Drop(tokens);
 }
 
-void DeviceContext::StampThread(uint32_t thread_id) {
+void DeviceContext::StampThread(uint32_t thread_id, bool later_call) {
   if (!device_lost_) {
+    const uint64_t before = timeline_->ThreadStamps();
     timeline_->StampThread(thread_id);
+    if (later_call) {
+      later_call_stamps_.fetch_add(timeline_->ThreadStamps() - before);
+    }
   }
 }
 
@@ -862,6 +871,8 @@ void DeviceContext::UpdateSession(std::chrono::steady_clock::time_point now) {
              static_cast<const void*>(device_.Get()), FormatPlacementLine(placement_, main_snapshot_), main_evaluates_, age,
              std::max(2 * settings_.session.grace, DLSS_IDLE_MINIMUM).count(), dlss_idle_, dlss_paused_, settings_.session.enabled,
              facts_.nr_allowed, blocked_reason_, core_hold_.Held(), core_hold_.Abandoned(), placement_ready, want, nr::SessionStateName(session_->State()));
+    nr::Logf(nr::LogLevel::TRACE, TOKENS_DIAGNOSTIC_FORMAT, timeline_->ThreadStamps(), later_call_stamps_.load(), timeline_->AgedStamps(),
+             dropped_tokens_.load(), timeline_->OutstandingTokens());
   }
   // An OFF Session can still be suspended with its enable request retained. A real disable must reach SetEnabled(false) to cancel that request,
   // and toggling off then on must permit an explicit resume. Only an idle-only disable on an already-suspended Session is suppressed: forwarding
@@ -937,6 +948,9 @@ void DeviceContext::Teardown() {
   }
   session_->OnDeviceDestroyed();  // flushes the timeline and every queue's tokens (Session's TEARDOWN_WAIT cap), then unloads; after the game's NGX shutdown, nothing
                                   // of NGX's is left to release here (OnCoreShutdown did it, or NR was off), so this makes no NGX call
+  // NR is unloaded and the device still held (a bridge releases its private device after this): a core Uplift initialised on it is shut down now,
+  // before the device goes. A removed device returned above, with no NGX call.
+  nr::Snippet::ShutdownD3D12Core(device_.Get());
 }
 
 void DeviceContext::OnCoreShutdown(std::chrono::milliseconds cap, uint64_t upscaler_creates, uint64_t serial) {
@@ -1012,17 +1026,7 @@ ContextStatus DeviceContext::Status() const {
   status.trigger = (placement_.placement == Placement::PRESENT ? trigger_used_ : TriggerPoint::NONE);
   status.nr_applied = status_.nr_applied;
   status.passes_run = status_.passes_run;
-  if (chain_.Split()) {
-    // Split chain: the card and Details count every group's passes, not only pass 1's group (counting pass 1's alone showed "Running 1 of 3" in Onimusha with all
-    // three running). A group whose latest recording skipped counts none, and a group's latest recording counts at most its own passes (it may predate a
-    // chain change in this frame).
-    status.passes_run = 0u;
-    for (uint32_t index = 0u; index < chain_.group_count; ++index) {
-      const StageGroup& group = chain_.groups[index];
-      const StageState& stage = stages_[static_cast<size_t>(group.stage)];
-      status.passes_run += (stage.nr_applied ? std::min(stage.passes_run, group.count) : 0u);
-    }
-  }
+  if (chain_.Split()) status.passes_run = stages_.SplitPassesRun(chain_);
   status.frame = frame_size_;
   status.encoding = encoding_;
   status.diffuse_white_nits = diffuse_white_nits_;
@@ -1076,23 +1080,7 @@ ContextStatus DeviceContext::Status() const {
   if (status_.nr_applied) {
     status.exposure_line = sources::ExposureLine(present_source_->Pipeline().LastExposure());
   }
-  // Split chain: the chain line and note, and each group's latest recording.
-  std::array<nr::Size, STAGE_COUNT> canvases = {};
-  for (size_t stage = 0u; stage < STAGE_COUNT; ++stage) {
-    canvases[stage] = stages_[stage].canvas;
-  }
-  if (chain_.Split()) {
-    status.chain_line = std::format("Chain: {}", FormatChainLine(chain_, canvases));
-  }
-  status.chain_note = chain_.note;
-  status.group_count = chain_.group_count;
-  for (uint32_t index = 0u; index < chain_.group_count; ++index) {
-    const StageGroup& group = chain_.groups[index];
-    const StageState& stage = stages_[static_cast<size_t>(group.stage)];
-    status.groups[index] = {.stage = group.stage, .first = group.first, .count = group.count, .nr_applied = stage.nr_applied,
-                            .passes_run = stage.passes_run, .skip_reason = stage.skip_reason, .motion_source = stage.motion_source,
-                            .work = stage.work, .canvas = stage.canvas};
-  }
+  stages_.WriteChain(chain_, status);
   // The user's motion-vector-indicator request: NrPipeline's mechanical report (the status's motion source, and the
   // scale for DIRECT) plus the reason for NONE, which only DeviceContext has enough context to say.
   status.motion_source = status_.motion_source;
