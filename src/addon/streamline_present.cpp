@@ -8,6 +8,7 @@
 #include <cwchar>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <vector>
 #include <utility>
 #include <wrl/client.h>
@@ -111,12 +112,14 @@ struct Hook {
 struct CreateMethod {
   using Fn = Create;
   static constexpr const char* NAME = "CreateSwapChain";
+  using Interface = IDXGIFactory;
   static constexpr size_t SLOT = CREATE_SWAPCHAIN_SLOT;
   template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**);
 };
 struct CreateHwndMethod {
   using Fn = CreateHwnd;
   static constexpr const char* NAME = "CreateSwapChainForHwnd";
+  using Interface = IDXGIFactory2;
   static constexpr size_t SLOT = CREATE_SWAPCHAIN_FOR_HWND_SLOT;
   template<size_t Entry>
   static HRESULT STDMETHODCALLTYPE Detour(IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**);
@@ -124,36 +127,42 @@ struct CreateHwndMethod {
 struct CreateCompositionMethod {
   using Fn = CreateComposition;
   static constexpr const char* NAME = "CreateSwapChainForComposition";
+  using Interface = IDXGIFactory2;
   static constexpr size_t SLOT = CREATE_SWAPCHAIN_FOR_COMPOSITION_SLOT;
   template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGIFactory2*, IUnknown*, const DXGI_SWAP_CHAIN_DESC1*, IDXGIOutput*, IDXGISwapChain1**);
 };
 struct PresentMethod {
   using Fn = Present;
   static constexpr const char* NAME = "Present";
+  using Interface = IDXGISwapChain;
   static constexpr size_t SLOT = PRESENT_SLOT;
   template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain*, UINT, UINT);
 };
 struct Present1Method {
   using Fn = Present1;
   static constexpr const char* NAME = "Present1";
+  using Interface = IDXGISwapChain1;
   static constexpr size_t SLOT = PRESENT1_SLOT;
   template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
 };
 struct ResizeMethod {
   using Fn = Resize;
   static constexpr const char* NAME = "ResizeBuffers";
+  using Interface = IDXGISwapChain;
   static constexpr size_t SLOT = RESIZE_BUFFERS_SLOT;
   template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 };
 struct Resize1Method {
   using Fn = Resize1;
   static constexpr const char* NAME = "ResizeBuffers1";
+  using Interface = IDXGISwapChain3;
   static constexpr size_t SLOT = RESIZE_BUFFERS1_SLOT;
   template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
 };
 struct ColorMethod {
   using Fn = Color;
   static constexpr const char* NAME = "SetColorSpace1";
+  using Interface = IDXGISwapChain3;
   static constexpr size_t SLOT = SET_COLOR_SPACE1_SLOT;
   template<size_t Entry> static HRESULT STDMETHODCALLTYPE Detour(IDXGISwapChain3*, DXGI_COLOR_SPACE_TYPE);
 };
@@ -261,15 +270,75 @@ struct Claim {
   bool Attached() const { return result == ClaimResult::ATTACHED; }
 };
 
+#if defined(_WIN64)
+template<class Spec>
+ProviderMethod<Spec>& MethodOf() {
+  if constexpr (std::is_same_v<Spec, CreateMethod>) return create;
+  else if constexpr (std::is_same_v<Spec, CreateHwndMethod>) return create_hwnd;
+  else if constexpr (std::is_same_v<Spec, CreateCompositionMethod>) return create_composition;
+  else if constexpr (std::is_same_v<Spec, PresentMethod>) return present;
+  else if constexpr (std::is_same_v<Spec, Present1Method>) return present1;
+  else if constexpr (std::is_same_v<Spec, ResizeMethod>) return resize;
+  else if constexpr (std::is_same_v<Spec, Resize1Method>) return resize1;
+  else return color;
+}
+
+// The interposer's one-line forwarders (load the wrapped object, jump to the same slot of its vtable) can be folded into one
+// function for every proxy class with that slot: the swapchain proxy's SetColorSpace1 (slot 38) is then also the command list
+// proxy's SetGraphicsRootConstantBufferView(index, GPU address). A detour on such an address receives every object whose class
+// shares it, with that class's arguments. So each hooked address enters through ForwardingDetour: it takes every integer
+// argument as a raw 64-bit value (the four argument registers and four stack slots, more than any hooked method takes), and an
+// object that is not the method's interface gets them back unchanged, as if no hook were there. Each vtable is classified once
+// by QueryInterface (slot 0 of every COM object), so a hot folded method costs a few pointer comparisons after its first call.
+// None of the methods sharing these slots takes floating-point arguments, which travel in XMM registers this path does not keep.
+// 64-bit only: Streamline is 64-bit, and on x86 __stdcall the callee pops its arguments, so a wider forwarder would not balance.
+using Forward = uintptr_t(STDMETHODCALLTYPE*)(void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+constexpr size_t VTABLE_CLASSES = 32u;
+constexpr uintptr_t VTABLE_MATCHES = 1u;  // low bit of a cached vtable address (vtables are pointer-aligned)
+
+template<class Interface>
+bool Implements(void* object) {
+  static std::array<std::atomic<uintptr_t>, VTABLE_CLASSES> classes{};
+  if (!object) return false;
+  const auto vtable = *static_cast<uintptr_t*>(object);
+  for (const auto& entry : classes) {
+    const uintptr_t known = entry.load(std::memory_order_acquire);
+    if (!known) break;
+    if ((known & ~VTABLE_MATCHES) == vtable) return (known & VTABLE_MATCHES) != 0u;
+  }
+  ComPtr<Interface> probe;
+  const bool matches = SUCCEEDED(static_cast<IUnknown*>(object)->QueryInterface(IID_PPV_ARGS(&probe)));
+  const uintptr_t value = vtable | (matches ? VTABLE_MATCHES : 0u);
+  for (auto& entry : classes) {
+    uintptr_t expected = 0u;
+    if (entry.compare_exchange_strong(expected, value, std::memory_order_acq_rel)) break;
+    if ((expected & ~VTABLE_MATCHES) == vtable) break;  // another thread classified it first
+  }
+  return matches;
+}
+
+template<class Spec, size_t Entry>
+uintptr_t STDMETHODCALLTYPE ForwardingDetour(void* self, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5, uintptr_t a6, uintptr_t a7) {
+  const auto target = Implements<typename Spec::Interface>(self)
+      ? reinterpret_cast<Forward>(&Spec::template Detour<Entry>)
+      : reinterpret_cast<Forward>(MethodOf<Spec>().Original(Entry));
+  return target(self, a1, a2, a3, a4, a5, a6, a7);
+}
+#endif
+
 template<class Spec, size_t... Entry>
-constexpr std::array<typename Spec::Fn, sizeof...(Entry)> DetourTable(std::index_sequence<Entry...>) {
+std::array<typename Spec::Fn, sizeof...(Entry)> DetourTable(std::index_sequence<Entry...>) {
+#if defined(_WIN64)
+  return {reinterpret_cast<typename Spec::Fn>(&ForwardingDetour<Spec, Entry>)...};
+#else
   return {&Spec::template Detour<Entry>...};
+#endif
 }
 
 // A DXGI method: an address already in the table is attached; a new one takes the first free entry, with that entry's detour.
 template<class Spec>
 Claim Attach(ProviderMethod<Spec>& method, void* address) {
-  static constexpr auto detours = DetourTable<Spec>(std::make_index_sequence<PROVIDER_IMPLEMENTATIONS>{});
+  static const auto detours = DetourTable<Spec>(std::make_index_sequence<PROVIDER_IMPLEMENTATIONS>{});
   if (!address) return {ClaimResult::NO_METHOD};
   if (!ProviderOwned(address, nullptr)) return {ClaimResult::OUTSIDE_INTERPOSER};
   std::lock_guard guard(install_mutex);
