@@ -139,6 +139,13 @@ class VkDlssContext {
   void EndFrame() { trigger_.EndFrame(); }
   // BeginFrame readied a native Present recording that RunPresent has not made yet.
   [[nodiscard]] bool FrameReady() const { return frame_ready_; }
+  // HUD-less (design §5): a frame PrepareFrame armed and the same call did not record; nothing stays armed for a later point.
+  void CancelFrame() noexcept {
+    frame_ready_ = false;
+    present_frame_ = {};
+  }
+  // HUD-less (design §3): NR's target changed between the game's frame and N; the next Present recording starts its history afresh.
+  void OwePresentReset() noexcept { present_reset_owed_ = true; }
   // Native NR at Present at `point`, once per frame: the second-queue CPU wait (PRESENT_QUEUE_WAIT; a timeout skips the frame), a free slot of Uplift's own
   // command buffers (a busy one skips the frame, counted, never waited for), VkNrPipeline::RecordPresent on the swap-chain image in `usage` (PRESENT at the
   // present event, RENDER_TARGET inside the effects, as the bridge passes it), with DLSS's Present copy, else `launchpad`, else no vectors; then ReShade's

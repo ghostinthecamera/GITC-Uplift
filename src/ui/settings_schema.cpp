@@ -123,6 +123,9 @@ bool KeepFacesOrFillOff(const Settings& s) {
   return (!s.keep_faces || !s.face_tuning.fill_skin);
 }
 
+// HUD-less: hiding the HUD-less image matters only while NR runs before or after frame generation.
+bool HideHudlessUnused(const Settings& s) { return (s.fg_present == Settings::FgPresent::OFF); }
+
 // The Before frame generation motion choice is shown only while that placement is on and the motion is Launchpad's or Lumenite's.
 bool BeforeFGMotionUnused(const Settings& s) {
   return (s.fg_present != Settings::FgPresent::BEFORE
@@ -311,7 +314,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::MASK,
         .label = "UI correction",
-        .tooltip = "On only passes the switch to NR - may not work",
+        .tooltip = "Before Framegen only. On: NR runs on the game's HUD-less image, so the HUD is not changed; needs a game that "
+                   "gives frame generation that image and the HUD's opacity. Auto, Off: it is hidden instead",
         .choices = UI_CORRECTION_MODES,
         .get = [](const Settings& s) { return Index(s.ui_correction); },
         .set = [](Settings& s, double v) { s.ui_correction = FromIndex<UiCorrection>(v); },
@@ -806,6 +810,17 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
                           "much larger performance cost.",
         .get = [](const Settings& s) { return Flag(s.allow_cross_queue_passes); },
         .set = [](Settings& s, double v) { s.allow_cross_queue_passes = (v != 0.0); },
+    },
+    {
+        .key = "HideHudless",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::ADVANCED,
+        .label = "Hide HUD-less image when NR cannot use it",
+        .tooltip = "When NR is not using the game's HUD-less image (UI correction not On, or NR cannot use it), hide it from frame "
+                   "generation: it no longer matches and frames can judder. Turn off if the HUD looks worse",
+        .get = [](const Settings& s) { return Flag(s.hide_hudless); },
+        .set = [](Settings& s, double v) { s.hide_hudless = (v != 0.0); },
+        .hidden = HideHudlessUnused,
     },
     {
         .key = "Encoding",

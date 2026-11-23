@@ -28,6 +28,10 @@
 #include "addon/streamline_present.hpp"
 #include "addon/before_fg_device.hpp"
 #include "addon/before_fg_dx12.hpp"
+#include "addon/before_fg_report.hpp"
+#include "addon/hud_present_d3d12.hpp"
+#include "addon/hud_tags.hpp"
+#include "color/hud_composer_d3d12.hpp"
 #include "addon/before_fg_vk.hpp"
 #include "addon/command_list_tracker.hpp"
 #include "addon/d3d11_identity.hpp"
@@ -78,6 +82,7 @@
 #include "text/before_fg_messages.hpp"
 #include "text/effect_names.hpp"
 #include "text/helper_messages.hpp"
+#include "text/hudless_messages.hpp"
 #include "text/nr_messages.hpp"
 #include "ui/controls_coalescer.hpp"
 #include "ui/overlay.hpp"
@@ -165,6 +170,12 @@ struct DeviceEntry {
   std::unique_ptr<bridge::D3D10Bridge> d3d10_bridge;
   std::unique_ptr<addon::DeviceContext> context;
   addon::BeforeFgDevice before_fg;
+  // HUD-less (design §4, §5): this Direct3D 12 device's composer, made on first use with UICorrection On and kept across a swapchain's
+  // recreation; the settle count; whether the last Present used N (NR's history restarts when that changes); UI correction's note.
+  std::unique_ptr<color::HudComposerD3D12> hud_composer;
+  addon::HudSettle hud_settle;
+  bool hud_used = false;
+  std::string hud_note;  // UI correction's note while it is On and frame generation reads Uplift's output
   color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
   std::string message;                                   // why this device has no context
   bool rejected = false;                                 // not NVIDIA, or the context failed to start: decided once
@@ -392,7 +403,15 @@ struct AddonState {
   // route takes it too, and the one above as well, so the helper's NR never runs next to an in-process one on that device).
   addon::NrClaim helper_claim;
   AddonRouting routing;
-  addon::NgxBridge bridge{routing};
+  // HUD-less (design §1): the images this add-on's NR changed before frame generation, read by the bridge at DLSS-G's evaluate.
+  addon::FgInput fg_input;
+  // HUD-less (design §2): Streamline's HUD-less and opacity tags, stored only while UICorrection On and DLSS-G reads Uplift's output.
+  addon::HudTags hud_tags;
+  // The last Present's reason when the HUD-less image was not used, for the DiagnosticBeforeFG trace (design §9).
+  std::atomic<addon::HudReason> last_hud_reason{addon::HudReason::CORRECTION_OFF};
+  // Unusable Presents by reason while use is wanted, for the trace.
+  std::array<std::atomic<uint32_t>, static_cast<size_t>(addon::HudReason::NO_FREE_IMAGE) + 1u> hud_reasons{};
+  addon::NgxBridge bridge{routing, &fg_input};
   ngx_hooks::HookInstaller hooks;
   bool diagnostic_before_fg = false;
   std::string dlss_unavailable_reason;  // decided at AddonInit; empty when a DLSS placement can run
@@ -987,18 +1006,71 @@ DeviceEntry* FindFrameEntry(AddonState* state, api::effect_runtime* runtime, api
 
 // Runs NR through `host` for this frame, or skips it with a one-time WARN if ReShade could not
 // give the presenting queue an immediate command list.
-void RunOrWarnOnce(AddonState* state, DeviceEntry& entry, ReshadeFrameHost* host,
-                   D3D12_RESOURCE_STATES entry_state, addon::TriggerPoint point,
-                   ID3D12Resource* launchpad_motion = nullptr) {
+// HUD-less: `replacement` and `hud_inputs` are noted with the back buffer when NR ran into N (the early route). The passes NR ran.
+uint32_t RunOrWarnOnce(AddonState* state, DeviceEntry& entry, ReshadeFrameHost* host,
+                       D3D12_RESOURCE_STATES entry_state, addon::TriggerPoint point,
+                       ID3D12Resource* launchpad_motion = nullptr, addon::Replacement replacement = {}, addon::HudInputs hud_inputs = {}) {
   if (host->Valid()) {
     const auto result = entry.context->Run(host, entry_state, point, launchpad_motion);
-    if (result.nr_applied) entry.before_fg.activity.passes += result.passes_run;
+    const uint32_t passes = (result.nr_applied ? result.passes_run : 0u);
+    addon::ReportPresentPasses(entry.before_fg.activity, state->fg_input, entry.back_buffer.handle, passes, std::chrono::steady_clock::now(),
+                               std::move(replacement), hud_inputs);
     if (result.nr_applied && BeforeFgTrace() && addon::streamline::Installed()) present_counts.nr_passes.fetch_add(result.passes_run, std::memory_order_relaxed);
-    return;
+    return passes;
   }
   if (!state->warned_no_immediate_list) {
     state->warned_no_immediate_list = true;
     nr::Log(nr::LogLevel::WARN, "ReShade gave no immediate command list for this queue; NR is skipped until it does");
+  }
+  return 0u;
+}
+
+// HUD-less (design §5): what a Direct3D 12 Present of `entry` needs to use the game's HUD-less image. Nullopt unless UICorrection is On
+// (Auto and Off make nothing), or when the composer cannot be made.
+std::optional<addon::HudPresentD3D12> HudPresentFor(AddonState& state, DeviceEntry& entry, ID3D12Device* native_device, bool use_wanted) {
+  if (!use_wanted || native_device == nullptr) {
+    // No longer wanted (design §4): the ring retires, and is freed once its presents have passed and nothing holds N.
+    if (entry.hud_composer) {
+      entry.hud_composer->Release(state.fg_input.Presents());
+      entry.hud_composer->Retire(state.fg_input.Presents());
+    }
+    return std::nullopt;
+  }
+  if (!entry.hud_composer) {
+    auto composer = std::make_unique<color::HudComposerD3D12>();
+    std::string error;
+    if (!composer->Initialize(native_device, &error)) {
+      nr::Logf(nr::LogLevel::WARN, "HUD-less: {}; the HUD-less image is hidden from frame generation", error);
+      return std::nullopt;
+    }
+    entry.hud_composer = std::move(composer);
+  }
+  // DLSS-G not reading Uplift's output: nothing will be used, so no VRAM is kept for it (anti-goal: more VRAM while frame generation
+  // does not read Uplift's output).
+  if (!state.fg_input.FrameGenerationReads(std::chrono::steady_clock::now())) entry.hud_composer->Release(state.fg_input.Presents());
+  entry.hud_composer->Retire(state.fg_input.Presents());
+  return addon::HudPresentD3D12{.composer = entry.hud_composer.get(), .tags = &state.hud_tags, .input = &state.fg_input, .settle = &entry.hud_settle,
+                                .use_wanted = true};
+}
+
+// After a Present that decided: NR's history restarts when use starts or stops (design §3), and UI correction's note says what happened.
+void NoteHudPresent(DeviceEntry& entry, bool wanted, addon::HudReason reason, bool used) {
+  if (wanted && !used) {
+    g_state->last_hud_reason.store(reason, std::memory_order_relaxed);
+    g_state->hud_reasons[static_cast<size_t>(reason)].fetch_add(1u, std::memory_order_relaxed);
+  }
+  if (used != entry.hud_used) {
+    if (entry.context) entry.context->OwePresentReset();  // Direct3D 12 and the Vulkan bridge
+    if (entry.vk_dlss) entry.vk_dlss->OwePresentReset();  // native Vulkan (the helper's protocol has none: its history blends over)
+  }
+  entry.hud_used = used;
+  const std::string_view why = addon::HudReasonText(reason);
+  if (!wanted || (!used && reason == addon::HudReason::NOT_READ)) {
+    entry.hud_note.clear();  // not Before FG: the placement's own note stands
+  } else if (used) {
+    entry.hud_note = uplift::text::HUDLESS_UI_CORRECTION_USED;
+  } else {
+    entry.hud_note = std::vformat(uplift::text::HUDLESS_UI_CORRECTION_UNUSABLE, std::make_format_args(why));
   }
 }
 
@@ -1091,7 +1163,7 @@ void RunNative(DeviceEntry& entry, api::device* device, addon::TriggerPoint poin
   const auto result = native.RunPresent(point, usage, queues, motion, std::chrono::steady_clock::now());
   if (result.nr_applied) {
     NoteNativePresentFrame(device);
-    entry.before_fg.activity.passes += result.passes_run;
+    addon::ReportPresentPasses(entry.before_fg.activity, g_state->fg_input, entry.back_buffer.handle, result.passes_run, std::chrono::steady_clock::now());
   }
   if (usage == vk::Usage::PRESENT) {
     // Only a semaphore orders a present after earlier work on the queue. ReShade's final flush waits on the game's semaphores and signals the
@@ -1194,7 +1266,14 @@ void RunBridged(DeviceEntry& entry, api::device* device, addon::TriggerPoint poi
         }
       }
     } else {
-      entry.vk_bridge->Run(host, VulkanImageInfo(device, entry.back_buffer), entry_state, motion, record, (present_host ? &*present_host : nullptr), motion_is_dlss);
+      if (entry.vk_bridge->Run(host, VulkanImageInfo(device, entry.back_buffer), entry_state, motion, record, (present_host ? &*present_host : nullptr), motion_is_dlss)) {
+        const auto status = entry.context->Status();
+        uint32_t passes = 0u;
+        for (uint32_t i = 0; i < status.group_count; ++i) {
+          if (status.groups[i].stage == addon::Stage::PRESENT && status.groups[i].nr_applied) passes = status.groups[i].passes_run;
+        }
+        addon::ReportPresentPasses(entry.before_fg.activity, g_state->fg_input, entry.back_buffer.handle, passes, std::chrono::steady_clock::now());
+      }
     }
     return;
   }
@@ -1266,6 +1345,7 @@ void OnDestroyCommandQueue(api::command_queue* queue) {
 
 void OnDestroyDevice(api::device* device) {
   try {
+    if (device->get_api() == api::device_api::d3d12) g_state->hud_tags.Clear();  // HUD-less: no reference outlives the device
     // A D3D11 device's bridge goes after the lock. It releases the private device ReShade
     // returned, whose destroy_device comes back into this handler on this thread.
     std::unique_ptr<bridge::D3D11Bridge> d3d11_bridge;
@@ -1513,8 +1593,17 @@ void OnExecuteCommandList(api::command_queue* queue, api::command_list* cmd_list
   UPLIFT_CATCH("execute_command_list", )
 }
 
+// HUD-less (design §2): the tag hooks' reports. HudTags takes only its own lock and never throws.
+void BeforeFgTags(const void* viewport, const void* tags, uint32_t count) { g_state->hud_tags.Record(viewport, tags, count); }
+void BeforeFgTagsForFrame(const void* frame, const void* viewport, const void* tags, uint32_t count) {
+  g_state->hud_tags.RecordForFrame(frame, viewport, tags, count);
+}
+void BeforeFgSlShutdown() { g_state->hud_tags.Clear(); }
+
 void BeforeFgCreated(IDXGISwapChain* chain, IUnknown* device, void* inner) noexcept {
   try {
+    g_state->hud_tags.SetApi(addon::TagApi::D3D12);
+    g_state->hud_tags.Clear();  // a new swapchain: tags of the old one are not this one's
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
     if (device == nullptr || FAILED(device->QueryInterface(IID_PPV_ARGS(&queue)))) {
       if (BeforeFgTrace()) nr::Log(nr::LogLevel::INFO, "Before FG DX12: returned swapchain has no D3D12 creation queue");
@@ -1535,6 +1624,14 @@ void BeforeFgRetry(IDXGISwapChain* chain) noexcept {
 
 void BeforeFgDxgi(IDXGISwapChain* chain, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters) noexcept {
   try {
+    // HUD-less (design §1): every game-facing Present drops its image's replacement first, before any early return and before the
+    // primary match. The early route's ReShade Present already did, on this thread, for this image.
+    const uint64_t presented = addon::BeforeFgDx12::CurrentBackBuffer(chain);
+    if (g_state->fg_input.ConsumeThreadMark({.image = presented})) {
+      g_state->fg_input.CountPresent();
+    } else {
+      addon::DropPresented(g_state->fg_input, presented);
+    }
     const auto real = NextBeforeFgTraceSample(present_counts.dxgi_real);
     const auto route = addon::BeforeFgDx12::Find(chain);
     {
@@ -1560,9 +1657,14 @@ void BeforeFgDxgi(IDXGISwapChain* chain, UINT flags, const DXGI_PRESENT_PARAMETE
           entry.before_fg.note = {BeforeFgNote::NONBLOCKING_PRESENT};
           break;
         }
-        const auto result = route->Record(chain, reinterpret_cast<ID3D12Device*>(device->get_native()), *entry.context, entry.before_fg.outer_config->settings,
-                                    entry.before_fg.outer_config->facts, std::chrono::steady_clock::now());
-        entry.before_fg.activity.passes += result.passes;
+        // The route's inner chain is this device's primary, whose colour space OnPresent records from ReShade.
+        const auto now = std::chrono::steady_clock::now();
+        auto* const native_device = reinterpret_cast<ID3D12Device*>(device->get_native());
+        const auto hud = HudPresentFor(*g_state, entry, native_device, entry.before_fg.outer_config->settings.hudless_use == addon::HudlessUse::USE);
+        const auto result = route->Record(chain, native_device, *entry.context, entry.before_fg.outer_config->settings,
+                                    entry.before_fg.outer_config->facts, entry.output_space, now, (hud ? &*hud : nullptr));
+        NoteHudPresent(entry, hud.has_value(), result.hud_reason, result.replacement.owner != nullptr);
+        addon::ReportPresentPasses(entry.before_fg.activity, g_state->fg_input, result.image, result.passes, now, result.replacement, result.hud_inputs);
         entry.before_fg.outer_present_passes = result.passes;
         if (result.passes) {
           if (BeforeFgTrace()) present_counts.nr_passes.fetch_add(result.passes, std::memory_order_relaxed);
@@ -1577,9 +1679,9 @@ void BeforeFgDxgi(IDXGISwapChain* chain, UINT flags, const DXGI_PRESENT_PARAMETE
     {
       const std::shared_lock lock(g_state->mutex);
       for (const auto& [device, entry] : g_state->devices) {
-        nr::Logf(nr::LogLevel::INFO, "Before FG trace: binding route={} inner={} primary={} owned={} config={} mode={} reason=[{}]",
+        nr::Logf(nr::LogLevel::INFO, "Before FG trace: binding route={} inner={} primary={} owned={} config={} mode={} Streamline mode={} reason=[{}]",
                  route != nullptr, route ? route->Inner() : nullptr, entry.selector.Primary(), entry.before_fg.outer_owns_frame, entry.before_fg.outer_config.has_value(),
-                 static_cast<int>(g_state->settings.fg_present), entry.before_fg.note.Text());
+                 static_cast<int>(g_state->settings.fg_present), addon::streamline::ModeName(addon::streamline::Mode()), entry.before_fg.note.Text());
       }
     }
     Microsoft::WRL::ComPtr<IDXGISwapChain3> current;
@@ -1611,6 +1713,8 @@ VkImageUsageFlags BeforeFgVkUsage(VkDevice device, const VkSwapchainCreateInfoKH
 
 void BeforeFgVkCreated(VkDevice device, VkSwapchainKHR chain, const VkSwapchainCreateInfoKHR& info, void* inner) noexcept {
   try {
+    g_state->hud_tags.SetApi(addon::TagApi::VULKAN);
+    g_state->hud_tags.Clear();
     const std::unique_lock lock(g_state->mutex);
     g_state->before_fg_vk.Created(device, chain, info, inner);
     if (BeforeFgTrace()) {
@@ -1630,9 +1734,11 @@ void BeforeFgVkAcquired(VkDevice device, VkSwapchainKHR chain, uint32_t index) n
 }
 
 addon::BeforeFgVk::Result RecordOuterVulkanBridge(DeviceEntry& entry, api::device* device, api::command_queue* game_queue, VkQueue queue,
-                                                 const VkPresentInfoKHR& app, addon::streamline::VkForward& forward) {
+                                                 const VkPresentInfoKHR& app, addon::streamline::VkForward& forward,
+                                                 const addon::BeforeFgVk::HudPresentVk* hud) {
   const auto& settings = g_state->settings;
-  const auto frame = g_state->before_fg_vk.Prepare(queue, app, settings.encoding);
+  // HUD-less (design §5): `record_image` is N when the game's HUD-less image is used; the back buffer is what is noted.
+  const auto frame = g_state->before_fg_vk.Prepare(queue, app, settings.encoding, hud);
   if (!frame.reason.empty()) return {.reason = frame.reason};
   const auto bridge_host = g_state->before_fg_vk.BridgeHost(queue, frame);
   if (!bridge_host.host) return {.reason = bridge_host.reason};
@@ -1644,7 +1750,7 @@ addon::BeforeFgVk::Result RecordOuterVulkanBridge(DeviceEntry& entry, api::devic
       addon::streamline::VkForward& forward;
       ~FinishRelay() { forward.failure = host.FinishFrame(); }
     } finish{*host, forward};
-    host->Register(frame.image.image, frame.image.size);
+    host->Register(frame.record_image.image, frame.record_image.size);
     const auto now = std::chrono::steady_clock::now();
     if (entry.before_fg.helper_frame) {
       auto helper_frame = *entry.before_fg.helper_frame;
@@ -1654,28 +1760,29 @@ addon::BeforeFgVk::Result RecordOuterVulkanBridge(DeviceEntry& entry, api::devic
       helper_frame.present_queue = game_queue;
       helper_frame.marker = {};
       helper_frame.early_marker = {};
-      helper_frame.back_buffer = {addon::ReshadeHandleOf(frame.image.image)};
+      helper_frame.back_buffer = {addon::ReshadeHandleOf(frame.record_image.image)};  // N on the helper route: never the image noted
       helper_frame.outer_vulkan_host = host;
-      helper_frame.outer_vulkan_image = frame.image;
+      helper_frame.outer_vulkan_image = frame.record_image;
       helper_frame.outer_color_space = frame.space;
-      const auto before = entry.helper.before_fg_passes;
+      const auto before = entry.helper.present_passes;
       g_state->front->Present(entry.helper, helper_frame);
-      return {.passes = static_cast<uint32_t>(entry.helper.before_fg_passes - before)};
+      return {.passes = static_cast<uint32_t>(entry.helper.present_passes - before), .image = reinterpret_cast<uint64_t>(frame.image.image)};
     }
     if (!entry.vk_bridge || !entry.context || !entry.before_fg.outer_config) return {.reason = uplift::text::VK_BRIDGE_NOT_READY_LINE};
     const addon::BeforeFgFrame& outer = *entry.before_fg.outer_config;
     if (entry.vk_dlss && entry.before_fg.native_config) {
-      const addon::VkPresentFrame native_frame{.back_buffer = frame.image, .color_space = frame.space};
+      const addon::VkPresentFrame native_frame{.back_buffer = frame.record_image, .color_space = frame.space};
       entry.vk_dlss->BeginOuterFrame(forward.native_tick, game_queue, entry.before_fg.native_config->settings,
                                      entry.before_fg.native_config->facts, entry.before_fg.native_config->facts.nr_allowed, entry.before_fg.outer_holds_nr, now, native_frame);
     }
-    const auto bridge_frame = entry.vk_bridge->BeginFrame(*host, frame.image, settings.enabled, entry.context->NrState() != nr::SessionState::OFF, now);
+    const auto bridge_frame = entry.vk_bridge->BeginFrame(*host, frame.record_image, settings.enabled, entry.context->NrState() != nr::SessionState::OFF, now);
     const std::string problem(bridge_frame.problem);
     const addon::TargetInfo target{.resource = bridge_frame.color, .color_space = frame.space, .problem = problem, .size = bridge_frame.size, .format = bridge_frame.format};
     const auto point = entry.context->BeginFrame(entry.vk_bridge->Queue(), outer.settings, outer.facts, target, false, now);
+    if (point == addon::TriggerPoint::NONE && frame.record_image.image != frame.image.image) entry.context->CancelFrame();  // HUD-less: nothing armed
     uint32_t passes = 0;
-    RunBridged(entry, device, point, 0u, vk::Usage::PRESENT, {}, host, &frame.image, &passes);
-    return {.passes = passes};
+    RunBridged(entry, device, point, 0u, vk::Usage::PRESENT, {}, host, &frame.record_image, &passes);
+    return {.passes = passes, .image = reinterpret_cast<uint64_t>(frame.image.image)};
   };
   const auto result = record();
   return host->Valid() ? result : addon::BeforeFgVk::Result{.reason = uplift::text::VK_COPYBACK_RECORDING_LINE};
@@ -1693,10 +1800,22 @@ void ReleaseUnclaimedOuterTick(const addon::streamline::VkForward* forward) noex
 void BeforeFgVk(VkQueue queue, const VkPresentInfoKHR* info, addon::streamline::VkForward* forwarded) noexcept {
   try {
     const auto real = NextBeforeFgTraceSample(present_counts.vk_real);
-    if (!info->pSwapchains || !info->pImageIndices) return;
+    if (!info->pSwapchains || !info->pImageIndices) {
+      g_state->fg_input.DropAll();  // HUD-less: a present that cannot be named drops every replacement
+      return;
+    }
     {
       const std::unique_lock lock(g_state->mutex);
       const HoldsLockForNr holds;
+      // HUD-less (design §1): every game-facing Present drops its images' replacements first, once per swapchain in the present.
+      for (uint32_t i = 0; i < info->swapchainCount; ++i) {
+        const uint64_t presented = g_state->before_fg_vk.ImageOf(info->pSwapchains[i], info->pImageIndices[i]);
+        if (g_state->fg_input.ConsumeThreadMark({.image = presented})) {
+          g_state->fg_input.CountPresent();
+        } else {
+          addon::DropPresented(g_state->fg_input, presented);
+        }
+      }
       if (info->swapchainCount == 1u) {
         const auto binding = g_state->before_fg_vk.Find(info->pSwapchains[0]);
         for (auto& [device, entry] : g_state->devices) {
@@ -1727,14 +1846,23 @@ void BeforeFgVk(VkQueue queue, const VkPresentInfoKHR* info, addon::streamline::
           entry.before_fg.outer_tick = forwarded;
           forwarded->release_tick.store(&ReleaseUnclaimedOuterTick, std::memory_order_release);
           const bool native = entry.vk_dlss && entry.before_fg.outer_config && entry.before_fg.outer_config->facts.vk_native_present;
+          // HUD-less (design §5): with UICorrection On the route records into N; FinishHud always follows it.
+          const addon::BeforeFgVk::HudPresentVk hud = {.tags = &g_state->hud_tags, .input = &g_state->fg_input, .settle = &entry.hud_settle,
+                                                       .use_wanted = (g_state->settings.ui_correction == ui::UiCorrection::ON),
+                                                       .now = std::chrono::steady_clock::now()};
           const auto result = native
-              ? g_state->before_fg_vk.Record(queue, game_queue, *info, *entry.vk_dlss, entry.before_fg.outer_config->settings, entry.before_fg.outer_config->facts, entry.before_fg.outer_holds_nr, forwarded->native_tick, std::chrono::steady_clock::now())
-              : RecordOuterVulkanBridge(entry, device, game_queue, queue, *info, *forwarded);
+              ? g_state->before_fg_vk.Record(queue, game_queue, *info, *entry.vk_dlss, entry.before_fg.outer_config->settings, entry.before_fg.outer_config->facts, entry.before_fg.outer_holds_nr, forwarded->native_tick, std::chrono::steady_clock::now(), &hud)
+              : RecordOuterVulkanBridge(entry, device, game_queue, queue, *info, *forwarded, &hud);
+          const addon::BeforeFgVk::HudOutcome hud_outcome =
+              g_state->before_fg_vk.FinishHud(result.passes != 0u && forwarded->failure == VK_SUCCESS, forwarded->failure != VK_SUCCESS);
+          if (!hud.use_wanted || !g_state->fg_input.FrameGenerationReads(hud.now)) g_state->before_fg_vk.ReleaseHud(g_state->fg_input.Presents());
+          NoteHudPresent(entry, hud_outcome.wanted, hud_outcome.reason, hud_outcome.replacement.owner != nullptr);
           if (forwarded->failure != VK_SUCCESS) {
             entry.before_fg.note = {BeforeFgNote::VK_RELAY_FAILED};
           } else if (result.passes) {
             if (native) NoteNativePresentFrame(device);
-            entry.before_fg.activity.passes += result.passes;
+            addon::ReportPresentPasses(entry.before_fg.activity, g_state->fg_input, result.image, result.passes, std::chrono::steady_clock::now(),
+                                       hud_outcome.replacement, hud_outcome.inputs);
             entry.before_fg.outer_present_passes = result.passes;
             if (BeforeFgTrace()) present_counts.nr_passes.fetch_add(result.passes, std::memory_order_relaxed);
             entry.before_fg.note = {BeforeFgNote::VK_PRESENT};
@@ -1762,11 +1890,10 @@ void BeforeFgVk(VkQueue queue, const VkPresentInfoKHR* info, addon::streamline::
 }
 
 void BeforeFgResized(IDXGISwapChain* chain, UINT count, IUnknown* const* queues, void* inner) noexcept {
-  try { if (auto route = addon::BeforeFgDx12::Find(chain)) route->Resize(count, queues, inner); } UPLIFT_CATCH("before_fg_resize", )
-}
-
-void BeforeFgColor(IDXGISwapChain* chain, DXGI_COLOR_SPACE_TYPE space) noexcept {
-  try { if (auto route = addon::BeforeFgDx12::Find(chain)) route->ColorSpace(space); } UPLIFT_CATCH("before_fg_color", )
+  try {
+    g_state->hud_tags.Clear();
+    if (auto route = addon::BeforeFgDx12::Find(chain)) route->Resize(count, queues, inner);
+  } UPLIFT_CATCH("before_fg_resize", )
 }
 
 void BeforeFgInitDevice(api::device* device) {
@@ -1776,7 +1903,11 @@ void BeforeFgInitDevice(api::device* device) {
     // A bridged game can create Uplift's private D3D12 device while running NR.
     if (t_holds_lock_for_nr || addon::streamline::Installed()) return;
     std::call_once(g_state->before_fg_start, [] {
-      if (addon::host::PinReshade(reshade::internal::get_reshade_module_handle()) && addon::streamline::Start(g_state->self_module, {BeforeFgCreated, BeforeFgDxgi, BeforeFgVk, BeforeFgResized, BeforeFgColor, BeforeFgVkCreated, BeforeFgVkImages, BeforeFgVkDestroyed, BeforeFgVkAcquired, BeforeFgVkUsage, BeforeFgRetry, BeforeFgTrace()})) {
+      if (addon::host::PinReshade(reshade::internal::get_reshade_module_handle()) && addon::streamline::Start(g_state->self_module, {.dxgi_created = BeforeFgCreated, .dxgi_present = BeforeFgDxgi, .vk_present = BeforeFgVk, .dxgi_resize = BeforeFgResized,
+                                                                                 .vk_created = BeforeFgVkCreated, .vk_images = BeforeFgVkImages, .vk_destroyed = BeforeFgVkDestroyed,
+                                                                                 .vk_acquired = BeforeFgVkAcquired, .vk_usage = BeforeFgVkUsage, .dxgi_retry = BeforeFgRetry,
+                                                                                 .hud_tags = BeforeFgTags, .hud_tags_for_frame = BeforeFgTagsForFrame,
+                                                                                 .sl_shutdown = BeforeFgSlShutdown, .diagnostic_dxgi = BeforeFgTrace()})) {
         nr::Log(nr::LogLevel::INFO, "Before FG: observing Streamline and ReShade presentation");
       } else {
         nr::Log(nr::LogLevel::WARN, uplift::text::BeforeFgNoteInfo(BeforeFgNote::HOOKS_UNAVAILABLE).line);
@@ -2182,7 +2313,10 @@ void VkDeviceRouter::PresentThroughHelper(bool route_wants_nr) {
   } else {
     addon::DrainBeforeFgHelper(entry.before_fg, before_fg_facts.early_confirmed && addon::BeforeFgActive(before_fg_facts));
   }
+  const uint64_t passes_before = entry.helper.present_passes;
   state.front->Present(entry.helper, helper_frame);
+  addon::ReportPresentPasses(entry.before_fg.activity, state.fg_input, helper_frame.back_buffer.handle,
+                             static_cast<uint32_t>(entry.helper.present_passes - passes_before), std::chrono::steady_clock::now());
 }
 
 bool VkDeviceRouter::LeaveHelper() {
@@ -2498,6 +2632,13 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     }
     const bool d3d9 = (device_api == api::device_api::d3d9);  // routed to the helper front after the common prefix
     const bool vulkan = (device_api == api::device_api::vulkan);
+    if (device_api == api::device_api::d3d12 || vulkan) {
+      // HUD-less (design §1): a game-facing Present drops its image's replacement before NR can note again. Where ReShade sits after
+      // frame generation this is the real chain's image, which DLSS-G never reads, and the drop does nothing.
+      const uint64_t presented = swapchain->get_current_back_buffer().handle;
+      addon::DropPresented(g_state->fg_input, presented, /*counts=*/false);  // the Streamline callback, if one follows, counts it
+      g_state->fg_input.MarkDroppedOnThisThread({.image = presented});
+    }
     const bool opengl = (device_api == api::device_api::opengl);  // the same shape as Vulkan, on a GL context
     PollHooks();
     StampThisThread();
@@ -2521,8 +2662,13 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     AddonState& state = *g_state;
 
     addon::host::PollEnabled(state, now);
+    // HUD-less (design §2): before any route returns. Tags are stored only while use is wanted and DLSS-G reads Uplift's output (Auto never
+    // uses: nothing stored); the evaluate hides by the same setting on every route.
+    state.bridge.SetHideHudless(state.settings.hide_hudless);
+    state.hud_tags.SetStoring(state.settings.ui_correction == ui::UiCorrection::ON && state.fg_input.FrameGenerationReads(now));
 
     DeviceEntry& entry = state.devices[device];
+    if (state.settings.ui_correction != ui::UiCorrection::ON) entry.hud_note = {};  // HUD-less: no stale "On" note after leaving On
     // The device's API, from its first present on: Bridged(), DlssApiOf() and the panel answer the same before and after a bridge exists.
     entry.d3d11 = (device_api == api::device_api::d3d11);
     entry.d3d10 = (device_api == api::device_api::d3d10);
@@ -2542,6 +2688,20 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         nr::Logf(nr::LogLevel::INFO, "Before FG trace: ReShade swapchain={} native={:#x} queue={:#x} index={} inside outer={} NGX FG handles={} events={}",
                  static_cast<void*>(swapchain), swapchain->get_native(), queue->get_native(), swapchain->get_current_back_buffer_index(),
                  addon::streamline::InsideOuterPresent(), state.bridge.Registry().LiveCount(ngx_hooks::FeatureKind::FRAME_GENERATION), *count);
+        const auto tags = state.hud_tags.Totals();
+        const auto evaluates = state.fg_input.Totals();
+        const auto last = state.fg_input.Last(now);
+        nr::Logf(nr::LogLevel::INFO, "Before FG trace: HUD-less tags={} empty={} UI alpha={} UI colour={} most frames waiting={} evaluates used={} hidden={} "
+                 "left={} last=[{}] last unusable Present=[{}]", tags.hudless, tags.empty_hudless, tags.opacity, tags.ui_colour, tags.frames_waiting_max,
+                 evaluates.used, evaluates.hidden, evaluates.left, (last.recent ? addon::HudlessLine(last.action, last.reason) : std::string()),
+                 addon::HudReasonText(state.last_hud_reason.load(std::memory_order_relaxed)));
+        std::string reasons;
+        for (size_t index = 0; index < state.hud_reasons.size(); ++index) {
+          if (const uint32_t count = state.hud_reasons[index].load(std::memory_order_relaxed)) {
+            reasons += std::format("{}{}={}", (reasons.empty() ? "" : ", "), addon::HudReasonText(static_cast<addon::HudReason>(index)), count);
+          }
+        }
+        nr::Logf(nr::LogLevel::INFO, "Before FG trace: HUD-less unusable Presents [{}]", reasons);
       }
     }
     if (device_api == api::device_api::d3d12 && addon::streamline::Installed()) {
@@ -3002,8 +3162,26 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       addon::ApplyBeforeFgDx12(entry.before_fg, frame_settings, frame_facts, decision, before_fg_facts.outer_matches_primary);
       if (decision.state == addon::BeforeFgState::ARM_OUTER) entry.context->NoteDisplayedPresent(now, frame_facts.ngx_frame_generation);
     }
+    // HUD-less (design §5): ReShade before frame generation on Direct3D 12 records NR into N at the present point only, on ReShade's
+    // immediate list, and never while ReShade's effects or an Uplift technique would change the frame after NR.
+    std::optional<addon::HudPresentD3D12> early_hud;
+    addon::HudBegun early_begun;
+    ID3D12GraphicsCommandList* early_list = nullptr;
+    if (device_api == api::device_api::d3d12 && !Bridged(entry) && !entry.before_fg.outer_owns_frame && entry.before_fg.early_confirmed) {
+      early_hud = HudPresentFor(state, entry, reinterpret_cast<ID3D12Device*>(device->get_native()), frame_settings.hudless_use == addon::HudlessUse::USE);
+      api::command_list* const immediate = (early_hud ? queue->get_immediate_command_list() : nullptr);
+      if (immediate != nullptr) {
+        early_hud->early = true;
+        early_hud->effects_on = frame_facts.effects_on;
+        early_hud->technique_expected = (entry.marker.handle != 0u);
+        early_list = reinterpret_cast<ID3D12GraphicsCommandList*>(immediate->get_native());
+        early_begun = addon::BeginHudD3D12(*early_hud, early_list, reinterpret_cast<ID3D12Resource*>(entry.back_buffer.handle), state.fg_input.Presents(), now);
+        if (early_begun.n) target.resource = early_begun.n;
+      }
+    }
     const addon::TriggerPoint point = entry.before_fg.outer_owns_frame ? addon::TriggerPoint::NONE
         : entry.context->BeginFrame(frame_queue, frame_settings, frame_facts, target, entry.marker.handle != 0u, now);
+    if (early_begun.n && point != addon::TriggerPoint::PRESENT) entry.context->CancelFrame();  // N is recorded into here or not at all
     if (entry.d3d11_bridge) {
       // The shares of what no longer runs go now: the DLSS stages' when NR runs at Present, the ring when its copies are not wanted (NR off
       // included, so "copied for Present" is logged once per activation).
@@ -3026,8 +3204,21 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     if (Bridged(entry)) {
       RunBridged(entry, device, point, early_motion.handle, vk::Usage::PRESENT, entry.back_buffer);
     } else if (!entry.before_fg.outer_owns_frame) {
-      ReshadeFrameHost host(queue, entry.back_buffer);
-      RunOrWarnOnce(&state, entry, &host, D3D12_RESOURCE_STATE_PRESENT, point, reinterpret_cast<ID3D12Resource*>(early_motion.handle));
+      ReshadeFrameHost host(queue, (early_begun.n ? api::resource{reinterpret_cast<uint64_t>(early_begun.n)} : entry.back_buffer));
+      addon::Replacement replacement;
+      if (early_begun.n) replacement = {.owner = entry.hud_composer->Owner(), .native = early_begun.n};
+      const uint32_t passes = RunOrWarnOnce(&state, entry, &host, D3D12_RESOURCE_STATE_PRESENT, point, reinterpret_cast<ID3D12Resource*>(early_motion.handle),
+                                            std::move(replacement), early_begun.inputs);
+      if (early_begun.n) {
+        if (passes != 0u) entry.hud_composer->End(early_list);
+        entry.hud_composer->Close(early_list);
+        // The composer recorded natively; ReShade submits its immediate list only once an API call marks it. A global UAV barrier marks
+        // it and orders nothing that matters, so the flush below submits the copy and the pass before the composer's fence.
+        queue->get_immediate_command_list()->barrier(api::resource{0u}, api::resource_usage::unordered_access, api::resource_usage::unordered_access);
+        queue->flush_immediate_command_list();  // the composer's fence follows the work it marks
+        entry.hud_composer->Submitted(reinterpret_cast<ID3D12CommandQueue*>(queue->get_native()));
+      }
+      if (early_hud) NoteHudPresent(entry, true, early_begun.reason, early_begun.n != nullptr && passes != 0u);
     }
 
     // The safety latch, persisted so the next start keeps the DLSS placements off, and
@@ -3552,6 +3743,12 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         facts.chain_note = chain_note;
         view.mask_note = entry.mask_note;
         view.ui_correction_note = status.ui_correction_note;
+        // HUD-less: while frame generation reads Uplift's output (Before FG), the note says what UI correction does there.
+        if (!entry.hud_note.empty()) {
+          view.ui_correction_note = entry.hud_note;
+        } else if (state.settings.ui_correction != ui::UiCorrection::ON && state.fg_input.FrameGenerationReads(now)) {
+          view.ui_correction_note = std::string(uplift::text::HUDLESS_UI_CORRECTION_NOT_ON);
+        }
         view.keep_faces_unavailable = std::string(ui::KeepFacesUnavailable({.gpu_ready = status.keep_faces_supported}));
         view.frame_generation_line = ui::FormatFrameGenerationLine(
             status.frame_generation.active, status.frame_generation.multiplier, status.frame_generation.from_ngx);
@@ -3655,6 +3852,19 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       if (view.frame_generation_active && entry.before_fg.activity.real && (entry.before_fg.outer_owns_frame || (!HelperView(entry) && (!Bridged(entry) || NativePresent(entry))))) {
         view.activity = entry.before_fg.activity;
       }
+      // HUD-less (design §9): what DLSS-G's evaluate last did with the game's HUD-less image, while frame generation runs.
+      if (view.frame_generation_active) {
+        const auto last = state.fg_input.Last(std::chrono::steady_clock::now());
+        if (!state.hooks.Started() && entry.before_fg.activity.passes != 0u) {
+          view.hudless_line = std::string(uplift::text::HUDLESS_HOOKS_OFF);
+          view.hudless_on_card = true;
+        } else if (last.recent) {
+          view.hudless_line = addon::HudlessLine(last.action, last.reason);
+          // The working card says so only where NR changed what frame generation reads: not for an image NR never touched, or a game with none.
+          view.hudless_on_card = (last.action != addon::HudlessAction::LEAVE
+                                  || (last.reason != uplift::text::HUDLESS_NOT_CHANGED && last.reason != uplift::text::HUDLESS_NO_IMAGE));
+        }
+      }
     }
     // Before FG greyed, with why, where frame generation cannot run: not a Direct3D 12 or Vulkan device, no Streamline hooks, a game that
     // has not loaded Streamline, or frame generation not running, as the diagram's FG box shows it (the choice returns by itself once it runs).
@@ -3733,6 +3943,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
 // DeviceHook's vkDestroyDevice callback, on the game's thread before ReShade's own vkDestroyDevice (inside the detour's try), so
 // NR on the device is released while ReShade still dispatches it. The game has idled the device. The context goes after the lock.
 void OnVulkanDeviceDestroyed(VkDevice vk_device) {
+  g_state->hud_tags.Clear();
   std::unique_ptr<addon::VkDlssContext> torn_down;
   const std::unique_lock lock(g_state->mutex);
   if (addon::streamline::Installed()) g_state->before_fg_vk.DestroyDevice(vk_device);

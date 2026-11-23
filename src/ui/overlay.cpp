@@ -15,6 +15,7 @@
 #include "ui/settings_schema.hpp"
 #include "sources/work_size.hpp"
 #include "ui/overlay_widgets.hpp"
+#include "text/hudless_messages.hpp"
 
 namespace uplift::ui {
 namespace {
@@ -722,6 +723,7 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
     }
     if (view.frame_generation_active || !view.frame_generation_line.empty())
       fact("Frame generation", gui::Display(view.frame_generation_active ? "On" : "Off"));
+    if (!view.hudless_line.empty()) fact(text::HUDLESS_DETAILS_LABEL.data(), gui::Display(view.hudless_line));
     gui::EndTable();
   }
 
@@ -957,6 +959,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       row("Motion vectors", view.live.motion);
       if (!view.details_backend.empty()) row("Backend", view.details_backend);
       row("Resolution", view.live.resolution);
+      if (view.hudless_on_card && !view.hudless_line.empty()) row(text::HUDLESS_DETAILS_LABEL.data(), gui::Display(view.hudless_line));
       if (!view.setup.why.empty()) {
         const std::string why = "Why: " + view.setup.why;
         gui::PushStyleColor(ImGuiCol_Text, gui::GetStyleColorVec4(ImGuiCol_TextDisabled));
@@ -1144,7 +1147,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   if (widgets::Disclosure("Advanced", "Routing · Runtime · Diagnostics")) widgets::Panel("##advanced_body", [&] {
     widgets::PairedGroups("##advanced_groups", [&] {
       widgets::GroupHeading("Routing");
-      rows({"PresentWithFrameGen", "BeforeFGMotion", "VulkanNr", "AllowCrossQueuePasses", "UseD3D9Ex"});
+      rows({"PresentWithFrameGen", "BeforeFGMotion", "HideHudless", "VulkanNr", "AllowCrossQueuePasses", "UseD3D9Ex"});
     }, [&] {
       widgets::GroupHeading("Memory and recovery");
       rows({"VramCheck", "BudgetMarginMB", "GraceSeconds", "AutoResume", "AutoRetry"});

@@ -14,7 +14,7 @@ namespace {
 constexpr uint32_t TRACE_FRAMES = 8u;  // per-frame traces for this many frames after a state change
 // No present for this long while evaluates continue means the swap chain is starving.
 constexpr auto PRESENT_STARVATION = std::chrono::milliseconds(250);
-// DLSS_IDLE_MINIMUM is shared by the native and bridged placement state.
+// DLSS_IDLE_MINIMUM (ngx_hooks/feature_registry.hpp) is shared by the native and bridged placement state and the registry's main handle.
 // A device removed this soon after Uplift recorded on a game list latches the DLSS placements off.
 constexpr auto DLSS_LATCH_WINDOW = std::chrono::seconds(10);
 // How long nr::SkipReason::DESCRIPTORS_BUSY may persist, back to back, before it is
@@ -670,6 +670,7 @@ BridgedDlssDecision DeviceContext::DecideBeforeEvaluate(const ngx_hooks::DlssFra
                                                         std::chrono::steady_clock::time_point now) {
   before_reset_.reset();  // split chain: each evaluate's own, set only by this evaluate's Before upscaling recording
   if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) return {};
+  NoteDlssFeature(frame.serial);  // as BeforeDlssEvaluate: another feature's frames never continue this one's NR history
   if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_ || frame.feature != NVSDK_NGX_Feature_SuperSampling) return {};
   frame_size_ = render_region;
   bridged_layouts_[0] = SettleLayout(frame_size_, Stage::BEFORE_UPSCALING, now);  // in every state
@@ -690,6 +691,7 @@ BridgedDlssDecision DeviceContext::DecideAfterEvaluate(const ngx_hooks::DlssFram
     before_reset_.reset();
     return {};
   }
+  NoteDlssFeature(frame.serial);  // as OnDlssEvaluate
   if (placement_.placement == Placement::PRESENT) {
     // Source = Present copies DLSS's vectors for the present that closes this frame, as on Direct3D 12, into the bridge's ring.
     if (settings_.source != ui::PlacementSource::PRESENT || !settings_.motion_vectors || frame.motion_vectors == nullptr

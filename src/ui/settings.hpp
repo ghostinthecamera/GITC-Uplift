@@ -241,6 +241,7 @@ struct Settings {
   enum class FgMotion : uint8_t { SELECT, OFF, DLSS };
   FgMotion before_fg_motion = FgMotion::SELECT;
   bool allow_cross_queue_passes = false;
+  bool hide_hudless = true;  // HideHudless: Before FG hides the game's HUD-less image from DLSS-G when NR cannot use it
   float motion_scale_x = 1.f;  // multiplies DLSSNR.MVecScaleX; negative flips the axis
   float motion_scale_y = 1.f;
   DepthDirection depth_direction = DepthDirection::GAME;

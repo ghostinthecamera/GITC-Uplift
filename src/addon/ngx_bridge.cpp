@@ -7,11 +7,35 @@
 
 #include "addon/placement.hpp"
 #include "ngx_hooks/ngx_parameters.hpp"
+#include "nvsdk_ngx_defs_dlssg.h"
+#include "text/hudless_messages.hpp"
 #include "nr/d3d11_handles.hpp"
 #include "nr/log.hpp"
 
 namespace uplift::addon {
 namespace {
+
+// HUD-less (design §6): DLSS-G's images in its evaluate block. UI alpha is read before UI colour, as the tags are.
+constexpr const char* DLSSG_BACKBUFFER_KEY = NVSDK_NGX_DLSSG_Parameter_Backbuffer;
+constexpr const char* DLSSG_HUDLESS_KEY = NVSDK_NGX_DLSSG_Parameter_HUDLess;
+constexpr const char* DLSSG_UI_ALPHA_KEY = NVSDK_NGX_DLSSG_Parameter_UIAlpha;
+constexpr const char* DLSSG_UI_KEY = NVSDK_NGX_DLSSG_Parameter_UI;
+// Images are keyed by their native handle alone: ID3D12Resource addresses and NVIDIA's non-dispatchable Vulkan handles are unique
+// within the process, and DLSS-G's own command list need not be one Uplift tracks.
+constexpr uint64_t ANY_DEVICE = 0u;
+
+// A DLSS-G image's native handle: the ID3D12Resource*, or the VkImage of the block's NVSDK_NGX_Resource_VK. 0 when absent or null.
+uint64_t DlssgImage(ngx_hooks::NgxApi api, const NVSDK_NGX_Parameter& block, const char* key) {
+  if (api == ngx_hooks::NgxApi::D3D12) {
+    ID3D12Resource* resource = nullptr;
+    if (NVSDK_NGX_SUCCEED(block.Get(key, &resource))) return reinterpret_cast<uint64_t>(resource);
+  }
+  void* pointer = nullptr;
+  if (!NVSDK_NGX_SUCCEED(block.Get(key, &pointer)) || pointer == nullptr) return 0u;
+  if (api == ngx_hooks::NgxApi::D3D12) return reinterpret_cast<uint64_t>(pointer);
+  const auto* const vk = static_cast<const NVSDK_NGX_Resource_VK*>(pointer);
+  return reinterpret_cast<uint64_t>(vk->Resource.ImageViewInfo.Image);
+}
 
 // A 2D texture's description, or all zero (not a 2D texture). The game's resource, read during its own evaluate call.
 D3D11_TEXTURE2D_DESC D3D11TextureDescription(ID3D11Resource* resource) {
@@ -137,7 +161,35 @@ void NgxBridge::AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle*
   }
 }
 
+void NgxBridge::DecideHudless(ngx_hooks::EvaluateCall* call) {
+  if (fg_input_ == nullptr || (call->api != ngx_hooks::NgxApi::D3D12 && call->api != ngx_hooks::NgxApi::VULKAN)) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (!fg_input_->AnyRecent(now)) return;  // one relaxed load while NR changes nothing DLSS-G reads
+  const std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(call->handle);
+  // Handles made before the hooks are not registered: they may be frame generation's.
+  if (record && ngx_hooks::KindOf(record->feature) != ngx_hooks::FeatureKind::FRAME_GENERATION) return;
+  const NVSDK_NGX_Parameter& block = *call->parameters;
+  const uint64_t back_buffer = DlssgImage(call->api, block, DLSSG_BACKBUFFER_KEY);
+  if (back_buffer == 0u) return;
+  const uint64_t ui_alpha = DlssgImage(call->api, block, DLSSG_UI_ALPHA_KEY);
+  const uint64_t opacity = (ui_alpha != 0u ? ui_alpha : DlssgImage(call->api, block, DLSSG_UI_KEY));
+  FgDecision decision = fg_input_->Decide({.device = ANY_DEVICE, .image = back_buffer}, DlssgImage(call->api, block, DLSSG_HUDLESS_KEY), opacity,
+                                         hide_hudless_.load(std::memory_order_relaxed), now);
+  call->hudless_action = static_cast<uint8_t>(decision.action);
+  // INFO on each change of that state, from actual evaluates (design §9).
+  // A block without a HUD-less image (a game whose tags are partly empty) is not logged: it would alternate every frame.
+  if (decision.reason.data() == text::HUDLESS_NO_IMAGE.data()) return;
+  const bool action_changed = (logged_hudless_action_.exchange(call->hudless_action, std::memory_order_relaxed) != call->hudless_action);
+  const bool reason_changed = (logged_hudless_reason_.exchange(decision.reason.data(), std::memory_order_relaxed) != decision.reason.data());
+  if (action_changed || reason_changed) nr::Logf(nr::LogLevel::INFO, "HUD-less image at frame generation: {}", HudlessLine(decision.action, decision.reason));
+  if (decision.action == HudlessAction::USE) {
+    call->hudless = decision.replacement.native;
+    call->hudless_owner = std::move(decision.replacement.owner);
+  }
+}
+
 void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
+  DecideHudless(call);
   if (!pre_sr_.load(std::memory_order_relaxed)) return;  // Before upscaling is off: one relaxed load per evaluate
   // On Vulkan only a native context records before upscaling. Without one watching, nothing else is asked (not even the registry's lock).
   if (call->api == ngx_hooks::NgxApi::VULKAN && vk_nr_contexts_.load(std::memory_order_relaxed) <= 0) return;
@@ -149,7 +201,7 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
   if (!record || !PreSrFeatureAllowed(record->feature, call->api)) return;
   const void* const device = DeviceOf(call->api, call->list);
   if (device == nullptr) return;  // a list Uplift does not track
-  if (registry_.MainHandle(device, routing_.SwapchainSize(device), call->api, ((call->api == ngx_hooks::NgxApi::D3D12 || call->api == ngx_hooks::NgxApi::VULKAN) ? call->handle : nullptr)) != call->handle) return;  // within the evaluate's API
+  if (registry_.MainHandle(device, routing_.SwapchainSize(device), call->api, call->handle) != call->handle) return;  // within the evaluate's API
   if (call->api == ngx_hooks::NgxApi::D3D11) {
     call->color = routing_.BeforeMainEvaluateD3D11(device, call->list, ngx_hooks::CaptureD3D11DlssFrame(*call->parameters, call->handle, *record));
     return;
@@ -165,7 +217,7 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
 
 void NgxBridge::OnColorSwapRejected(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* /*handle*/) {
   // BeforeEvaluate already gated this call's handle on the main SuperSampling (or allowed Ray Reconstruction) handle before it ever set
-  // call->color, so ColorSwap only reaches here for that same handle: no need to re-check the registry.
+  // call->color, so EvaluateSwaps only reaches here for that same handle: no need to re-check the registry.
   const void* const device = DeviceOf(api, list);
   if (device == nullptr) return;  // a list Uplift does not track
   if (api == ngx_hooks::NgxApi::VULKAN) {
@@ -179,7 +231,8 @@ void NgxBridge::OnColorSwapRejected(ngx_hooks::NgxApi api, ID3D12GraphicsCommand
 
 void NgxBridge::AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle,
                               const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Result result) {
-  // Every API's evaluate of a feature the game created: the foreign NR producer's liveness (ForeignNr = Yield), whatever watches.
+  // Every API's evaluate of a feature the game created, whatever watches: an upscaler's activity, which MainHandle reads, and the foreign NR
+  // producer's liveness (ForeignNr = Yield). The registry's exclusive lock, for one lookup and one store.
   if (NVSDK_NGX_SUCCEED(result)) registry_.OnEvaluate(handle);
   // The process's first game DLSS evaluate is summarised once, whatever watches; one relaxed load from then on.
   if (!summary_logged_.load(std::memory_order_relaxed) && NVSDK_NGX_SUCCEED(result) && parameters != nullptr) {
@@ -219,7 +272,8 @@ void NgxBridge::AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* 
     return;
   }
   if (api == ngx_hooks::NgxApi::D3D11) {
-    // Without a watching Direct3D 11 context (none made yet, or NR off and released) a pure passthrough: no lookup, no lock, no capture.
+    // Without a watching Direct3D 11 context (none made yet, or NR off and released), beyond the activity stamp above, a pure passthrough: no
+    // lookup, no add-on lock, no capture.
     if (d3d11_watching_.load(std::memory_order_relaxed) <= 0) return;
     if (NVSDK_NGX_FAILED(result) || parameters == nullptr) return;
     std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(handle);
@@ -229,16 +283,16 @@ void NgxBridge::AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* 
     if (!record || ngx_hooks::KindOf(record->feature) != ngx_hooks::FeatureKind::UPSCALER) return;
     const void* const device = routing_.DeviceOfD3D11(list);
     if (device == nullptr) return;  // an unmarked device, or a deferred context
-    if (registry_.MainHandle(device, routing_.SwapchainSize(device), ngx_hooks::NgxApi::D3D11) != handle) return;
+    if (registry_.MainHandle(device, routing_.SwapchainSize(device), ngx_hooks::NgxApi::D3D11, handle) != handle) return;
     routing_.OnMainEvaluateD3D11(device, list, ngx_hooks::CaptureD3D11DlssFrame(*parameters, handle, *record));
     return;
   }
   // Without a native Vulkan context that watches (Source on Auto or Present, the default, also after a DLSS
-  // pick was undone) no token can be open and nothing is recorded, so the evaluate is a pure passthrough: no registry lookup, no add-on lock
+  // pick was undone) no token can be open and nothing is recorded, so beyond the activity stamp above the evaluate is a pure passthrough: no lookup, no add-on lock
   // (SwapchainSize, OnMainEvaluateVk), no capture.
   if (vk_nr_contexts_.load(std::memory_order_relaxed) <= 0) return;
   // Only a feature the game created can have an Uplift token open on its command buffer (Uplift's own runtime
-  // never registers), so the registry is asked first, lock-free. From there EndVulkanEvaluate closes the call on every path below, after
+  // never registers), so the registry is asked first (its shared lock). From there EndVulkanEvaluate closes the call on every path below, after
   // NR's own recording: the token's event follows everything Uplift recorded in this call.
   const std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(handle);
   if (!record) return;

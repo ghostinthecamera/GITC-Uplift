@@ -237,7 +237,8 @@ void HelperFront::RunClient(HelperDevice& device, api::device* game_device, api:
       sent = device.d3d11->LastRunSent();
     }
   }
-  if (returned && outer_host) device.before_fg_passes += remote_->LastStatus().passes_run;
+  // Every Present-stage return, early or outer (HUD-less: the add-on notes the presented image from this count).
+  if (returned && (outer_host || at_present)) device.present_passes += remote_->LastStatus().passes_run;
   if (returned && !device.nr_returned_logged) {
     // Once per attach: the e2e cases (and the checklist) read it as "NR ran here", e.g. again after a Direct3D 9 Reset.
     device.nr_returned_logged = true;

@@ -37,9 +37,10 @@ FeatureKind KindOf(NVSDK_NGX_Feature feature) {
 void FeatureRegistry::OnCreate(const NVSDK_NGX_Handle* handle, NVSDK_NGX_Feature feature, const void* device, const CreateSnapshot& snapshot,
                                NgxApi api) {
   if (handle == nullptr) return;
+  const auto now = std::chrono::steady_clock::now();
   const std::unique_lock lock(mutex_);
-  features_.insert_or_assign(handle,
-                             FeatureRecord{.feature = feature, .device = device, .snapshot = snapshot, .serial = next_serial_++, .api = api});
+  features_.insert_or_assign(handle, FeatureRecord{.feature = feature, .device = device, .snapshot = snapshot, .serial = next_serial_++, .api = api,
+                                                   .last_active = now, .run_start = now});
   not_adopted_.erase(handle);  // a reused handle
   if (device != nullptr && KindOf(feature) == FeatureKind::UPSCALER) {
     ++upscaler_creates_[device];
@@ -49,10 +50,13 @@ void FeatureRegistry::OnCreate(const NVSDK_NGX_Handle* handle, NVSDK_NGX_Feature
 bool FeatureRegistry::TryAdopt(const NVSDK_NGX_Handle* handle, NVSDK_NGX_Feature feature, const void* device, const CreateSnapshot& snapshot,
                                NgxApi api) {
   if (handle == nullptr) return false;
+  const auto now = std::chrono::steady_clock::now();
   const std::unique_lock lock(mutex_);
   // Insert-if-absent under the lock: a hooked create of the same handle on another thread keeps its own record.
-  const bool inserted =
-      features_.try_emplace(handle, FeatureRecord{.feature = feature, .device = device, .snapshot = snapshot, .serial = next_serial_, .api = api}).second;
+  const bool inserted = features_
+                            .try_emplace(handle, FeatureRecord{.feature = feature, .device = device, .snapshot = snapshot, .serial = next_serial_, .api = api,
+                                                               .last_active = now, .run_start = now})
+                            .second;
   if (!inserted) return false;
   ++next_serial_;
   not_adopted_.erase(handle);
@@ -82,17 +86,30 @@ void FeatureRegistry::OnRelease(const NVSDK_NGX_Handle* handle) {
 }
 
 void FeatureRegistry::OnEvaluate(const NVSDK_NGX_Handle* handle, std::chrono::steady_clock::time_point when) {
-  const std::shared_lock lock(mutex_);
+  const std::unique_lock lock(mutex_);
   const auto found = features_.find(handle);
-  if (found == features_.end() || KindOf(found->second.feature) != FeatureKind::NEURAL_RENDERING) return;
-  last_nr_evaluate_.store(when.time_since_epoch().count());
+  if (found == features_.end()) return;
+  FeatureRecord& record = found->second;
+  switch (KindOf(record.feature)) {
+    case FeatureKind::UPSCALER: {
+      if (when <= record.last_active) break;  // a racing thread's older stamp never moves the record back
+      const std::chrono::steady_clock::duration gap = when - record.last_active;
+      if (gap > DLSS_IDLE_MINIMUM) record.run_start = when;  // after a pause, a new run of evaluates
+      record.previous_gap = record.gap;
+      record.gap = gap;
+      record.last_active = when;
+      break;
+    }
+    case FeatureKind::NEURAL_RENDERING: last_nr_evaluate_ = when; break;
+    case FeatureKind::FRAME_GENERATION:
+    case FeatureKind::OTHER:            break;
+  }
 }
 
 std::optional<std::chrono::steady_clock::time_point> FeatureRegistry::LastEvaluated(FeatureKind kind) const {
   if (kind != FeatureKind::NEURAL_RENDERING) return std::nullopt;
-  const std::chrono::steady_clock::rep ticks = last_nr_evaluate_.load();
-  if (ticks == 0) return std::nullopt;
-  return std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(ticks));
+  const std::shared_lock lock(mutex_);
+  return last_nr_evaluate_;
 }
 
 size_t FeatureRegistry::OnCoreShutdown(NgxApi api, const void* device) {
@@ -150,46 +167,81 @@ bool FeatureRegistry::UpscalerLive(const void* device, NgxApi api) const {
   });
 }
 
-const NVSDK_NGX_Handle* FeatureRegistry::MainHandle(const void* device, nr::Size swapchain, NgxApi api, const NVSDK_NGX_Handle* evaluating) const {
+const NVSDK_NGX_Handle* FeatureRegistry::MainHandle(const void* device, nr::Size swapchain, NgxApi api, const NVSDK_NGX_Handle* evaluating,
+                                                    std::chrono::steady_clock::time_point now) const {
   const std::shared_lock lock(mutex_);
-  const NVSDK_NGX_Handle* best = nullptr;
-  bool best_matches = false;
-  uint64_t best_area = 0u;
-  uint64_t best_serial = 0u;
-  nr::Size best_output;
-  for (const auto& [handle, record] : features_) {
-    if (KindOf(record.feature) != FeatureKind::UPSCALER) continue;
-    if (record.api != api) continue;
-    if (record.device != nullptr && record.device != device) continue;
-    // Inlined from the brief's AspectMatches (controller ruling: a single-call-site helper is
-    // inlined at its call site): whether this feature's output shares the swap chain's aspect
-    // ratio within ASPECT_TOLERANCE.
-    const nr::Size output = record.snapshot.output;
-    bool matches = false;
-    if (!output.Empty() && !swapchain.Empty()) {
-      const double output_cross = static_cast<double>(output.width) * swapchain.height;
-      const double swapchain_cross = static_cast<double>(swapchain.width) * output.height;
-      matches = (std::abs(output_cross - swapchain_cross) <= ASPECT_TOLERANCE * swapchain_cross);
+  using Entry = decltype(features_)::value_type;
+  // The geometry ranking, among `api`'s upscalers on `device` (or of an unknown device) that `admit` accepts.
+  const auto rank = [&](const auto& admit) -> const Entry* {
+    const Entry* best = nullptr;
+    bool best_matches = false;
+    uint64_t best_area = 0u;
+    uint64_t best_serial = 0u;
+    for (const Entry& entry : features_) {
+      const auto& [handle, record] = entry;
+      if (KindOf(record.feature) != FeatureKind::UPSCALER) continue;
+      if (record.api != api) continue;
+      if (record.device != nullptr && record.device != device) continue;
+      if (!admit(handle, record)) continue;
+      // Inlined from the brief's AspectMatches (controller ruling: a single-call-site helper is
+      // inlined at its call site): whether this feature's output shares the swap chain's aspect
+      // ratio within ASPECT_TOLERANCE.
+      const nr::Size output = record.snapshot.output;
+      bool matches = false;
+      if (!output.Empty() && !swapchain.Empty()) {
+        const double output_cross = static_cast<double>(output.width) * swapchain.height;
+        const double swapchain_cross = static_cast<double>(swapchain.width) * output.height;
+        matches = (std::abs(output_cross - swapchain_cross) <= ASPECT_TOLERANCE * swapchain_cross);
+      }
+      const uint64_t area = output.Pixels();
+      const bool better = (best == nullptr || (matches && !best_matches)
+                           || (matches == best_matches && (area > best_area || (area == best_area && record.serial < best_serial))));
+      if (better) {
+        best = &entry;
+        best_matches = matches;
+        best_area = area;
+        best_serial = record.serial;
+      }
     }
-    const uint64_t area = output.Pixels();
-    const bool better = (best == nullptr || (matches && !best_matches)
-                         || (matches == best_matches && (area > best_area || (area == best_area && record.serial < best_serial))));
-    if (better) {
-      best = handle;
-      best_matches = matches;
-      best_area = area;
-      best_serial = record.serial;
-      best_output = output;
-    }
+    return best;
+  };
+  // A feature's activity at `now`. The evaluating handle's own evaluate counts as already recorded, as OnEvaluate records it, so the answer before
+  // an evaluate and the answer after it agree.
+  const auto last_of = [&](const NVSDK_NGX_Handle* handle, const FeatureRecord& record) { return (handle == evaluating ? now : record.last_active); };
+  const auto run_start_of = [&](const NVSDK_NGX_Handle* handle, const FeatureRecord& record) {
+    return ((handle == evaluating && now - record.last_active > DLSS_IDLE_MINIMUM) ? now : record.run_start);
+  };
+  const Entry* const winner = rank([](const NVSDK_NGX_Handle*, const FeatureRecord&) { return true; });
+  if (winner == nullptr) return nullptr;
+  const Entry* chosen = winner;
+  // A winner the game has stopped evaluating (paused, or abandoned without a release, as a DLSS mod may leave it) gives way to a feature of the
+  // same view, one sharing a width or a height with the winner (a letterbox or a constrained-aspect change) or with the swap chain (a resolution
+  // change whose old feature was not released), that the game has evaluated without a pause for longer than the pause interval. The winner
+  // counts as stopped only once it has gone the pause interval past its own cadence (the shorter of its last two gaps), so a winner on a settled
+  // slow rhythm (two gaps alike: once a second, or once a frame below four frames a second) keeps its place. What this cannot tell from
+  // abandonment, and so may move main: the first two gaps of a slowdown; a winner evaluated in bursts (two evaluates close together, then a gap
+  // over the pause interval), whose shorter gap reads as fast; and a frame over the pause interval in which a same-view feature is evaluated
+  // twice. With nothing so steady, the winner stays, as it would before.
+  const FeatureRecord& kept = winner->second;
+  if (now - last_of(winner->first, kept) > DLSS_IDLE_MINIMUM + std::min(kept.gap, kept.previous_gap)) {
+    const nr::Size view = winner->second.snapshot.output;
+    const Entry* const steady = rank([&](const NVSDK_NGX_Handle* handle, const FeatureRecord& record) {
+      const nr::Size output = record.snapshot.output;
+      const bool same_view = (output.width == view.width || output.height == view.height
+                              || (!swapchain.Empty() && (output.width == swapchain.width || output.height == swapchain.height)));
+      return (!output.Empty() && same_view && now - last_of(handle, record) <= DLSS_IDLE_MINIMUM && now - run_start_of(handle, record) > DLSS_IDLE_MINIMUM);
+    });
+    if (steady != nullptr) chosen = steady;
   }
-  if ((api == NgxApi::D3D12 || api == NgxApi::VULKAN) && evaluating != nullptr && !best_output.Empty()) {
+  const nr::Size chosen_output = chosen->second.snapshot.output;
+  if ((api == NgxApi::D3D12 || api == NgxApi::VULKAN) && evaluating != nullptr && !chosen_output.Empty()) {
     const auto current = features_.find(evaluating);
     if (current != features_.end() && current->second.api == api && KindOf(current->second.feature) == FeatureKind::UPSCALER
-        && (current->second.device == nullptr || current->second.device == device) && current->second.snapshot.output == best_output) {
+        && (current->second.device == nullptr || current->second.device == device) && current->second.snapshot.output == chosen_output) {
       return evaluating;
     }
   }
-  return best;
+  return chosen->first;
 }
 
 }  // namespace uplift::ngx_hooks

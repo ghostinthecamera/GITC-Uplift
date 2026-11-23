@@ -57,6 +57,18 @@ CommandRing::Status CommandRing::Begin(VkCommandBuffer* buffer) {
   return Status::READY;
 }
 
+bool CommandRing::SlotFree(uint32_t index) const {
+  const Slot& slot = slots_[index % SLOTS];
+  return (slot.fence != VK_NULL_HANDLE && functions_.vkGetFenceStatus(device_, slot.fence) == VK_SUCCESS);
+}
+
+bool CommandRing::SlotsFree(uint32_t count) const {
+  for (uint32_t step = 0u; step < count; ++step) {
+    if (!SlotFree(current_ + step)) return false;
+  }
+  return true;
+}
+
 VkResult CommandRing::Submit(VkQueue queue, std::span<const VkSemaphore> waits) {
   if (!begun_) return VK_ERROR_INITIALIZATION_FAILED;
   begun_ = false;

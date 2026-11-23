@@ -22,9 +22,18 @@
 #include "ipc/protocol.hpp"
 #include "nr/log.hpp"
 
+#ifdef UPLIFT_HELPER_IDENTITY_NR
+#include "testing/identity_shift.hpp"
+#endif
+
 namespace {
 
 namespace ipc = uplift::ipc;
+
+#ifdef UPLIFT_HELPER_IDENTITY_NR
+constexpr size_t SWITCH_VALUE_CHARS = 8u;  // room for a test switch's value, read from the environment
+constexpr char IDENTITY_SHIFT_LINE[] = "identity NR shifts the picture up one row (test build)";
+#endif
 
 HANDLE ParseHandle(const wchar_t* text) {
   return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::wcstoull(text, nullptr, 16)));
@@ -55,6 +64,14 @@ bool EnableDebugLayerIfAsked() {
   if (FAILED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) return false;
   debug->EnableDebugLayer();
   return true;
+}
+
+// The test build only. testing::IDENTITY_SHIFT_VARIABLE set to IDENTITY_SHIFT_ON (testing/identity_shift.hpp) in the inherited environment makes every
+// IdentityHost this helper makes shift the picture up one row. Read once here: each test that wants the shift starts its own helper while it is set.
+bool IdentityShiftAsked() {
+  wchar_t buffer[SWITCH_VALUE_CHARS] = {};
+  return GetEnvironmentVariableW(uplift::testing::IDENTITY_SHIFT_VARIABLE, buffer, static_cast<DWORD>(std::size(buffer))) != 0u
+         && std::wcscmp(buffer, uplift::testing::IDENTITY_SHIFT_ON) == 0;
 }
 
 void LogDebugLayerErrors(ID3D12Device* device) {
@@ -122,5 +139,11 @@ int APIENTRY wWinMain(HINSTANCE /*instance*/, HINSTANCE /*previous*/, PWSTR /*co
   Publish(block, ipc::HelperState::READY);
   uplift::nr::Logf(uplift::nr::LogLevel::INFO, "helper ready (build {})", UPLIFT_BUILD_ID);
   uplift::helper::Helper helper(block, events, std::move(side));
+#ifdef UPLIFT_HELPER_IDENTITY_NR
+  if (IdentityShiftAsked()) {
+    helper.SetIdentityShift(true);
+    uplift::nr::Log(uplift::nr::LogLevel::INFO, IDENTITY_SHIFT_LINE);
+  }
+#endif
   return helper.Loop();
 }

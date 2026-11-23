@@ -84,7 +84,7 @@ struct HelperDevice {
   // The 2-strike rule for the helper's stops (its own device removed, a hang, an exit), as for a bridge's private device: Retry now restarts it once.
   BridgeStrikes strikes;
   bool claimed_elsewhere = false;
-  uint64_t before_fg_passes = 0u;
+  uint64_t present_passes = 0u;
   bool game_facing = false;
   color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
   bool nr_returned_logged = false;  // "NR ran on the game's frame" was logged since the client last attached (Reset, helper exit)

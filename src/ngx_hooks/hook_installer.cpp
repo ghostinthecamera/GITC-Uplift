@@ -8,13 +8,15 @@
 
 #include <algorithm>
 #include <array>
-#include <cstring>
 #include <format>
+#include <iterator>
 #include <mutex>
+#include <ranges>
 #include <string_view>
 #include <utility>
 
 #include "ngx_hooks/minhook_once.hpp"
+#include "nvsdk_ngx_defs_dlssg.h"
 #include "nr/d3d11_handles.hpp"
 #include "nr/log.hpp"
 #include "nr/vk_handles.hpp"
@@ -23,6 +25,9 @@ namespace uplift::ngx_hooks {
 namespace {
 
 constexpr size_t INITIAL_MODULE_CAPACITY = 256u;
+constexpr char HUDLESS_KEY[] = NVSDK_NGX_DLSSG_Parameter_HUDLess;
+constexpr uint8_t HUDLESS_LEAVE = 0u;
+constexpr uint8_t HUDLESS_HIDE = 1u;
 constexpr size_t MODULE_PATH_CHARS = 32768u;
 constexpr size_t ENTRY_POINT_COUNT = 17u;
 constexpr size_t FIRST_D3D11 = 5u;  // The D3D11 entries precede Vulkan's entries.
@@ -287,22 +292,69 @@ void NotifyEvaluate(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX
   }
 }
 
-// Before-upscaling Color swap for one evaluate. The observer decides before the original
+// HUD-less (design §6): one key of the game's block swapped for one evaluate. It reads the game's value with the type the API sets it with
+// (Direct3D 12 an ID3D12Resource*, else a void*, as Color is read), writes null (hide) or Uplift's image (use), and puts the game's value back,
+// with that same type, when it goes. Nothing is set where the key is absent, and a game value already null stays as it is when hidden.
+class ResourceSwap {
+ public:
+  ResourceSwap() = default;
+  ResourceSwap(const ResourceSwap&) = delete;
+  ResourceSwap& operator=(const ResourceSwap&) = delete;
+  void Apply(NgxApi api, NVSDK_NGX_Parameter* block, const char* key, bool hide, void* value) noexcept {
+    void* const wanted = (hide ? nullptr : value);
+    if (api == NgxApi::D3D12 && NVSDK_NGX_SUCCEED(block->Get(key, &game_resource_))) {
+      if (hide && game_resource_ == nullptr) return;
+      kind_ = Kind::D3D12;
+      block->Set(key, static_cast<ID3D12Resource*>(wanted));
+    } else if (NVSDK_NGX_SUCCEED(block->Get(key, &game_pointer_))) {
+      if (hide && game_pointer_ == nullptr) return;
+      kind_ = Kind::POINTER;
+      block->Set(key, wanted);
+    } else {
+      return;
+    }
+    block_ = block;
+    key_ = key;
+  }
+  ~ResourceSwap() {
+    if (block_ == nullptr) return;
+    if (kind_ == Kind::D3D12) {
+      block_->Set(key_, game_resource_);
+    } else {
+      block_->Set(key_, game_pointer_);
+    }
+  }
+
+ private:
+  enum class Kind : uint8_t { D3D12, POINTER };
+  NVSDK_NGX_Parameter* block_ = nullptr;
+  const char* key_ = nullptr;
+  Kind kind_ = Kind::D3D12;
+  ID3D12Resource* game_resource_ = nullptr;
+  void* game_pointer_ = nullptr;
+};
+
+// The evaluate's swaps: Before-upscaling's Color and frame generation's DLSSG.HUDLess, decided by one observer call. Color keeps
+// the exact behaviour below. The observer decides before the original
 // runs; the destructor puts the game's own Color back on every path, so the game's block never keeps a
 // texture of Uplift's past this call. It writes back with the type the game used. A Vulkan block
 // holds its resources as void* (NGX_VULKAN_EVALUATE_DLSS_EXT), so only that type is read and written there. A Direct3D 11 block holds
 // them as ID3D11Resource* (NGX_D3D11_EVALUATE_DLSS_EXT), read and written with that overload (a void* one, as an engine may set, takes the pointer branch).
-class ColorSwap {
+class EvaluateSwaps {
  public:
-  ColorSwap(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters) noexcept {
+  EvaluateSwaps(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters) noexcept {
     NgxObserver* const observer = g_observer.load(std::memory_order_acquire);
     if (observer == nullptr || parameters == nullptr) return;
     try {
       EvaluateCall call = {.api = api, .list = list, .handle = handle, .parameters = parameters};
       observer->BeforeEvaluate(&call);
-      if (call.color == nullptr) return;
       // NGX takes the block as const, but it is the game's own mutable object, set again every frame.
       auto* const block = const_cast<NVSDK_NGX_Parameter*>(parameters);
+      if (call.hudless_action != HUDLESS_LEAVE && (api == NgxApi::D3D12 || api == NgxApi::VULKAN)) {
+        hudless_owner_ = std::move(call.hudless_owner);
+        hudless_.Apply(api, block, HUDLESS_KEY, call.hudless_action == HUDLESS_HIDE, call.hudless);
+      }
+      if (call.color == nullptr) return;
       if (api == NgxApi::D3D11) {
         // `call.color` is an ID3D11Resource*, punned (nr/d3d11_handles.hpp). Held for the original call, so a present on another
         // thread that releases the bridge's texture cannot free it under NGX. Taken before the branch is chosen, so the ID3D11Resource* branch and
@@ -334,7 +386,7 @@ class ColorSwap {
       LogObserverFailure(ObserverCall::EVALUATE, nullptr);
     }
   }
-  ~ColorSwap() {
+  ~EvaluateSwaps() {
     if (block_ != nullptr) {
       switch (kind_) {
         case Kind::D3D12:   block_->Set(NVSDK_NGX_Parameter_Color, game_color_); break;
@@ -346,8 +398,8 @@ class ColorSwap {
       swapped11_->Release();  // after the game's own Color is back
     }
   }
-  ColorSwap(const ColorSwap&) = delete;
-  ColorSwap& operator=(const ColorSwap&) = delete;
+  EvaluateSwaps(const EvaluateSwaps&) = delete;
+  EvaluateSwaps& operator=(const EvaluateSwaps&) = delete;
 
  private:
   enum class Kind : uint8_t { D3D12, D3D11, POINTER };  // the type the game's Color was read with, and is put back with
@@ -357,6 +409,9 @@ class ColorSwap {
   ID3D11Resource* game_color11_ = nullptr;
   ID3D11Resource* swapped11_ = nullptr;     // the bridge's texture DLSS reads, referenced until the swap ends (either branch)
   void* game_pointer_ = nullptr;
+  // Declared last so the HUD-less value is back (hudless_ goes first) before its image can be released.
+  std::shared_ptr<const void> hudless_owner_;
+  ResourceSwap hudless_;
 };
 
 // Every evaluate detour's body (shared by the supported APIs and both callback kinds). `original()` runs the hooked copy's own entry
@@ -368,11 +423,11 @@ NVSDK_NGX_Result RunEvaluate(NgxApi api, ID3D12GraphicsCommandList* list, const 
   if (depth.Nested()) return original();
   NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
   {
-    const ColorSwap swap(api, list, handle, parameters);
+    const EvaluateSwaps swap(api, list, handle, parameters);
     t_vulkan_evaluate = (api == NgxApi::VULKAN);
     result = original();
     t_vulkan_evaluate = false;
-  }  // the game's Color is back before AfterEvaluate reads the block
+  }  // the game's Color and HUD-less image are back before AfterEvaluate reads the block
   NotifyEvaluate(api, list, handle, parameters, result);
   return result;
 }
@@ -646,6 +701,33 @@ ModuleExports ResolveExports(HMODULE module) {
   };
 }
 
+// Every function `module` exports itself. A forwarder's function is another module's, which has it among its own.
+std::vector<void*> ExportedFunctions(HMODULE module) {
+  std::vector<void*> functions;
+  const auto* const base = reinterpret_cast<const uint8_t*>(module);
+  const auto* const dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return functions;
+  const auto* const headers = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+  if (headers->Signature != IMAGE_NT_SIGNATURE) return functions;
+  const IMAGE_DATA_DIRECTORY& directory = headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+  if (directory.VirtualAddress == 0u || directory.Size == 0u) return functions;
+  const auto* const exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + directory.VirtualAddress);
+  const auto* const addresses = reinterpret_cast<const DWORD*>(base + exports->AddressOfFunctions);
+  for (DWORD index = 0u; index < exports->NumberOfFunctions; ++index) {
+    const DWORD address = addresses[index];
+    const bool forwarder = (address >= directory.VirtualAddress && address < directory.VirtualAddress + directory.Size);
+    if (address != 0u && !forwarder) {
+      functions.push_back(const_cast<uint8_t*>(base + address));
+    }
+  }
+  return functions;
+}
+
+// The places named in a patch's way, without the nulls past the last.
+std::vector<void*> WayOf(const hooks::ToolPatch& patch) {
+  return {patch.way.begin(), std::ranges::find(patch.way, nullptr)};
+}
+
 void Rollback(size_t slot, std::span<void* const> created, std::string_view name) {
   bool poisoned = false;
   for (void* const target : created) {
@@ -683,22 +765,6 @@ void RestoreParameters(NVSDK_NGX_Parameter* parameters, std::span<const SavedPar
 
 bool InsideVulkanEvaluate() {
   return t_vulkan_evaluate;
-}
-
-void* HotpatchChainTarget(const void* entry) {
-  if (entry == nullptr) return nullptr;
-  const auto* const bytes = static_cast<const uint8_t*>(entry);
-  // The five padding bytes and the two at the entry must be committed, readable code before they are read.
-  MEMORY_BASIC_INFORMATION memory = {};
-  if (VirtualQuery(bytes - 5, &memory, sizeof(memory)) != sizeof(memory) || memory.State != MEM_COMMIT
-      || (memory.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0u
-      || static_cast<const uint8_t*>(memory.BaseAddress) + memory.RegionSize < bytes + 2) {
-    return nullptr;
-  }
-  if (bytes[0] != 0xEBu || bytes[1] != 0xF9u || bytes[-5] != 0xE9u) return nullptr;
-  int32_t relative = 0;
-  std::memcpy(&relative, bytes - 4, sizeof(relative));
-  return const_cast<uint8_t*>(bytes) + relative;  // the E9 at entry - 5 ends at the entry
 }
 
 bool IsNgxCoreFileName(std::wstring_view file_name) {
@@ -781,9 +847,9 @@ bool HookInstaller::InstallSlot(HMODULE module, const std::wstring& file_name) {
                         nullptr);
     return utf8;
   }();
-  const auto hooked_already = [this](void* target) {
-    return std::ranges::any_of(installed_, [target](const Installed& entry) {
-      return std::ranges::find(entry.targets, target) != entry.targets.end();
+  const auto hooked_already = [this](void* address) {
+    return std::ranges::any_of(installed_, [address](const Installed& entry) {
+      return std::ranges::find(entry.exports, address) != entry.exports.end();
     });
   };
   // Each API needs create (either variant on Vulkan), evaluate and release exports; forwarding copies use an existing hook.
@@ -837,6 +903,9 @@ bool HookInstaller::InstallSlot(HMODULE module, const std::wstring& file_name) {
     void* detour = nullptr;
     bool required = false;
     void* original = nullptr;  // MinHook's trampoline, once hooked
+    void* behind = nullptr;    // what was hooked instead of `target`: the code behind another tool's patch on it, or the patch's own jump stub
+    bool stub = false;         // `behind` is that stub
+    bool covered = false;      // a hook of Uplift's on `behind` is there already, and takes this entry's calls too
   };
   std::array<EntryPoint, ENTRY_POINT_COUNT> entry_points = {{
       // [0..4] Direct3D 12
@@ -888,11 +957,59 @@ bool HookInstaller::InstallSlot(HMODULE module, const std::wstring& file_name) {
   // hooks made so far go now: none was enabled yet, so none can be live.
   const auto drop_api = [&entry_points, &created](size_t first, size_t end) {
     for (size_t made = first; made < end; ++made) {
+      entry_points[made].covered = false;
       if (entry_points[made].original == nullptr) continue;
-      MH_RemoveHook(entry_points[made].target);
-      std::erase(created, entry_points[made].target);
+      void* const hooked = (entry_points[made].behind != nullptr ? entry_points[made].behind : entry_points[made].target);
+      MH_RemoveHook(hooked);
+      std::erase(created, hooked);
       entry_points[made].original = nullptr;
     }
+  };
+  // The ways another tool's patches lead, on each entry and on every other function the module exports. A place on the way of another function
+  // serves this entry only when that is the same entry of another core copy, and hooked: any other function's calls would pass the hook with this
+  // entry's detour (a release detour passes on one argument). Such a place ends this entry's way, and it takes the relay or the entry instead. The
+  // same entry may pass two hooks of Uplift's: the inner one passes a call it meets inside the outer straight on (DepthGuard).
+  std::array<hooks::ToolPatch, ENTRY_POINT_COUNT> patches = {};
+  for (size_t index = 0u; index < entry_points.size(); ++index) {
+    if (entry_points[index].target != nullptr) {
+      patches[index] = hooks::BehindPatch(entry_points[index].target);
+    }
+  }
+  std::vector<std::vector<void*>> other_ways;
+  for (void* const function : ExportedFunctions(module)) {
+    if (std::ranges::any_of(entry_points, [function](const EntryPoint& entry_point) { return entry_point.target == function; })) continue;
+    if (std::vector<void*> way = WayOf(hooks::BehindPatch(function)); !way.empty()) {
+      other_ways.push_back(std::move(way));
+    }
+  }
+  const auto serves_another = [this, &patches, &other_ways](size_t index, const void* address) {
+    const auto on = [address](const std::vector<void*>& way) { return std::ranges::find(way, address) != way.end(); };
+    for (size_t other = 0u; other < patches.size(); ++other) {
+      if (other != index && std::ranges::find(patches[other].way, address) != patches[other].way.end()) return true;
+    }
+    if (std::ranges::any_of(other_ways, on) || std::ranges::any_of(rejected_ways_, on)) return true;
+    for (const Installed& installed : installed_) {
+      if (std::ranges::any_of(installed.other_ways, on)) return true;
+      for (size_t other = 0u; other < installed.ways.size(); ++other) {
+        const bool same_entry_hooked = (other == index && installed.hooked[other] != nullptr);
+        if (!same_entry_hooked && on(installed.ways[other])) return true;
+      }
+    }
+    return false;
+  };
+  // Where the calls of a hook at `hooked` go on: past the first hook of another core copy's further on its way, with that hook's own way on. The way
+  // up to there is all jumps, so every argument reaches it, and no other detour takes the call. Null when no such hook is there.
+  const auto past_hooks_further_on = [this](const hooks::ToolPatch& patch, const void* hooked) -> void* {
+    auto place = std::ranges::find(patch.way, hooked);
+    place = (place == patch.way.end() ? patch.way.begin() : std::next(place));  // a hook at the entry is before the whole way
+    for (; place != patch.way.end() && *place != nullptr; ++place) {
+      for (const Installed& installed : installed_) {
+        for (size_t other = 0u; other < installed.hooked.size(); ++other) {
+          if (installed.hooked[other] == *place && installed.originals[other] != nullptr) return installed.originals[other];
+        }
+      }
+    }
+    return nullptr;
   };
   for (size_t index = 0u; index < entry_points.size(); ++index) {
     EntryPoint& entry_point = entry_points[index];
@@ -904,14 +1021,40 @@ bool HookInstaller::InstallSlot(HMODULE module, const std::wstring& file_name) {
       continue;
     }
     MH_STATUS status = MH_CreateHook(entry_point.target, entry_point.detour, &entry_point.original);
-    if (status == MH_ERROR_UNSUPPORTED_FUNCTION) {
-      // 1.1.2: another tool hotpatched this entry first (RTX40MFG-Unlock does, on D3D12 CreateFeature): hook where its jump leads, so both see the call.
-      if (void* const chained = HotpatchChainTarget(entry_point.target); chained != nullptr) {
-        status = MH_CreateHook(chained, entry_point.detour, &entry_point.original);
-        if (status == MH_OK) {
-          nr::Logf(nr::LogLevel::INFO, "{}: an entry point another tool hotpatched is hooked through that tool's jump", name);
-          entry_point.target = chained;
+    // Another tool may have patched this entry first (MFG Unlocker does): hook behind its patch, so both see the call and no byte of its patch changes.
+    // The entry's own hook is made first, and removed while nothing is enabled, because MinHook's "already created" is the one sign that a jump at the
+    // entry is Uplift's. A hook-behind of another core copy's same entry takes this entry's calls too. A place that serves another function (above),
+    // or holds any other hook of Uplift's, ends the way: all that follows it is that function's way too, or Uplift's own jump. When nothing behind
+    // can be hooked the entry's hook stays, and an entry MinHook cannot hook gets the patch's own stub: a tool that checks its stub may then refuse
+    // the calls, which the log says.
+    if (status == MH_OK || status == MH_ERROR_UNSUPPORTED_FUNCTION) {
+      const hooks::ToolPatch& patch = patches[index];
+      enum class Rung : uint8_t { HOOKED, NEXT, END };
+      const auto hook_behind = [this, index, &entry_point, &serves_another](void* address) {
+        if (serves_another(index, address)) return Rung::END;
+        void* original = nullptr;
+        const MH_STATUS behind_status = MH_CreateHook(address, entry_point.detour, &original);
+        const bool already = (behind_status == MH_ERROR_ALREADY_CREATED);
+        const bool covered = already && std::ranges::any_of(installed_, [index, address](const Installed& other) { return other.hooked[index] == address; });
+        if (behind_status != MH_OK && !covered) return (already ? Rung::END : Rung::NEXT);
+        entry_point.behind = address;
+        entry_point.covered = covered;
+        entry_point.original = original;
+        return Rung::HOOKED;
+      };
+      const bool entry_hooked = (status == MH_OK);
+      for (void* const address : patch.code) {
+        if (address == nullptr || hook_behind(address) != Rung::NEXT) break;
+      }
+      if (entry_point.behind == nullptr && !entry_hooked && patch.relay != nullptr) {
+        entry_point.stub = (hook_behind(patch.relay) == Rung::HOOKED);
+      }
+      if (entry_point.behind != nullptr) {
+        if (entry_hooked) {
+          MH_RemoveHook(entry_point.target);
         }
+        status = MH_OK;
+        if (entry_point.covered) continue;
       }
     }
     if (status != MH_OK) {
@@ -929,7 +1072,11 @@ bool HookInstaller::InstallSlot(HMODULE module, const std::wstring& file_name) {
       }
       continue;
     }
-    created.push_back(entry_point.target);
+    void* const hooked = (entry_point.behind != nullptr ? entry_point.behind : entry_point.target);
+    if (void* const past = past_hooks_further_on(patches[index], hooked)) {
+      entry_point.original = past;
+    }
+    created.push_back(hooked);
   }
   ok = ok && (hook_d3d12 || d3d11_hooked || vulkan_hooked);  // something is left to hook
   const bool with_evaluate_c = (entry_points[2].original != nullptr);
@@ -967,6 +1114,13 @@ bool HookInstaller::InstallSlot(HMODULE module, const std::wstring& file_name) {
   }
   if (!ok) {
     Rollback(slot, created, name);
+    // Its calls still go the ways the tools' patches lead: a hook of a later copy there would take them.
+    for (const hooks::ToolPatch& patch : patches) {
+      if (std::vector<void*> way = WayOf(patch); !way.empty()) {
+        other_ways.push_back(std::move(way));
+      }
+    }
+    std::ranges::move(other_ways, std::back_inserter(rejected_ways_));
     rejected_.push_back(module);
     return false;
   }
@@ -974,6 +1128,26 @@ bool HookInstaller::InstallSlot(HMODULE module, const std::wstring& file_name) {
   const bool with_vulkan_shutdown = (vulkan_hooked && entry_points[16].original != nullptr);
   const bool with_d3d11_shutdown = (d3d11_hooked && entry_points[9].original != nullptr);
   const bool with_d3d11_shutdown_all = (d3d11_hooked && entry_points[10].original != nullptr);
+  std::vector<void*> hooked_exports;
+  std::vector<void*> hooked(ENTRY_POINT_COUNT, nullptr);
+  std::vector<void*> originals(ENTRY_POINT_COUNT, nullptr);
+  std::vector<std::vector<void*>> ways(ENTRY_POINT_COUNT);
+  size_t behind_patches = 0u;
+  for (size_t index = 0u; index < entry_points.size(); ++index) {
+    ways[index] = WayOf(patches[index]);
+    const EntryPoint& entry_point = entry_points[index];
+    if (entry_point.original == nullptr && !entry_point.covered) continue;
+    hooked_exports.push_back(entry_point.target);
+    hooked[index] = (entry_point.behind != nullptr ? entry_point.behind : entry_point.target);
+    if (!entry_point.covered) {
+      originals[index] = entry_point.original;
+    }
+    if (entry_point.stub) {
+      nr::Logf(nr::LogLevel::WARN, "{}: another tool's jump stub is hooked itself, because nothing behind it can be hooked: that tool may refuse DLSS calls", name);
+    } else if (entry_point.behind != nullptr) {
+      ++behind_patches;
+    }
+  }
   installed_.push_back({.module = {.file_name = file_name,
                                    .module = module,
                                    .evaluate_c = with_evaluate_c,
@@ -984,8 +1158,16 @@ bool HookInstaller::InstallSlot(HMODULE module, const std::wstring& file_name) {
                                    .d3d11 = d3d11_hooked,
                                    .d3d11_shutdown = with_d3d11_shutdown,
                                    .d3d11_shutdown_all = with_d3d11_shutdown_all},
+                        .exports = std::move(hooked_exports),
                         .targets = std::move(created),
+                        .hooked = std::move(hooked),
+                        .originals = std::move(originals),
+                        .ways = std::move(ways),
+                        .other_ways = std::move(other_ways),
                         .slot = slot});
+  if (behind_patches != 0u) {
+    nr::Logf(nr::LogLevel::INFO, "{}: entry points hooked behind another tool's jump: {}", name, behind_patches);
+  }
   nr::Logf(nr::LogLevel::INFO, "NGX hooks installed on {} ({} entry points; EvaluateFeature_C {}{}{}{})", name, HookedApis(installed_.back().module),
            (with_evaluate_c ? "hooked" : (exports.evaluate_c == nullptr ? "not exported" : "not hooked")),
            (!hook_d3d12 ? "" : (with_d3d12_shutdown ? "; D3D12_Shutdown1 hooked" : "; D3D12_Shutdown1 not hooked")),
@@ -1022,7 +1204,8 @@ void HookInstaller::Shutdown() {
     }
     notification_cookie_ = nullptr;
   }
-  for (const Installed& entry : installed_) {
+  // The latest module first: its calls may go on through an earlier module's trampoline, which must outlive its hooks.
+  for (const Installed& entry : std::ranges::reverse_view(installed_)) {
     bool poisoned = false;
     for (void* const target : entry.targets) {
       if (const MH_STATUS status = MH_DisableHook(target); status != MH_OK) {
@@ -1046,6 +1229,7 @@ void HookInstaller::Shutdown() {
   }
   installed_.clear();
   rejected_.clear();
+  rejected_ways_.clear();
   // MinHook stays initialised while the Vulkan device hook (which lives for the process) holds it.
   if (const MH_STATUS status = hooks::ReleaseMinHook(); status != MH_OK) {
     nr::Logf(nr::LogLevel::WARN, "MinHook failed to uninitialize: {}", MH_StatusToString(status));

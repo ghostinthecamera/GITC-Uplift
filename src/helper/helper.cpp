@@ -199,7 +199,9 @@ void Helper::Attach(const ipc::Request& request, ipc::Reply* reply) {
     std::string error;
     std::unique_ptr<nr::Host> host;
 #ifdef UPLIFT_HELPER_IDENTITY_NR
-    host = std::make_unique<testing::IdentityHost>();
+    auto identity = std::make_unique<testing::IdentityHost>();
+    identity->SetShift(identity_shift_);
+    host = std::move(identity);
 #endif
     context_ = addon::DeviceContext::Create(
         side_->Device(),

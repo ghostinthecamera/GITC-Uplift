@@ -66,6 +66,10 @@ class Helper {
 
   // Serves requests until QUIT or IDLE_EXIT without a request (returns 0); returns 1 if the request event fails.
   int Loop();
+#ifdef UPLIFT_HELPER_IDENTITY_NR
+  // The test build only: every IdentityHost an ATTACH makes from here moves the picture up one row (testing::IdentityHost::SetShift).
+  void SetIdentityShift(bool shift) { identity_shift_ = shift; }
+#endif
 
  private:
   void Attach(const ipc::Request& request, ipc::Reply* reply);
@@ -90,6 +94,9 @@ class Helper {
   ui::ControlsCoalescer coalescer_;
   std::optional<nr::MemoryInfo> last_game_memory_;  // the add-on's figures, for RealHost::QueryMemory
   bool snippet_found_ = false;
+#ifdef UPLIFT_HELPER_IDENTITY_NR
+  bool identity_shift_ = false;  // SetIdentityShift
+#endif
   uint64_t busy_skips_ = 0u;
   // Periodic NR-running and stopped lines include this process's private bytes and VRAM.
   addon::NrHeartbeat nr_heartbeat_;

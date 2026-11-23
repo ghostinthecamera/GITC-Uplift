@@ -172,7 +172,7 @@ file(MAKE_DIRECTORY "${UPLIFT_SHADER_OUTPUT}")
 set(UPLIFT_SHADER_HEADERS)
 foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "motion_cs|cs_6_0"
                         "look_pyramid_cs|cs_6_0" "look_stabilize_cs|cs_6_0" "look_shape_cs|cs_6_0" "resolve_cs|cs_6_0"
-                        "meter_cs|cs_6_0" "faces_cs|cs_6_0")
+                        "meter_cs|cs_6_0" "faces_cs|cs_6_0" "hud_compose_ps|ps_6_0")
   string(REPLACE "|" ";" shader_parts "${shader}")
   list(GET shader_parts 0 shader_name)
   list(GET shader_parts 1 shader_profile)
@@ -224,6 +224,10 @@ uplift_add_spirv(resolve_vk resolve_cs)
 uplift_add_spirv(meter_vk_sampled meter_cs)
 # Keep faces: the twin's recombination and the later passes' protection.
 uplift_add_spirv(faces_vk faces_cs)
+# HUD-less: the Vulkan composer's pass, one per storage format it writes (BGRA8 back buffers go through rgba8 with the channels swapped).
+foreach(format IN ITEMS rgba8 rgb10a2 rgba16f)
+  uplift_add_spirv(hud_compose_vk_${format} hud_compose_cs "-DUPLIFT_VK_TARGET_FORMAT=\"${format}\"")
+endforeach()
 foreach(format IN ITEMS rgba16f r11g11b10f rgba8 rgb10a2 rgba32f)
   uplift_add_spirv(encode_vk_${format} encode_cs -DUPLIFT_VK_SOURCE_STORAGE=1 "-DUPLIFT_VK_TARGET_FORMAT=\"${format}\"")
   uplift_add_spirv(decode_vk_${format} decode_cs -DUPLIFT_VK_SOURCE_STORAGE=1 "-DUPLIFT_VK_TARGET_FORMAT=\"${format}\"")
@@ -235,6 +239,7 @@ add_library(uplift_color STATIC
   src/color/reference.cpp
   src/color/color_pipeline.cpp
   src/color/vk_color_pipeline.cpp
+  src/color/hud_composer_d3d12.cpp
   src/look/look_math.cpp
   ${UPLIFT_SHADER_HEADERS})
 target_include_directories(uplift_color PRIVATE "${UPLIFT_SHADER_OUTPUT}")
@@ -268,6 +273,11 @@ add_library(uplift_addon_core STATIC
   src/addon/device_context.cpp
   src/addon/frame_config.cpp
   src/addon/before_fg_decision.cpp
+  src/addon/fg_input.cpp
+  src/addon/hud_tags.cpp
+  src/addon/hud_frame.cpp
+  src/addon/before_fg_report.cpp
+  src/addon/hud_present_d3d12.cpp
   src/addon/placement.cpp
   src/addon/vk_route.cpp
   src/addon/chain_plan.cpp
@@ -289,7 +299,9 @@ target_link_libraries(uplift_vk PUBLIC uplift_addon_core)
 # Native Vulkan NR's device functions and completion (on nr::Timeline), the 64-bit half only. The native context of the DLSS
 # placements (addon::VkDlssContext, ReShade-free), which sits on both and on the add-on core.
 # Native NR at Present's own command buffers on the effect queue (vk::CommandRing).
-target_sources(uplift_vk PRIVATE src/vk/nr_functions.cpp src/vk/nr_timeline.cpp src/vk/command_ring.cpp src/vk/present_relay_host.cpp src/addon/vk_dlss_context.cpp)
+target_sources(uplift_vk PRIVATE src/vk/nr_functions.cpp src/vk/nr_timeline.cpp src/vk/command_ring.cpp src/vk/present_relay_host.cpp src/addon/vk_dlss_context.cpp
+                                 src/color/hud_composer_vk.cpp)
+target_include_directories(uplift_vk PRIVATE "${UPLIFT_SHADER_OUTPUT}")  # the HUD-less composer's SPIR-V headers (made with uplift_color)
 
 # The D3D11 bridge. ReShade-free.
 # The D3D10 bridge uses it and the same link libraries.

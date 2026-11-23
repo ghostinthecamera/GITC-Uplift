@@ -5,8 +5,20 @@
 #include <vulkan/vulkan.h>
 
 #include <atomic>
+#include <cstdint>
+#include <string_view>
 
 namespace uplift::addon::streamline {
+
+// sl::DLSSGMode values the game passes to slDLSSGSetOptions (Streamline's public sl_dlss_g.h).
+inline constexpr uint32_t DLSSG_MODE_OFF = 0u;      // eOff
+inline constexpr uint32_t DLSSG_MODE_ON = 1u;       // eOn
+inline constexpr uint32_t DLSSG_MODE_AUTO = 2u;     // eAuto
+inline constexpr uint32_t DLSSG_MODE_DYNAMIC = 3u;  // eDynamic
+// sl::Result values (sl_result.h) after which Streamline has applied the options: eOk, and eWarnOutOfVRAM, its only warning,
+// which NBA 2K27 gets on every call while frame generation runs (issue 16).
+inline constexpr int SL_RESULT_OK = 0;
+inline constexpr int SL_RESULT_WARN_OUT_OF_VRAM = 39;
 
 // Borrowed pointers to VkForward are valid only while its forwarding scope is alive.
 // An unclaimed scope must complete release_tick, which takes the add-on lock, before it may destroy this object.
@@ -34,13 +46,18 @@ struct Observer {
   void (*dxgi_present)(IDXGISwapChain* outer, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters);
   void (*vk_present)(VkQueue queue, const VkPresentInfoKHR* application, VkForward* forwarded);
   void (*dxgi_resize)(IDXGISwapChain*, UINT count, IUnknown* const* queues, void* inner) = nullptr;
-  void (*dxgi_color)(IDXGISwapChain*, DXGI_COLOR_SPACE_TYPE) = nullptr;
   void (*vk_created)(VkDevice, VkSwapchainKHR, const VkSwapchainCreateInfoKHR&, void* inner) = nullptr;
   void (*vk_images)(VkDevice, VkSwapchainKHR, uint32_t, const VkImage*) = nullptr;
   void (*vk_destroyed)(VkDevice, VkSwapchainKHR) = nullptr;
   void (*vk_acquired)(VkDevice, VkSwapchainKHR, uint32_t) = nullptr;
   VkImageUsageFlags (*vk_usage)(VkDevice, const VkSwapchainCreateInfoKHR&) = nullptr;
   void (*dxgi_retry)(IDXGISwapChain*) = nullptr;
+  // HUD-less (design §2): Streamline's tags, reported after the call was forwarded unchanged. `viewport` is an sl::ViewportHandle*,
+  // `tags` an sl::ResourceTag array; `frame` is the sl::FrameToken's address, never null. v2 interposers only. They must not throw.
+  void (*hud_tags)(const void* viewport, const void* tags, uint32_t count) = nullptr;
+  void (*hud_tags_for_frame)(const void* frame, const void* viewport, const void* tags, uint32_t count) = nullptr;
+  // Before Streamline's slShutdown is forwarded.
+  void (*sl_shutdown)() = nullptr;
   bool diagnostic_dxgi = false;
 };
 
@@ -55,6 +72,26 @@ bool Installed();
 bool StreamlineLoaded();
 enum class FgMode { UNKNOWN, OFF, ON, AUTO };
 FgMode Mode();
+// The mode's name for the DiagnosticBeforeFG trace.
+std::string_view ModeName(FgMode mode);
+
+// The Streamline mode of a raw sl::DLSSGMode; a value past the known modes is UNKNOWN.
+[[nodiscard]] constexpr FgMode ModeFromRaw(uint32_t raw) {
+  switch (raw) {
+    case DLSSG_MODE_OFF: return FgMode::OFF;
+    case DLSSG_MODE_ON: return FgMode::ON;
+    case DLSSG_MODE_AUTO:
+    case DLSSG_MODE_DYNAMIC: return FgMode::AUTO;
+    default: return FgMode::UNKNOWN;
+  }
+}
+
+// The mode Mode() keeps after a slDLSSGSetOptions call. A stored OFF vetoes all evidence of frame generation (FrameGenerationActive), so it
+// must be true: the game's request counts once Streamline applied it, and after any other result nothing is known and UNKNOWN lets the
+// evidence decide. Never a stale OFF while frame generation runs, nor an ON that nothing applied.
+[[nodiscard]] constexpr FgMode StoredMode(FgMode requested, int result) {
+  return (result == SL_RESULT_OK || result == SL_RESULT_WARN_OUT_OF_VRAM) ? requested : FgMode::UNKNOWN;
+}
 
 [[nodiscard]] constexpr bool FrameGenerationActive(FgMode mode, bool detected) {
   return mode != FgMode::OFF && (mode == FgMode::ON || mode == FgMode::AUTO || detected);

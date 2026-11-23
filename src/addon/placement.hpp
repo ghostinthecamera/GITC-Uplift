@@ -45,9 +45,8 @@ struct StageProblems {
 // device: After DLSS resumes" ("Before upscaling resumes", "NR stays at Present", or "NR stays off (why)").
 inline constexpr std::string_view DLSS_OFF_LINE = "DLSS is off on this device (the game released its DLSS): NR runs at Present";
 [[nodiscard]] std::string DlssOnAgainLine(const PlacementChoice& resumed);
-// Minimum idle age independent of GraceSeconds: a zero grace must not classify the evaluate preceding every Present as idle.
-// The same minimum also debounces the game's release before DLSS counts as switched off.
-inline constexpr std::chrono::milliseconds DLSS_IDLE_MINIMUM{250};
+// The pause interval, defined once with the registry that also uses it (ngx_hooks/feature_registry.hpp).
+using ngx_hooks::DLSS_IDLE_MINIMUM;
 // The add-on's FrameFacts::dlss_released and SetupFacts::dlss_off: DLSS was seen on `device` and no DLSS feature of
 // `api` is live there now (FeatureRegistry::UpscalerLive): the game released it, or on Direct3D 11 shut NGX down (Uplift's NR there is on its private device,
 // so nothing waits on the game's NGX). Direct3D 12's and Vulkan's shutdowns never reach the registry: the core-shutdown hold and the native Vulkan context's stopped

@@ -54,6 +54,8 @@ FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::Controls
       .color_strength = settings.color_strength,
       .source = settings.source,
       .allow_cross_queue_passes = settings.allow_cross_queue_passes,
+      .hudless_use = (settings.ui_correction == ui::UiCorrection::ON ? HudlessUse::USE : HudlessUse::NEVER),
+      .hide_hudless = settings.hide_hudless,
       // Launchpad and Lumenite feed the presented image only: inside the game's frame either runs on DLSS's own vectors.
       .motion_vectors = (settings.motion_vectors == ui::MotionVectorSource::AUTO
                          || settings.motion_vectors == ui::MotionVectorSource::DLSS

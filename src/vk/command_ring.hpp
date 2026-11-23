@@ -39,6 +39,11 @@ class CommandRing {
   // The current slot's buffer, its pool reset and the buffer begun (one-time submit), in `*buffer`. A slot begun and never submitted is reset again by
   // the next Begin.
   Status Begin(VkCommandBuffer* buffer);
+  // HUD-less (design §4): the slot the next Begin uses; whether a slot's last submission finished; whether the next `count` slots are
+  // free. None of them waits.
+  [[nodiscard]] uint32_t Current() const { return current_; }
+  [[nodiscard]] bool SlotFree(uint32_t index) const;
+  [[nodiscard]] bool SlotsFree(uint32_t count) const;
   // Ends the begun buffer and submits it to `queue` (the effect queue, through the game's chain: ReShade's hook flushes its immediate list first) with the
   // slot's fence; the ring moves on. The failing call's VkResult otherwise (the slot stays free).
   VkResult Submit(VkQueue queue, std::span<const VkSemaphore> present_waits = {});

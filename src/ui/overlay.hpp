@@ -21,6 +21,8 @@ struct OverlayView {
   std::string status_line;
   std::array<nr::RecordedModel, MAX_PASSES> pass_models{};
   std::string details_backend, details_note;
+  bool hudless_on_card = false;  // the working card shows hudless_line too: NR changed what frame generation reads
+  std::string hudless_line;  // HUD-less (design §9): what DLSS-G's evaluate does with the game's HUD-less image; empty: nothing to say
   void AddBeforeFgNote(const text::BeforeFgMessage& note) {
     if (details_note.empty() && note.Severity() == text::BeforeFgSeverity::UNAVAILABLE) details_note = note.Text();
   }
